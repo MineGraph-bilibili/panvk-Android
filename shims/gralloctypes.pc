@@ -1,0 +1,5 @@
+Name: gralloctypes
+Description: gralloctypes
+Version: 1.15
+Libs: -lgralloctypes
+Cflags:

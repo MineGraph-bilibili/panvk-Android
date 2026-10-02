@@ -1,0 +1,5 @@
+Name: sync
+Description: sync
+Version: 1.15
+Libs: -lsync
+Cflags:

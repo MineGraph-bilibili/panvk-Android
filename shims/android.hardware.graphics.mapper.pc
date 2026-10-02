@@ -1,0 +1,5 @@
+Name: android.hardware.graphics.mapper
+Description: android.hardware.graphics.mapper
+Version: 4.0
+Libs: -landroid.hardware.graphics.mapper
+Cflags:

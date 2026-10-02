@@ -1,7 +1,9 @@
-*.o
+.cache
+.vscode*
+*.kdev4
+*.pyc
+*.pyo
 *.out
-*.exe
-test_gpu_write
-test_gpu_copy_v2
-test_backend
-test_lib
+/build
+.venv/
+*.mda.tar

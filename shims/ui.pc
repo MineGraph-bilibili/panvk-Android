@@ -1,0 +1,5 @@
+Name: ui
+Description: ui
+Version: 1.15
+Libs: -lui
+Cflags:

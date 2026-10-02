@@ -1,0 +1,5 @@
+Name: hardware
+Description: hardware
+Version: 1.15
+Libs: -lhardware
+Cflags:

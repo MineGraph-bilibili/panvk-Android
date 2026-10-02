@@ -1,0 +1,5 @@
+Name: cutils
+Description: cutils
+Version: 1.15
+Libs: -lcutils
+Cflags:

@@ -1,0 +1,5 @@
+Name: nativewindow
+Description: nativewindow
+Version: 1.15
+Libs: -lnativewindow
+Cflags:
