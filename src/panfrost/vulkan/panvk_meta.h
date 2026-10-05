@@ -22,6 +22,8 @@ enum panvk_meta_object_key_type {
    PANVK_META_OBJECT_KEY_FB_ZS_PRELOAD_SHADER,
    PANVK_META_OBJECT_KEY_FB_COLOR_PRELOAD_SHADER,
    PANVK_META_OBJECT_KEY_FB_RESOLVE_SHADER,
+   PANVK_META_OBJECT_KEY_BC_DECODE_LAYOUT,
+   PANVK_META_OBJECT_KEY_BC_DECODE_SHADER,
 };
 
 static inline VkFormat
@@ -189,4 +191,9 @@ VkResult panvk_per_arch(meta_get_copy_desc_job)(
    const struct panvk_shader_desc_state *shader_desc_state,
    uint32_t attrib_buf_idx_offset, struct pan_ptr *job_desc);
 #endif
+
+struct panvk_cmd_buffer;
+
+void panvk_per_arch(cmd_bc_decode_zero_initialized)(
+   struct panvk_cmd_buffer *cmdbuf, const VkDependencyInfo *dep_info);
 #endif

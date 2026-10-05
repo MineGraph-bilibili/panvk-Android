@@ -1110,38 +1110,31 @@ kbase_create_group(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    VkResult result;
-   uint32_t vt_group = UINT32_MAX, frag_group = UINT32_MAX,
-            compute_group = UINT32_MAX;
 
    queue->group_handle = UINT32_MAX;
 
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
       queue->subqueues[i].kbase.group_handle = UINT32_MAX;
 
-   /* Three CSGs, one per subqueue (VT / FRAG / COMPUTE) -- the beta.9
-    * topology.  Gives each subqueue its own scheduler domain; GPU
-    * parallelism itself is unchanged (CSIs run concurrently regardless of
-    * grouping), so the win is scheduling isolation, not added
-    * parallelism.  The user-space seqno protocol (uncached-cell poll) is
-    * scope-free, so cross-CSG dependencies need no firmware involvement. */
-   if (kbase_kmod_csf_group_create(dev->kmod.dev, 1, &vt_group)) {
+   /* Single merged CSG carrying all CSIs (VT/FRAG/COMPUTE = CSI 0/1/2).
+    * The stock per-subqueue topology (one CSG each, the "beta.9" layout)
+    * deadlocks the MT6985 kbase firmware under heavy DX12-class load: the
+    * groups bind but stream progress never advances, every subqueue times
+    * out with stream progress 0x0 and no error flag (observed 2026-10-05,
+    * G720/v10, winlator + vkd3d-proton).  The merged layout keeps the whole
+    * dependency graph intra-CSG and is the only topology verified to run
+    * DX12 on this firmware.  The sync path already emits plain stores with
+    * CSG scope, matching this layout. */
+   if (kbase_kmod_csf_group_create(dev->kmod.dev, PANVK_SUBQUEUE_COUNT,
+                                   &queue->group_handle)) {
       result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
-                            "Failed to create a kbase VT queue group");
+                            "Failed to create the kbase queue group");
       goto err_destroy_group;
    }
-   queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.group_handle = vt_group;
-   if (kbase_kmod_csf_group_create(dev->kmod.dev, 1, &frag_group)) {
-      result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
-                            "Failed to create a kbase fragment queue group");
-      goto err_destroy_group;
-   }
-   queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.group_handle = frag_group;
-   if (kbase_kmod_csf_group_create(dev->kmod.dev, 1, &compute_group)) {
-      result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
-                            "Failed to create a kbase compute queue group");
-      goto err_destroy_group;
-   }
-   queue->subqueues[PANVK_SUBQUEUE_COMPUTE].kbase.group_handle = compute_group;
+   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
+      queue->subqueues[i].kbase.group_handle = queue->group_handle;
+   mesa_logi("kbase: single merged CSG %u carrying %u CSIs",
+             queue->group_handle, PANVK_SUBQUEUE_COUNT);
 
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
       struct panvk_subqueue *subq = &queue->subqueues[i];
@@ -1193,7 +1186,7 @@ kbase_create_group(struct panvk_gpu_queue *queue)
       }
 
       subq->kbase.user_io = kbase_kmod_csf_queue_bind(
-         dev->kmod.dev, subq->kbase.group_handle, 0,
+         dev->kmod.dev, subq->kbase.group_handle, i,
          subq->kbase.ringbuf_dev,
          KBASE_RINGBUF_SIZE);
       if (!subq->kbase.user_io) {
@@ -1204,9 +1197,9 @@ kbase_create_group(struct panvk_gpu_queue *queue)
 
       subq->kbase.insert = 0;
       subq->kbase.emitted_jobs = 0;
-      mesa_logd("kbase: bound subqueue %u to group %u CSI0, ring CPU %p, "
+      mesa_logd("kbase: bound subqueue %u to group %u CSI%u, ring CPU %p, "
                 "ring VA 0x%" PRIx64 ", user_io %p",
-                i, subq->kbase.group_handle, subq->kbase.ringbuf_cpu,
+                i, subq->kbase.group_handle, i, subq->kbase.ringbuf_cpu,
                 subq->kbase.ringbuf_dev,
                 subq->kbase.user_io);
    }
@@ -2335,6 +2328,10 @@ kbase_try_destroy_retired_heaps(struct panvk_gpu_queue *queue)
 
    simple_mtx_unlock(&queue->kbase_retired_heaps_lock);
 
+   if (freed)
+      mesa_logd("kbase: reclaimed %u retired tiler heap generation(s), %u pending",
+                freed, queue->kbase_retired_heaps.count);
+
    return freed;
 }
 
@@ -2909,6 +2906,21 @@ kbase_wait_sync_targets(
       if (result != VK_SUCCESS)
          return result;
    }
+
+   /* Fence-wait reclaim: this callback runs on app wait threads (fences,
+    * semaphores, present) and on force-sync submits, so a successful wait
+    * proves the waited entries retired -- which is exactly the per-entry
+    * destroy gate of every generation retired before those entries.  Attempt
+    * the reclaim here instead of leaving retired generations pinned until
+    * the next heap rotation (up to a full renewal interval of submits
+    * later): each idle generation keeps its grown chunks resident, so
+    * rotation-only reclaim nearly doubles steady-state heap RAM.  The guard
+    * keeps the empty-ring case to a single relaxed load (benign race: the
+    * worst outcome is one skipped attempt, retried by the next wait); the
+    * lock inside serializes with the submit thread and concurrent
+    * reclaims. */
+   if (queue->kbase_retired_heaps.count)
+      kbase_try_destroy_retired_heaps(queue);
 
    return VK_SUCCESS;
 }

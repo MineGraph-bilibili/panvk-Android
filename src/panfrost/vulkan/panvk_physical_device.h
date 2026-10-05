@@ -132,6 +132,9 @@ void panvk_kbase_sync_set_pending(
    struct vk_sync *sync, void *data, panvk_kbase_sync_wait_func wait,
    panvk_kbase_sync_export_func export_sync_file,
    const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT]);
+
+bool panvk_kbase_sync_peek(struct vk_sync *sync, void **data,
+                           uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT]);
 #endif
 
 void panvk_physical_device_finish(struct panvk_physical_device *device);
@@ -147,6 +150,8 @@ panvk_get_max_resource_size(const struct panvk_physical_device *device);
 
 VkDeviceSize
 panvk_get_max_buffer_size(const struct panvk_physical_device *device);
+
+bool panvk_bc_emul_enabled(const struct panvk_physical_device *device);
 
 #ifdef PAN_ARCH
 void panvk_per_arch(get_physical_device_extensions)(

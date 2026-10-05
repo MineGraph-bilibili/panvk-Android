@@ -70,6 +70,11 @@ panvk_per_arch(CreateQueryPool)(VkDevice _device,
       reports_per_query = 1;
       break;
    }
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
+      /* Report 0: primitivesWritten, report 1: primitivesGenerated. */
+      reports_per_query = 2;
+      break;
+   }
 #endif
    default:
       UNREACHABLE("Unsupported query type");
@@ -283,6 +288,13 @@ panvk_per_arch(GetQueryPoolResults)(VkDevice _device, VkQueryPool queryPool,
                cpu_write_query_result(dst, 0, flags, src[0].value);
             break;
          }
+         case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
+            if (write_results) {
+               cpu_write_query_result(dst, 0, flags, src[0].value);
+               cpu_write_query_result(dst, 1, flags, src[1].value);
+            }
+            break;
+         }
 #endif
          default:
             UNREACHABLE("Unsupported query type");
@@ -292,8 +304,14 @@ panvk_per_arch(GetQueryPoolResults)(VkDevice _device, VkQueryPool queryPool,
       if (!write_results)
          status = VK_NOT_READY;
 
-      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
-         cpu_write_query_result(dst, 1, flags, available);
+      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) {
+         /* Transform feedback stream queries report two values, the
+          * availability slot follows them. */
+         uint32_t avail_idx =
+            pool->vk.query_type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT
+               ? 2 : 1;
+         cpu_write_query_result(dst, avail_idx, flags, available);
+      }
    }
 
    return status;

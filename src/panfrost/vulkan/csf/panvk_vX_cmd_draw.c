@@ -4126,26 +4126,38 @@ update_prims_generated_query(struct panvk_cmd_buffer *cmdbuf,
    struct panvk_prims_generated_query_state *state =
       &cmdbuf->state.gfx.prims_generated_query;
 
-   if (!state->ptr)
+   /* Collect the counters to update.  The transform feedback stream query
+    * only counts draws made while transform feedback is active, and
+    * multiview is invalid with transform feedback, so its view multiplier
+    * is 1. */
+   struct {
+      uint64_t ptr;
+      uint32_t view_count;
+   } counters[2];
+   uint32_t num_counters = 0;
+
+   if (state->ptr) {
+      counters[num_counters].ptr = state->ptr;
+      counters[num_counters].view_count =
+         cmdbuf->state.gfx.render.view_mask ?
+         util_bitcount(cmdbuf->state.gfx.render.view_mask) : 1;
+      num_counters++;
+   }
+
+   if (cmdbuf->state.gfx.xfb_stream_query.ptr &&
+       cmdbuf->state.gfx.xfb.enabled) {
+      counters[num_counters].ptr = cmdbuf->state.gfx.xfb_stream_query.ptr;
+      counters[num_counters].view_count = 1;
+      num_counters++;
+   }
+
+   if (!num_counters)
       return;
 
    assert(!draw->index.index_size || !ia->primitive_restart_enable);
 
-   uint32_t view_count = cmdbuf->state.gfx.render.view_mask ?
-      util_bitcount(cmdbuf->state.gfx.render.view_mask) : 1;
-
    if (draw->index.index_size && ia->primitive_restart_enable) {
       struct panvk_precomp_ctx precomp_ctx = panvk_per_arch(precomp_cs)(cmdbuf);
-
-      struct panlib_update_prims_generated_query_restart_args args = {
-         .prims_generated = state->ptr,
-         .index_buffer = cmdbuf->state.gfx.ib.dev_addr,
-         .index_buffer_size_el = cmdbuf->state.gfx.ib.size /
-                                 draw->index.index_size,
-         .cmd_stride = draw->indirect.stride,
-         .cmd = draw->indirect.buffer_dev_addr,
-         .view_count = view_count,
-      };
 
       struct panlib_precomp_grid grid;
       if (draw->indirect.count_buffer_dev_addr) {
@@ -4169,44 +4181,61 @@ update_prims_generated_query(struct panvk_cmd_buffer *cmdbuf,
          grid = panlib_1d(draw->indirect.draw_count);
       }
 
-      /* We need to WAIT in order to avoid overlapping the (non-atomic) direct
-       * draw counter updates with indirect draws. TODO: we could avoid that
-       * by having separate direct/indirect counters and adding them on read */
-      panlib_update_prims_generated_query_restart_struct(
-         &precomp_ctx, grid, PANLIB_BARRIER_CSF_WAIT, args,
-         poly_compact_prim(cmdbuf->state.gfx.idvs.prim),
-         util_logbase2(draw->index.index_size));
+      for (uint32_t i = 0; i < num_counters; i++) {
+         struct panlib_update_prims_generated_query_restart_args args = {
+            .prims_generated = counters[i].ptr,
+            .index_buffer = cmdbuf->state.gfx.ib.dev_addr,
+            .index_buffer_size_el = cmdbuf->state.gfx.ib.size /
+                                    draw->index.index_size,
+            .cmd_stride = draw->indirect.stride,
+            .cmd = draw->indirect.buffer_dev_addr,
+            .view_count = counters[i].view_count,
+         };
+
+         /* We need to WAIT in order to avoid overlapping the (non-atomic) direct
+          * draw counter updates with indirect draws. TODO: we could avoid that
+          * by having separate direct/indirect counters and adding them on read */
+         panlib_update_prims_generated_query_restart_struct(
+            &precomp_ctx, grid, PANLIB_BARRIER_CSF_WAIT, args,
+            poly_compact_prim(cmdbuf->state.gfx.idvs.prim),
+            util_logbase2(draw->index.index_size));
+      }
    } else if (draw->indirect.buffer_dev_addr) {
       struct panvk_precomp_ctx precomp_ctx = panvk_per_arch(precomp_cs)(cmdbuf);
 
-      struct panlib_update_prims_generated_query_indirect_args args = {
-         .prims_generated = state->ptr,
-         .draw_count_buffer = draw->indirect.count_buffer_dev_addr,
-         .max_draw_count = draw->indirect.draw_count,
-         .cmd_stride = draw->indirect.stride,
-         .cmd = draw->indirect.buffer_dev_addr,
-         .view_count = view_count,
-      };
+      for (uint32_t i = 0; i < num_counters; i++) {
+         struct panlib_update_prims_generated_query_indirect_args args = {
+            .prims_generated = counters[i].ptr,
+            .draw_count_buffer = draw->indirect.count_buffer_dev_addr,
+            .max_draw_count = draw->indirect.draw_count,
+            .cmd_stride = draw->indirect.stride,
+            .cmd = draw->indirect.buffer_dev_addr,
+            .view_count = counters[i].view_count,
+         };
 
-      /* We need to WAIT in order to avoid overlapping the (non-atomic) direct
-       * draw counter updates with indirect draws. TODO: we could avoid that
-       * by having separate direct/indirect counters and adding them on read */
-      panlib_update_prims_generated_query_indirect_struct(
-         &precomp_ctx, panlib_1d(1), PANLIB_BARRIER_CSF_WAIT, args,
-         poly_compact_prim(cmdbuf->state.gfx.idvs.prim));
+         /* We need to WAIT in order to avoid overlapping the (non-atomic) direct
+          * draw counter updates with indirect draws. TODO: we could avoid that
+          * by having separate direct/indirect counters and adding them on read */
+         panlib_update_prims_generated_query_indirect_struct(
+            &precomp_ctx, panlib_1d(1), PANLIB_BARRIER_CSF_WAIT, args,
+            poly_compact_prim(cmdbuf->state.gfx.idvs.prim));
+      }
    } else {
-      uint32_t prims_per_instance = u_decomposed_prims_for_vertices(
-         cmdbuf->state.gfx.idvs.prim, draw->vertex.count);
-      uint32_t prims_generated =
-         prims_per_instance * draw->instance.count * view_count;
-
       struct cs_index addr = cs_scratch_reg64(b, 0);
       struct cs_index value = cs_scratch_reg32(b, 2);
 
-      cs_move64_to(b, addr, state->ptr);
-      cs_load32_to(b, value, addr, 0);
-      cs_add_imm32(b, value, value, prims_generated);
-      cs_store32(b, value, addr, 0);
+      for (uint32_t i = 0; i < num_counters; i++) {
+         uint32_t prims_per_instance = u_decomposed_prims_for_vertices(
+            cmdbuf->state.gfx.idvs.prim, draw->vertex.count);
+         uint32_t prims_generated =
+            prims_per_instance * draw->instance.count *
+            counters[i].view_count;
+
+         cs_move64_to(b, addr, counters[i].ptr);
+         cs_load32_to(b, value, addr, 0);
+         cs_add_imm32(b, value, value, prims_generated);
+         cs_store32(b, value, addr, 0);
+      }
       cs_flush_stores(b);
    }
 }
@@ -5001,6 +5030,13 @@ launch_draw(struct panvk_cmd_buffer *cmdbuf,
 
    panvk_cond_render(cmdbuf, b)
    {
+      struct cs_index draw_id = cs_undef();
+
+      if (draw->indirect.record_index) {
+         draw_id = cs_scratch_reg32(b, 5);
+         cs_move32_to(b, draw_id, draw->indirect.record_index);
+      }
+
       if (idvs_count > 1) {
          struct cs_index counter_reg = cs_scratch_reg32(b, 17);
          struct cs_index tiler_ctx_addr = cs_sr_reg64(b, IDVS, TILER_CTX);
@@ -5010,13 +5046,13 @@ launch_draw(struct panvk_cmd_buffer *cmdbuf,
          cs_while(b, MALI_CS_CONDITION_GREATER, counter_reg) {
 #if PAN_ARCH >= 12
             cs_trace_run_idvs2(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
-                               flags_override.opaque[0], true, cs_undef(),
+                               flags_override.opaque[0], true, draw_id,
                                MALI_IDVS_SHADING_MODE_EARLY);
 #else
             cs_trace_run_idvs(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
                               flags_override.opaque[0], true,
                               cs_shader_res_sel(0, 0, 1, 0),
-                              cs_shader_res_sel(2, 2, 2, 0), cs_undef());
+                              cs_shader_res_sel(2, 2, 2, 0), draw_id);
 #endif
 
             cs_add_imm32(b, counter_reg, counter_reg, -1);
@@ -5033,13 +5069,13 @@ launch_draw(struct panvk_cmd_buffer *cmdbuf,
       } else {
 #if PAN_ARCH >= 12
          cs_trace_run_idvs2(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
-                            flags_override.opaque[0], true, cs_undef(),
+                            flags_override.opaque[0], true, draw_id,
                             MALI_IDVS_SHADING_MODE_EARLY);
 #else
          cs_trace_run_idvs(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
                            flags_override.opaque[0], true,
                            cs_shader_res_sel(0, 0, 1, 0),
-                           cs_shader_res_sel(2, 2, 2, 0), cs_undef());
+                           cs_shader_res_sel(2, 2, 2, 0), draw_id);
 #endif
       }
    }
@@ -5748,15 +5784,37 @@ panvk_per_arch(CmdDrawMultiEXT)(VkCommandBuffer commandBuffer,
                                 uint32_t instanceCount,
                                 uint32_t firstInstance, uint32_t stride)
 {
-   /* EXT_multi_draw is purely a dispatch helper: emit the draws one by one.
-    * Per spec, stride is ignored when drawCount <= 1.
-    */
-   for (uint32_t i = 0; i < drawCount; i++) {
-      const VkMultiDrawInfoEXT *draw =
-         (const void *)((const uint8_t *)pVertexInfo + (size_t)i * stride);
+   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
 
-      panvk_per_arch(CmdDraw)(commandBuffer, draw->vertexCount, instanceCount,
-                              draw->firstVertex, firstInstance);
+   /* EXT_multi_draw is mostly a dispatch helper: emit the draws one by one,
+    * passing the draw index as gl_DrawID. Per spec, stride is ignored when
+    * drawCount <= 1.
+    */
+   if (instanceCount == 0 || drawCount == 0)
+      return;
+
+   assert(firstInstance < INT32_MAX);
+
+   const uint8_t *cursor = (const uint8_t *)pVertexInfo;
+   for (uint32_t i = 0; i < drawCount; i++) {
+      const VkMultiDrawInfoEXT *info = (const VkMultiDrawInfoEXT *)cursor;
+
+      if (info->vertexCount != 0) {
+         assert(info->firstVertex < INT32_MAX);
+
+         struct panvk_draw_info draw = {
+            .vertex.base = info->firstVertex,
+            .vertex.count = info->vertexCount,
+            .instance.base = firstInstance,
+            .instance.count = instanceCount,
+            .indirect.record_index = i,
+            .prim = panvk_get_client_prim(cmdbuf),
+         };
+
+         panvk_cmd_draw(cmdbuf, draw);
+      }
+
+      cursor += stride;
    }
 }
 
@@ -5768,15 +5826,36 @@ panvk_per_arch(CmdDrawMultiIndexedEXT)(VkCommandBuffer commandBuffer,
                                        uint32_t firstInstance, uint32_t stride,
                                        const int32_t *pVertexOffset)
 {
-   for (uint32_t i = 0; i < drawCount; i++) {
-      const VkMultiDrawIndexedInfoEXT *draw =
-         (const void *)((const uint8_t *)pIndexInfo + (size_t)i * stride);
-      int32_t vertex_offset =
-         pVertexOffset ? pVertexOffset[i] : draw->vertexOffset;
+   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
 
-      panvk_per_arch(CmdDrawIndexed)(commandBuffer, draw->indexCount,
-                                     instanceCount, draw->firstIndex,
-                                     vertex_offset, firstInstance);
+   if (instanceCount == 0 || drawCount == 0)
+      return;
+
+   assert(firstInstance < INT32_MAX);
+
+   const uint8_t *cursor = (const uint8_t *)pIndexInfo;
+   for (uint32_t i = 0; i < drawCount; i++) {
+      const VkMultiDrawIndexedInfoEXT *info =
+         (const VkMultiDrawIndexedInfoEXT *)cursor;
+
+      if (info->indexCount != 0) {
+         int32_t vertex_offset =
+            pVertexOffset ? pVertexOffset[i] : info->vertexOffset;
+
+         struct panvk_draw_info draw = {
+            .index = panvk_draw_info_index(cmdbuf, info->firstIndex),
+            .vertex.base = vertex_offset,
+            .vertex.count = info->indexCount,
+            .instance.count = instanceCount,
+            .instance.base = firstInstance,
+            .indirect.record_index = i,
+            .prim = panvk_get_client_prim(cmdbuf),
+         };
+
+         panvk_cmd_draw(cmdbuf, draw);
+      }
+
+      cursor += stride;
    }
 }
 

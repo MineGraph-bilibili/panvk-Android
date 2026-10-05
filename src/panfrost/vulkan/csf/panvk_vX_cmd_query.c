@@ -35,6 +35,7 @@ panvk_subqueue_for_query_type(VkQueryType type)
    case VK_QUERY_TYPE_OCCLUSION:
       return PANVK_SUBQUEUE_FRAGMENT;
    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT:
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
       return PANVK_SUBQUEUE_COMPUTE;
    default:
       UNREACHABLE("Unsupported query type");
@@ -660,6 +661,63 @@ panvk_copy_timestamp_query_results(struct panvk_cmd_buffer *cmd,
 }
 
 static void
+panvk_copy_xfb_stream_query_results(struct panvk_cmd_buffer *cmd,
+                                    struct panvk_query_pool *pool,
+                                    uint32_t first_query,
+                                    uint32_t query_count,
+                                    uint64_t dst_buffer_addr,
+                                    VkDeviceSize stride,
+                                    VkQueryResultFlags flags)
+{
+   /* Two reports per query: 0 = primitivesWritten, 1 = primitivesGenerated.
+    * The result layout is [written, generated, (availability)]. */
+   struct cs_builder *b = panvk_get_cs_builder(cmd, PANVK_SUBQUEUE_COMPUTE);
+
+   if (flags & VK_QUERY_RESULT_WAIT_BIT)
+      cs_wait_slot(b, SB_ID(DEFERRED_SYNC));
+
+   struct cs_index src = cs_scratch_reg64(b, 16);
+   struct cs_index dst = cs_scratch_reg64(b, 14);
+   struct cs_index avail_addr = cs_scratch_reg64(b, 12);
+   struct cs_index written = cs_scratch_reg_tuple(b, 0, 2);
+   struct cs_index generated = cs_scratch_reg_tuple(b, 2, 2);
+   struct cs_index avail_val = cs_scratch_reg32(b, 4);
+   struct cs_index count = cs_scratch_reg32(b, 5);
+
+   cs_move64_to(b, src, panvk_query_report_dev_addr(pool, first_query));
+   cs_move64_to(b, dst, dst_buffer_addr);
+   cs_move64_to(b, avail_addr,
+                panvk_query_available_dev_addr(pool, first_query));
+   cs_move32_to(b, count, query_count);
+
+   const uint32_t res_size = (flags & VK_QUERY_RESULT_64_BIT) ? 2 : 1;
+
+   cs_while(b, MALI_CS_CONDITION_GREATER, count) {
+      cs_load_to(b, written, src, BITFIELD_MASK(written.size), 0);
+      cs_load_to(b, generated, src, BITFIELD_MASK(generated.size),
+                 sizeof(struct panvk_query_report));
+      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+         cs_load32_to(b, avail_val, avail_addr, 0);
+
+      cs_store(b, cs_reg_tuple(b, written.reg, res_size), dst,
+               BITFIELD_MASK(res_size), 0);
+      cs_store(b, cs_reg_tuple(b, generated.reg, res_size), dst,
+               BITFIELD_MASK(res_size), res_size * sizeof(uint32_t));
+      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) {
+         cs_store(b, cs_reg_tuple(b, avail_val.reg, 1), dst, BITFIELD_MASK(1),
+                  2 * res_size * sizeof(uint32_t));
+      }
+      cs_flush_stores(b);
+
+      cs_add_imm64(b, src, src, pool->query_stride);
+      cs_add_imm64(b, dst, dst, stride);
+      cs_add_imm64(b, avail_addr, avail_addr,
+                   sizeof(struct panvk_query_available_obj));
+      cs_add_imm32(b, count, count, -1);
+   }
+}
+
+static void
 panvk_cmd_begin_prims_generated_query(
    struct panvk_cmd_buffer *cmd, struct panvk_query_pool *pool, uint32_t query,
    VkQueryControlFlags flags)
@@ -717,6 +775,59 @@ panvk_cmd_end_prims_generated_query(
                  cs_defer(SB_MASK(DEFERRED_FLUSH), SB_ID(DEFERRED_SYNC)));
 }
 
+static void
+panvk_cmd_begin_xfb_stream_query(struct panvk_cmd_buffer *cmd,
+                                 struct panvk_query_pool *pool,
+                                 uint32_t query)
+{
+   uint64_t report_addr = panvk_query_report_dev_addr(pool, query);
+
+   /* Stream 0 only, geometryStreams is false. */
+   assert(pool->vk.query_type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT);
+
+   cmd->state.gfx.xfb_stream_query.ptr = report_addr;
+   cmd->state.gfx.xfb_stream_query.syncobj =
+      panvk_query_available_dev_addr(pool, query);
+
+   struct cs_builder *b = panvk_get_cs_builder(cmd, PANVK_SUBQUEUE_COMPUTE);
+
+   struct cs_index report_addr_gpu = cs_scratch_reg64(b, 0);
+   struct cs_index clear_value = cs_scratch_reg64(b, 2);
+   cs_move64_to(b, report_addr_gpu, report_addr);
+   cs_move64_to(b, clear_value, 0);
+   /* Report 0: primitivesWritten, report 1: primitivesGenerated. */
+   cs_store64(b, clear_value, report_addr_gpu, 0);
+   cs_store64(b, clear_value, report_addr_gpu,
+              sizeof(struct panvk_query_report));
+   cs_flush_stores(b);
+}
+
+static void
+panvk_cmd_end_xfb_stream_query(struct panvk_cmd_buffer *cmd,
+                               struct panvk_query_pool *pool, uint32_t query)
+{
+   cmd->state.gfx.xfb_stream_query.ptr = 0;
+   cmd->state.gfx.xfb_stream_query.syncobj = 0;
+
+   struct cs_builder *b = panvk_get_cs_builder(cmd, PANVK_SUBQUEUE_COMPUTE);
+   struct cs_index query_syncobj = cs_scratch_reg64(b, 0);
+   struct cs_index val = cs_scratch_reg32(b, 2);
+
+   /* The per-draw counters accumulate into the report on cached memory.
+    * Wait for the accumulation and flush the caches. */
+   cs_move32_to(b, val, 0);
+   cs_flush_caches(
+      b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_CLEAN,
+      MALI_CS_OTHER_FLUSH_MODE_NONE, val,
+      cs_defer(SB_IMM_MASK, SB_ID(DEFERRED_FLUSH)));
+
+   /* Signal the query syncobj after the flush is effective. */
+   cs_move32_to(b, val, 1);
+   cs_move64_to(b, query_syncobj, panvk_query_available_dev_addr(pool, query));
+   cs_sync32_set(b, true, MALI_CS_SYNC_SCOPE_CSG, val, query_syncobj,
+                 cs_defer(SB_MASK(DEFERRED_FLUSH), SB_ID(DEFERRED_SYNC)));
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdResetQueryPool)(VkCommandBuffer commandBuffer,
                                   VkQueryPool queryPool, uint32_t firstQuery,
@@ -732,6 +843,11 @@ panvk_per_arch(CmdResetQueryPool)(VkCommandBuffer commandBuffer,
    case VK_QUERY_TYPE_OCCLUSION:
    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT: {
       panvk_cmd_reset_queries(cmd, pool, firstQuery, queryCount);
+      break;
+   }
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
+      /* Two reports per query, pass the total report count. */
+      panvk_cmd_reset_queries(cmd, pool, firstQuery, queryCount * 2);
       break;
    }
    case VK_QUERY_TYPE_TIMESTAMP: {
@@ -764,6 +880,10 @@ panvk_per_arch(CmdBeginQueryIndexedEXT)(VkCommandBuffer commandBuffer,
       panvk_cmd_begin_prims_generated_query(cmd, pool, query, flags);
       break;
    }
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
+      panvk_cmd_begin_xfb_stream_query(cmd, pool, query);
+      break;
+   }
    default:
       UNREACHABLE("Unsupported query type");
    }
@@ -787,6 +907,10 @@ panvk_per_arch(CmdEndQueryIndexedEXT)(VkCommandBuffer commandBuffer,
    }
    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT: {
       panvk_cmd_end_prims_generated_query(cmd, pool, query);
+      break;
+   }
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
+      panvk_cmd_end_xfb_stream_query(cmd, pool, query);
       break;
    }
    default:
@@ -822,6 +946,11 @@ panvk_per_arch(CmdCopyQueryPoolResults)(
    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT: {
       panvk_copy_query_results(cmd, pool, firstQuery, queryCount,
                                dst_buffer_addr, stride, flags);
+      break;
+   }
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
+      panvk_copy_xfb_stream_query_results(cmd, pool, firstQuery, queryCount,
+                                          dst_buffer_addr, stride, flags);
       break;
    }
 #if PAN_ARCH >= 10

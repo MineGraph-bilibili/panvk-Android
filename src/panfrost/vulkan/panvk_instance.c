@@ -57,6 +57,10 @@ static const struct debug_control panvk_debug_options[] = {
    {"no_extended_va_range", PANVK_DEBUG_NO_EXTENDED_VA_RANGE},
    {"hsr_prepass", PANVK_DEBUG_HSR_PREPASS},
    {"kbase_diag", PANVK_DEBUG_KBASE_DIAG},
+   {"no_bc_emul", PANVK_DEBUG_NO_BC_EMUL},
+   {"no_bc_eager", PANVK_DEBUG_NO_BC_EAGER},
+   {"no_bc_zeroinit", PANVK_DEBUG_NO_BC_ZEROINIT},
+   {"bc_trace", PANVK_DEBUG_BC_TRACE},
    {NULL, 0},
 };
 

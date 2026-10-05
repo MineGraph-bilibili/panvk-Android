@@ -164,6 +164,8 @@ struct panvk_cmd_graphics_state {
    struct panvk_occlusion_query_state occlusion_query;
 #if PAN_ARCH >= 10
    struct panvk_prims_generated_query_state prims_generated_query;
+   /* Active VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT query (stream 0). */
+   struct panvk_prims_generated_query_state xfb_stream_query;
 #endif
    struct panvk_graphics_sysvals sysvals;
 

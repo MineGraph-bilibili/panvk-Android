@@ -35,6 +35,10 @@ enum panvk_debug_flags {
    PANVK_DEBUG_NO_EXTENDED_VA_RANGE = 1 << 17,
    PANVK_DEBUG_HSR_PREPASS = 1 << 18,
    PANVK_DEBUG_KBASE_DIAG = 1 << 19,
+   PANVK_DEBUG_NO_BC_EMUL = 1 << 20,
+   PANVK_DEBUG_NO_BC_EAGER = 1 << 21,
+   PANVK_DEBUG_NO_BC_ZEROINIT = 1 << 22,
+   PANVK_DEBUG_BC_TRACE = 1 << 23,
 };
 
 extern uint64_t panvk_debug;

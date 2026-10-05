@@ -342,7 +342,8 @@ panvk_per_arch(get_physical_device_features)(
       .samplerAnisotropy = true,
       .textureCompressionETC2 = has_texture_compression_etc2(device),
       .textureCompressionASTC_LDR = has_texture_compression_astc_ldr(device),
-      .textureCompressionBC = has_texture_compression_bc(device),
+      .textureCompressionBC = has_texture_compression_bc(device) ||
+                              panvk_bc_emul_enabled(device),
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = false,
       /* On v13+, the hardware isn't speculatively referencing to invalid
@@ -362,8 +363,8 @@ panvk_per_arch(get_physical_device_features)(
       .shaderSampledImageArrayDynamicIndexing = true,
       .shaderStorageBufferArrayDynamicIndexing = true,
       .shaderStorageImageArrayDynamicIndexing = true,
-      .shaderClipDistance = false,
-      .shaderCullDistance = false,
+      .shaderClipDistance = PAN_ARCH >= 10,
+      .shaderCullDistance = PAN_ARCH >= 10,
       .shaderFloat64 = false,
       .shaderInt64 = true,
       .shaderInt16 = true,
@@ -600,6 +601,8 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_EXT_transform_feedback */
       .transformFeedback = PAN_ARCH >= 10,
       .geometryStreams = false,
+      /* Note: transformFeedbackQueries is a property, not a feature; it is
+       * set in the properties section below. */
 
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,
@@ -647,7 +650,11 @@ panvk_per_arch(get_physical_device_features)(
 
       /* VK_KHR_robustness2 */
       .robustBufferAccess2 = PAN_ARCH >= 11,
-      .robustImageAccess2 = false,
+      /* OOB image accesses are bounded by the texture unit against the
+       * surface descriptor dimensions: loads return zero and stores are
+       * dropped, which matches the robustImageAccess2 semantics.  Vulkan 1.3
+       * core robustImageAccess is already reported true on that basis. */
+      .robustImageAccess2 = PAN_ARCH >= 10,
       .nullDescriptor = PAN_ARCH >= 10,
 
       /* VK_EXT_shader_tile_image */
@@ -1026,9 +1033,9 @@ panvk_per_arch(get_physical_device_properties)(
          PAN_ARCH >= 10 && device->kmod.dev->props.gpu_can_query_timestamp,
       .timestampPeriod =
          PAN_ARCH >= 10 ? panvk_get_gpu_system_timestamp_period(device) : 0,
-      .maxClipDistances = 0,
-      .maxCullDistances = 0,
-      .maxCombinedClipAndCullDistances = 0,
+      .maxClipDistances = PAN_ARCH >= 10 ? 8 : 0,
+      .maxCullDistances = PAN_ARCH >= 10 ? 8 : 0,
+      .maxCombinedClipAndCullDistances = PAN_ARCH >= 10 ? 8 : 0,
       .discreteQueuePriorities = 2,
       .pointSizeRange = {pointSizeRangeMin, pointSizeRangeMax},
       .lineWidthRange = {0.0, 7.9921875},
@@ -1321,7 +1328,7 @@ panvk_per_arch(get_physical_device_properties)(
       .maxTransformFeedbackStreamDataSize = 2048,
       .maxTransformFeedbackBufferDataSize = 512,
       .maxTransformFeedbackBufferDataStride = 2048,
-      .transformFeedbackQueries = false,
+      .transformFeedbackQueries = PAN_ARCH >= 10,
       .transformFeedbackStreamsLinesTriangles = false,
       .transformFeedbackRasterizationStreamSelect = false,
       .transformFeedbackDraw = false,
@@ -1355,7 +1362,8 @@ panvk_per_arch(get_physical_device_properties)(
 
    snprintf(properties->deviceName, sizeof(properties->deviceName), "%s",
             (strlen(instance->drirc.debug.force_vk_devicename) > 0) ?
-            instance->drirc.debug.force_vk_devicename : device->name);
+            instance->drirc.debug.force_vk_devicename
+            : "Mesa 26.3.0 panvk (MineGraph)");
 
    memcpy(properties->pipelineCacheUUID, device->cache_uuid, VK_UUID_SIZE);
    memcpy(properties->shaderBinaryUUID, device->cache_uuid, VK_UUID_SIZE);
