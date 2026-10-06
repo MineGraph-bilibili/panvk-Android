@@ -34,11 +34,15 @@
 #include "genxml/decode.h"
 #include "genxml/gen_macros.h"
 
+#include <errno.h>
+#include <string.h>
+
 #ifdef HAVE_PAN_KMOD_KBASE
 #include <fcntl.h>
 #endif
 
 #include "kmod/pan_kmod.h"
+#include "util/log.h"
 #include "util/os_file.h"
 #include "util/u_printf.h"
 #include "pan_props.h"
@@ -449,8 +453,12 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
    result = vk_device_init(&device->vk, &physical_device->vk, &dispatch_table,
                            pCreateInfo, pAllocator);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: vk_device_init failed: %s (%d)",
+                vk_Result_to_str(result), (int)result);
       goto err_free_dev;
+   }
 
    /* Must be done after vk_device_init() because this function memset(0) the
     * whole struct.
@@ -495,8 +503,16 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
          device->kmod.dev = pan_kmod_dev_create_with_driver(
             kbase_fd, physical_device->kmod.dev->flags, "kbase", NULL,
             &device->kmod.allocator);
-         if (!device->kmod.dev)
+         if (!device->kmod.dev) {
             close(kbase_fd);
+            /* PANVK_DBG: temporary diagnostics, remove before release */
+            mesa_loge("panvk: create_device: kbase context create failed "
+                      "(fd handshake/set_flags/mmap/gpuprops)");
+         }
+      } else {
+         /* PANVK_DBG: temporary diagnostics, remove before release */
+         mesa_loge("panvk: create_device: failed to open kbase node '%s': %s",
+                   physical_device->kbase_node_path, strerror(errno));
       }
    } else
 #endif
@@ -507,6 +523,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    }
 
    if (!device->kmod.dev) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: kmod device create failed");
       result = panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
                             "cannot create device");
       goto err_finish_dev;
@@ -537,6 +555,11 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
                          user_va_start, user_va_end - user_va_start);
 
    if (!device->kmod.vm) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: pan_kmod_vm_create failed "
+               "[%llx, %llx)",
+               (unsigned long long)user_va_start,
+               (unsigned long long)user_va_end);
       result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto err_destroy_kdev;
    }
@@ -585,6 +608,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
                          user_va_end - low_va_end);
       device->as.priv_heap = malloc(sizeof(*device->as.priv_heap));
       if (device->as.priv_heap == NULL) {
+         /* PANVK_DBG: temporary diagnostics, remove before release */
+         mesa_loge("panvk: create_device: priv_heap alloc failed");
          result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
          goto err_free_heaps;
       }
@@ -602,6 +627,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
       vk_zalloc(&device->vk.alloc, PANVK_SUBQUEUE_COUNT * sizeof(uint32_t),
                 alignof(uint32_t), VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!device->dump_region_size) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: dump_region_size alloc failed");
       result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto err_free_priv_bos;
    }
@@ -628,8 +655,12 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
       device, pan_sample_positions_buffer_size(),
       panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP),
       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->sample_positions);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: sample_positions bo create failed: %s",
+                vk_Result_to_str(result));
       goto err_free_priv_bos;
+   }
 
    pan_upload_sample_positions(device->sample_positions->addr.host);
    panvk_priv_bo_flush(device->sample_positions, 0,
@@ -637,15 +668,23 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
 #if PAN_ARCH >= 10
    result = panvk_per_arch(init_tiler_oom)(device);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: init_tiler_oom failed: %s",
+                vk_Result_to_str(result));
       goto err_free_priv_bos;
+   }
 #endif
 
    result = panvk_priv_bo_create(device, PAN_PRINTF_BUFFER_SIZE, 0,
                                  VK_SYSTEM_ALLOCATION_SCOPE_DEVICE,
                                  &device->printf.bo);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: printf bo create failed: %s",
+                vk_Result_to_str(result));
       goto err_free_priv_bos;
+   }
 
    u_printf_init(&device->printf.ctx, device->printf.bo,
                  device->printf.bo->addr.host);
@@ -655,47 +694,74 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
 
    result = panvk_precomp_init(device);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: precomp_init failed: %s",
+                vk_Result_to_str(result));
       goto err_free_priv_bos;
+   }
 
    struct vk_pipeline_cache_create_info cache_info = {
       .weak_ref = true,
    };
    device->vk.mem_cache = vk_pipeline_cache_create(&device->vk, &cache_info, NULL);
    if (device->vk.mem_cache == NULL) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: mem_cache create failed");
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto err_free_precomp;
    }
 
 #if PAN_ARCH >= 10 && PAN_ARCH < 14
    result = panvk_per_arch(device_draw_context_init)(device);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: draw_context_init failed: %s",
+                vk_Result_to_str(result));
       goto err_free_mem_cache;
+   }
 #endif
 
    result = panvk_meta_init(device);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: meta_init failed: %s",
+                vk_Result_to_str(result));
       goto err_free_draw_ctx;
+   }
 
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create =
          &pCreateInfo->pQueueCreateInfos[i];
 
       result = check_global_priority(physical_device, queue_create);
-      if (result != VK_SUCCESS)
+      if (result != VK_SUCCESS) {
+         /* PANVK_DBG: temporary diagnostics, remove before release */
+         mesa_loge("panvk: create_device: queue %u global priority check "
+                   "failed: %s", i, vk_Result_to_str(result));
          goto err_finish_queues;
+      }
 
       for (unsigned q = 0; q < queue_create->queueCount; q++) {
          struct vk_queue *queue;
          result = panvk_queue_create(device, queue_create, q, &queue);
-         if (result != VK_SUCCESS)
+         if (result != VK_SUCCESS) {
+            /* PANVK_DBG: temporary diagnostics, remove before release */
+            mesa_loge("panvk: create_device: queue %u/%u (family %u) create "
+                      "failed: %s", i, q, queue_create->queueFamilyIndex,
+                      vk_Result_to_str(result));
             goto err_finish_queues;
+         }
       }
    }
 
    result = panvk_per_arch(utrace_context_init)(device);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("panvk: create_device: utrace_context_init failed: %s",
+                vk_Result_to_str(result));
       goto err_finish_queues;
+   }
 
 #if PAN_ARCH >= 10
    panvk_utrace_perfetto_init(device, PANVK_SUBQUEUE_COUNT);

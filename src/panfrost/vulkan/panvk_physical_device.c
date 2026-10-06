@@ -25,6 +25,7 @@
 
 #include "util/disk_cache.h"
 #include "util/cnd_monotonic.h"
+#include "util/log.h"
 #include "util/os_misc.h"
 #include "util/os_time.h"
 #include "util/timespec.h"
@@ -1641,8 +1642,18 @@ panvk_CreateDevice(VkPhysicalDevice physicalDevice,
    unsigned arch = pan_arch(physical_device->kmod.dev->props.gpu_id);
    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
 
+   /* PANVK_DBG: temporary diagnostics, remove before release */
+   mesa_logi("panvk: CreateDevice enter (arch %u)", arch);
+
    panvk_arch_dispatch_ret(arch, create_device, result, physical_device,
                            pCreateInfo, pAllocator, pDevice);
+
+   /* PANVK_DBG: temporary diagnostics, remove before release */
+   if (result != VK_SUCCESS)
+      mesa_loge("panvk: CreateDevice failed: %s (%d)",
+                vk_Result_to_str(result), (int)result);
+   else
+      mesa_logi("panvk: CreateDevice success");
 
    return result;
 }

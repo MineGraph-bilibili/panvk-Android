@@ -36,6 +36,7 @@
 #include "vk_util.h"
 #include "util/compiler.h"
 #include "util/detect_os.h"
+#include "util/log.h"
 #include "util/u_debug.h"
 #include "util/hash_table.h"
 #include "util/perf/cpu_trace.h"
@@ -187,21 +188,34 @@ vk_device_init(struct vk_device *device,
             break;
       }
 
-      if (idx >= VK_DEVICE_EXTENSION_COUNT)
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      if (idx >= VK_DEVICE_EXTENSION_COUNT) {
+         mesa_loge("vk_device_init: device extension '%s' not in the "
+                   "known extension table",
+                   pCreateInfo->ppEnabledExtensionNames[i]);
          return vk_errorf(physical_device, VK_ERROR_EXTENSION_NOT_PRESENT,
                           "%s not supported",
                           pCreateInfo->ppEnabledExtensionNames[i]);
+      }
 
-      if (!physical_device->supported_extensions.extensions[idx])
+      if (!physical_device->supported_extensions.extensions[idx]) {
+         mesa_loge("vk_device_init: device extension '%s' not supported "
+                   "by this physical device",
+                   pCreateInfo->ppEnabledExtensionNames[i]);
          return vk_errorf(physical_device, VK_ERROR_EXTENSION_NOT_PRESENT,
                           "%s not supported",
                           pCreateInfo->ppEnabledExtensionNames[i]);
+      }
 
 #ifdef ANDROID_STRICT
-      if (!vk_android_allowed_device_extensions.extensions[idx])
+      if (!vk_android_allowed_device_extensions.extensions[idx]) {
+         mesa_loge("vk_device_init: device extension '%s' rejected by "
+                   "ANDROID_STRICT allowlist",
+                   pCreateInfo->ppEnabledExtensionNames[i]);
          return vk_errorf(physical_device, VK_ERROR_EXTENSION_NOT_PRESENT,
                           "%s not supported",
                           pCreateInfo->ppEnabledExtensionNames[i]);
+      }
 #endif
 
       device->enabled_extensions.extensions[idx] = true;
@@ -210,8 +224,12 @@ vk_device_init(struct vk_device *device,
    VkResult result =
       vk_physical_device_check_device_features(physical_device,
                                                pCreateInfo);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("vk_device_init: device feature check failed: %s (%d)",
+                vk_Result_to_str(result), (int)result);
       return result;
+   }
 
    collect_enabled_features(device, pCreateInfo);
 
@@ -292,8 +310,12 @@ vk_device_init(struct vk_device *device,
    }
 
    result = vk_device_memory_report_init(device, pCreateInfo);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      /* PANVK_DBG: temporary diagnostics, remove before release */
+      mesa_loge("vk_device_init: memory report init failed: %s",
+                vk_Result_to_str(result));
       return result;
+   }
 
    device->robustness_state = (struct vk_pipeline_robustness_state) {
       .uniform_buffers = vk_device_default_robust_buffer_behavior(device),

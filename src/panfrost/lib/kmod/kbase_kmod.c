@@ -1959,8 +1959,10 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
       extension = (2 * 1024 * 1024) / page_size;
    }
 
-   if (kbase_dev->is_csf &&
-       pan_kmod_driver_version_at_least(&dev->driver, 1, 9)) {
+   bool use_alloc_ex = kbase_dev->is_csf &&
+                       pan_kmod_driver_version_at_least(&dev->driver, 1, 9);
+
+   if (use_alloc_ex) {
       /* Match current Arm userspace on modern CSF kernels.  Besides keeping
        * the allocation ABI aligned with kbase, this leaves room for fixed-VA
        * and future allocation parameters without another backend split. */
@@ -1974,14 +1976,26 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
       };
 
       if (ioctl(dev->fd, KBASE_IOCTL_MEM_ALLOC_EX, &req)) {
-         mesa_loge("kbase: KBASE_IOCTL_MEM_ALLOC_EX failed: %s",
-                   strerror(errno));
-         goto err_free_bo;
-      }
+         if (errno != ENOTTY) {
+            mesa_loge("kbase: KBASE_IOCTL_MEM_ALLOC_EX failed: %s",
+                      strerror(errno));
+            goto err_free_bo;
+         }
 
-      alloc_flags = req.out.flags;
-      alloc_gpu_va = req.out.gpu_va;
-   } else {
+         /* Some older BSP kernels advertise uAPI >= 1.9 but never implemented
+          * the MEM_ALLOC_EX ioctl (it fails with ENOTTY).  The classic
+          * MEM_ALLOC ABI is a compatible subset of it — same first four
+          * input fields, same output layout — so fall back to it. */
+         mesa_logi("kbase: MEM_ALLOC_EX unavailable (ENOTTY), "
+                   "using legacy MEM_ALLOC");
+         use_alloc_ex = false;
+      } else {
+         alloc_flags = req.out.flags;
+         alloc_gpu_va = req.out.gpu_va;
+      }
+   }
+
+   if (!use_alloc_ex) {
       union kbase_ioctl_mem_alloc req = {
          .in = {
             .va_pages = va_pages,
