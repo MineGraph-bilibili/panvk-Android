@@ -1713,18 +1713,33 @@ format_is_supported(struct panvk_physical_device *physical_device,
    return true;
 }
 
+/* A BC format needs emulation when the GPU does not report it in the
+ * compressed-format bitmap; those formats are decoded on upload while the
+ * natively supported ones keep using the hardware sampler. */
 bool
-panvk_bc_emul_enabled(const struct panvk_physical_device *physical_device)
+panvk_bc_format_needs_emul(const struct panvk_physical_device *physical_device,
+                           VkFormat format)
 {
    if (PANVK_DEBUG(NO_BC_EMUL))
       return false;
 
+   if (!panvk_format_is_bc(format))
+      return false;
+
    const struct pan_format fmt =
-      physical_device->formats.all[PIPE_FORMAT_DXT1_RGBA];
+      physical_device->formats.all[vk_format_to_pipe_format(format)];
    uint32_t supported_compr_fmts =
       pan_query_compressed_formats(&physical_device->kmod.dev->props);
 
    return !(BITFIELD_BIT(fmt.texfeat_bit) & supported_compr_fmts);
+}
+
+/* Emulation keeps textureCompressionBC honest: every BC format is usable,
+ * either natively or through decode-on-upload. */
+bool
+panvk_bc_emul_enabled(const struct panvk_physical_device *physical_device)
+{
+   return !PANVK_DEBUG(NO_BC_EMUL);
 }
 
 static VkFormatFeatureFlags2
@@ -1737,7 +1752,15 @@ get_image_plane_format_features(struct panvk_physical_device *physical_device,
    unsigned arch = pan_arch(physical_device->kmod.dev->props.gpu_id);
 
    if (panvk_format_is_bc(format)) {
-      if (!panvk_bc_emul_enabled(physical_device))
+      /* Every BC format is usable: natively supported ones sample in
+       * hardware, the rest are decoded on upload (BC emulation). Only with
+       * emulation disabled (PANVK_DEBUG=no_bc_emul) are unsupported formats
+       * reported as such. vkd3d-proton requires
+       * TRANSFER_SRC|TRANSFER_DST|SAMPLED_IMAGE on every BC format it uses
+       * as a castable format, and D3D12 guarantees linear filtering on BC
+       * formats, so both paths report the same feature set. */
+      if (!panvk_bc_format_needs_emul(physical_device, format) &&
+          !format_is_supported(physical_device, fmt, pfmt))
          return 0;
 
       features = VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
@@ -1989,6 +2012,23 @@ panvk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
       get_image_format_features(physical_device, format);
    VkFormatFeatureFlags2 buffer =
       get_buffer_format_features(physical_device, format);
+
+   /* Diagnostic for vkd3d-proton castable-format validation: a plain
+    * sampled D3D12 resource (Flags=0) requires TRANSFER_SRC|TRANSFER_DST|
+    * SAMPLED_IMAGE on the base format and on every castable format.
+    * Log any format we report that cannot satisfy this, so failing
+    * formats show up directly in the log. */
+   {
+      const VkFormatFeatureFlags2 sampled_req =
+         VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+         VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
+         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
+
+      if ((tex & sampled_req) != sampled_req)
+         mesa_logi("panvk: format %s (vk %d) missing sampled features: 0x%llx",
+                   util_format_name(vk_format_to_pipe_format(format)),
+                   (int)format, (unsigned long long)tex);
+   }
 
    VkFormatFeatureFlags tex_legacy = vk_format_features2_to_features(tex);
    VkFormatFeatureFlags buffer_legacy =

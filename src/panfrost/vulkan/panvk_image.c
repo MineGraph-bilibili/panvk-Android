@@ -652,10 +652,9 @@ panvk_image_init(struct panvk_image *image,
 {
    /* Needs to happen early for some panvk_image_ helpers to work. */
    image->plane_count = get_plane_count(image);
-   image->bc_emul =
-      panvk_format_is_bc(image->vk.format) &&
-      panvk_bc_emul_enabled(
-         to_panvk_physical_device(image->vk.base.device->physical));
+   image->bc_emul = panvk_bc_format_needs_emul(
+      to_panvk_physical_device(image->vk.base.device->physical),
+      image->vk.format);
 
    if (image->bc_emul && PANVK_DEBUG(BC_TRACE))
       mesa_logi("bc_img: fmt=%d %ux%ux%u mips=%u layers=%u usage=0x%x",

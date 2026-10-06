@@ -153,6 +153,9 @@ panvk_get_max_buffer_size(const struct panvk_physical_device *device);
 
 bool panvk_bc_emul_enabled(const struct panvk_physical_device *device);
 
+bool panvk_bc_format_needs_emul(const struct panvk_physical_device *device,
+                                VkFormat format);
+
 #ifdef PAN_ARCH
 void panvk_per_arch(get_physical_device_extensions)(
    const struct panvk_physical_device *device,
