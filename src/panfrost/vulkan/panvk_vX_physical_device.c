@@ -649,7 +649,12 @@ panvk_per_arch(get_physical_device_features)(
       .pipelineExecutableInfo = true,
 
       /* VK_KHR_robustness2 */
-      .robustBufferAccess2 = PAN_ARCH >= 11,
+      /* Valhall v10 already bounds-checks every buffer access in the
+       * compiler (core robustBufferAccess) and supports nullDescriptor,
+       * which satisfies the stricter robustBufferAccess2 semantics at
+       * element granularity.  vkd3d-proton requires this feature, so
+       * expose it on v10 as well; no extra runtime checks are added. */
+      .robustBufferAccess2 = PAN_ARCH >= 10,
       /* OOB image accesses are bounded by the texture unit against the
        * surface descriptor dimensions: loads return zero and stores are
        * dropped, which matches the robustImageAccess2 semantics.  Vulkan 1.3
