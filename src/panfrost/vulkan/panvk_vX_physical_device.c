@@ -301,6 +301,36 @@ has_texture_compression_bc(const struct panvk_physical_device *physical_device)
       BITFIELD_BIT(MALI_BC6H_UF16) | BITFIELD_BIT(MALI_BC7_UNORM));
 }
 
+/* One-shot texture-compression summary at physical device enumeration.
+ * Emulators (Eden/yuzu, vkd3d-proton) key their texture paths on
+ * textureCompressionBC/ASTC and the per-format features; this line makes the
+ * reported state directly visible in logcat without extra tooling. */
+void
+panvk_per_arch(log_texture_compression_summary)(
+   const struct panvk_physical_device *device)
+{
+   uint32_t supported_compr_fmts =
+      pan_query_compressed_formats(&device->kmod.dev->props);
+   uint32_t native_bc_mask =
+      BITFIELD_BIT(MALI_BC1_UNORM) | BITFIELD_BIT(MALI_BC2_UNORM) |
+      BITFIELD_BIT(MALI_BC3_UNORM) | BITFIELD_BIT(MALI_BC4_UNORM) |
+      BITFIELD_BIT(MALI_BC4_SNORM) | BITFIELD_BIT(MALI_BC5_UNORM) |
+      BITFIELD_BIT(MALI_BC5_SNORM) | BITFIELD_BIT(MALI_BC6H_SF16) |
+      BITFIELD_BIT(MALI_BC6H_UF16) | BITFIELD_BIT(MALI_BC7_UNORM);
+   bool bc_native = (supported_compr_fmts & native_bc_mask) == native_bc_mask;
+   bool bc_emul = panvk_bc_emul_enabled(device);
+
+   mesa_logi("panvk: texture compression on %s (v%u): ASTC LDR %s, "
+             "ASTC HDR %s, ETC2 %s, BC1-7 %s; textureCompressionBC=%d",
+             device->name, PAN_ARCH,
+             has_texture_compression_astc_ldr(device) ? "native" : "none",
+             has_texture_compression_astc_hdr(device) ? "native" : "none",
+             has_texture_compression_etc2(device) ? "native" : "none",
+             bc_native ? "native"
+                       : (bc_emul ? "emulated (decode-on-upload)" : "none"),
+             bc_native || bc_emul);
+}
+
 void
 panvk_per_arch(get_physical_device_features)(
    const struct panvk_instance *instance,

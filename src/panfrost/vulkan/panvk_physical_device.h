@@ -166,6 +166,9 @@ void panvk_per_arch(get_physical_device_features)(
    const struct panvk_instance *instance,
    const struct panvk_physical_device *device, struct vk_features *features);
 
+void panvk_per_arch(log_texture_compression_summary)(
+   const struct panvk_physical_device *device);
+
 void panvk_per_arch(get_physical_device_properties)(
    const struct panvk_instance *instance,
    const struct panvk_physical_device *device,

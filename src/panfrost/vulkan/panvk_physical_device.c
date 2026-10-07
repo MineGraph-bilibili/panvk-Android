@@ -65,6 +65,9 @@
       const struct panvk_physical_device *device,                              \
       struct vk_features *features);                                           \
                                                                                \
+   void panvk_v##_ver##_log_texture_compression_summary(                       \
+      const struct panvk_physical_device *device);                             \
+                                                                               \
    void panvk_v##_ver##_get_physical_device_properties(                        \
       const struct panvk_instance *instance,                                   \
       const struct panvk_physical_device *device,                              \
@@ -1260,6 +1263,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
     * overwrite=0 keeps a user-configured value winning. */
    setenv("WRAPPER_DEVICE_NAME", device->name, 0);
 
+   panvk_arch_dispatch(arch, log_texture_compression_summary, device);
+
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
       goto fail;
@@ -1395,6 +1400,8 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
     * The env is re-read on every GetPhysicalDeviceProperties() call, and
     * overwrite=0 keeps a user-configured value winning. */
    setenv("WRAPPER_DEVICE_NAME", device->name, 0);
+
+   panvk_arch_dispatch(arch, log_texture_compression_summary, device);
 
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
