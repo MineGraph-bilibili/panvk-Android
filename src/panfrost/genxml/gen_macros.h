@@ -56,10 +56,8 @@
 #define GENX(X) X##_v10
 #include "genxml/v10_pack.h"
 #elif (PAN_ARCH == 11)
-/* arch 11 (Immortalis-G715 / Mali-G615) shares the v10 descriptor/CS XML;
- * arch-11-specific behaviour is handled by runtime arch checks. */
-#define GENX(X) X##_v10
-#include "genxml/v10_pack.h"
+#define GENX(X) X##_v11
+#include "genxml/v11_pack.h"
 #elif (PAN_ARCH == 12)
 #define GENX(X) X##_v12
 #include "genxml/v12_pack.h"

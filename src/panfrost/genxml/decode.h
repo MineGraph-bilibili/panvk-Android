@@ -120,6 +120,13 @@ void pandecode_cs_binary_v10(struct pandecode_context *ctx, uint64_t bin,
 void pandecode_cs_trace_v10(struct pandecode_context *ctx, uint64_t trace,
                             uint32_t trace_size, uint64_t gpu_id);
 
+void pandecode_interpret_cs_v11(struct pandecode_context *ctx, uint64_t queue,
+                                uint32_t size, uint64_t gpu_id, uint32_t *regs);
+void pandecode_cs_binary_v11(struct pandecode_context *ctx, uint64_t bin,
+                             uint32_t bin_size);
+void pandecode_cs_trace_v11(struct pandecode_context *ctx, uint64_t trace,
+                            uint32_t trace_size, uint64_t gpu_id);
+
 void pandecode_interpret_cs_v12(struct pandecode_context *ctx, uint64_t queue,
                                 uint32_t size, uint64_t gpu_id, uint32_t *regs);
 void pandecode_cs_binary_v12(struct pandecode_context *ctx, uint64_t bin,

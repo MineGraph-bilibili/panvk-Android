@@ -755,7 +755,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
 #endif
       cfg.flags_2.write_mask = rt_written;
       cfg.flags_2.read_mask = rt_read;
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       cfg.flags_2.no_shader_depth_read =
          !(locations_read & BITFIELD_BIT(FRAG_RESULT_DEPTH));
       cfg.flags_2.no_shader_stencil_read =

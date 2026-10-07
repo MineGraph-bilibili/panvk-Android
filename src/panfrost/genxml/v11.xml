@@ -1,10 +1,9 @@
 <!--
-  Copyright (C) 2025 Collabora Ltd.
-  Copyright (C) 2026 Arm Ltd.
+  Copyright (C) 2026 Collabora Ltd.
   SPDX-License-Identifier: MIT
 -->
 
-<panxml arch="13">
+<panxml arch="11">
   <enum name="Attribute Type">
     <value name="1D" value="1"/>
     <value name="1D POT Divisor" value="2"/>
@@ -143,13 +142,15 @@
     <value name="VYUY10" value="45"/>
     <value name="Y10 UV10 422" value="46"/>
     <value name="Y10 UV10 420" value="47"/>
-    <value name="YUV16" value="48"/>
+    <!-- 48 reserved -->
     <value name="YUVA16" value="49"/>
     <value name="YUYV16" value="50"/>
     <value name="VYUY16" value="51"/>
     <value name="Y10X6 U10X6V10X6 422" value="52"/>
     <value name="Y16 UV16 422" value="53"/>
+    <!-- 54 reserved -->
     <value name="Y16 UV16 420" value="55"/>
+    <!-- 56-63 reserved -->
     <value name="RGB565" value="64"/>
     <value name="RGB5 A1 UNORM" value="65"/>
     <value name="A1 BGR5 UNORM" value="66"/>
@@ -165,10 +166,12 @@
     <value name="Z32" value="76"/>
     <value name="Z24X8 UNORM" value="77"/>
     <value name="X8Z24" value="78"/>
+    <!-- 79-80 reserved -->
     <value name="R32 FIXED" value="81"/>
     <value name="RG32 FIXED" value="82"/>
     <value name="RGB32 FIXED" value="83"/>
     <value name="RGBA32 FIXED" value="84"/>
+    <!-- 85-88 reserved -->
     <value name="R11F G11F B10F" value="89"/>
     <value name="B10F G11F R11F" value="90"/>
     <value name="R9F G9F B9F E5F" value="91"/>
@@ -177,12 +180,11 @@
     <!--- RGBA32F + snap to 2^-8, used for vertex writes -->
     <value name="Snap 4" value="94"/>
     <value name="Constant" value="95"/>
-    <!--- 96-98 reserved -->
+    <!-- 96-98 reserved -->
     <value name="R8 SNORM" value="99"/>
     <value name="R16 SNORM" value="100"/>
     <value name="R32 SNORM" value="101"/>
-    <!--- 102-105 reserved -->
-    <value name="RG4 SNORM" value="106"/>
+    <!-- 102-106 reserved -->
     <value name="RG8 SNORM" value="107"/>
     <value name="RG16 SNORM" value="108"/>
     <value name="RG32 SNORM" value="109"/>
@@ -190,9 +192,7 @@
     <value name="RGB8 SNORM" value="115"/>
     <value name="RGB16 SNORM" value="116"/>
     <value name="RGB32 SNORM" value="117"/>
-    <!-- 118-120 reserved -->
-    <value name="RGBA2 SNORM" value="121"/>
-    <value name="RGBA4 SNORM" value="122"/>
+    <!-- 118-122 reserved -->
     <value name="RGBA8 SNORM" value="123"/>
     <value name="RGBA16 SNORM" value="124"/>
     <value name="RGBA32 SNORM" value="125"/>
@@ -209,8 +209,7 @@
     <value name="RGB8UI" value="147"/>
     <value name="RGB16UI" value="148"/>
     <value name="RGB32UI" value="149"/>
-    <!-- 150-152 reserved -->
-    <value name="RGBA2UI" value="153"/>
+    <!-- 150-153 reserved -->
     <value name="RGBA4UI" value="154"/>
     <value name="RGBA8UI" value="155"/>
     <value name="RGBA16UI" value="156"/>
@@ -234,8 +233,7 @@
     <value name="RGB32 UNORM" value="181"/>
     <!-- 182 reserved -->
     <value name="RGB32F" value="183"/>
-    <!-- 184 reserved -->
-    <value name="RGBA2 UNORM" value="185"/>
+    <!-- 184-185 reserved -->
     <value name="RGBA4 UNORM" value="186"/>
     <value name="RGBA8 UNORM" value="187"/>
     <value name="RGBA16 UNORM" value="188"/>
@@ -261,8 +259,7 @@
     <value name="RGB32I" value="213"/>
     <!-- 214 reserved -->
     <value name="RGB16F" value="215"/>
-    <!-- 216 reserved -->
-    <value name="RGBA2I" value="217"/>
+    <!-- 216-217 reserved -->
     <value name="RGBA4I" value="218"/>
     <value name="RGBA8I" value="219"/>
     <value name="RGBA16I" value="220"/>
@@ -369,7 +366,6 @@
 
   <enum name="Pixel Kill">
     <value name="Force Early" value="0"/>
-    <value name="Strong Early" value="1"/>
     <value name="Weak Early" value="2"/>
     <value name="Force Late" value="3"/>
   </enum>
@@ -514,30 +510,20 @@
     <value name="Tiler OOM" value="2"/>
   </enum>
 
-  <enum name="CS Draw ID Register Enable">
-    <value name="No Drawid" value="0"/>
-    <value name="Drawid" value="1"/>
-  </enum>
-
-  <enum name="CS Memory Allocation Enable">
-    <value name="No Malloc" value="0"/>
-    <value name="Malloc" value="1"/>
-  </enum>
-
   <enum name="CS Opcode">
     <value name="NOP" value="0"/>
     <value name="MOVE48" value="1"/>
     <value name="MOVE32" value="2"/>
     <value name="WAIT" value="3"/>
     <value name="RUN_COMPUTE" value="4"/>
+    <value name="RUN_IDVS" value="6"/>
     <value name="RUN_FRAGMENT" value="7"/>
     <value name="RUN_FULLSCREEN" value="8"/>
     <value name="FINISH_TILING" value="9"/>
     <value name="FINISH_FRAGMENT" value="11"/>
-    <value name="RUN_IDVS2" value="12"/>
-    <value name="ARITH_IMM32" value="16"/>
-    <value name="ARITH_IMM64" value="17"/>
-    <value name="ARITH_REG32" value="18"/>
+    <value name="ADD_IMMEDIATE32" value="16"/>
+    <value name="ADD_IMMEDIATE64" value="17"/>
+    <value name="COMPARE_SELECT32" value="18"/>
     <value name="LOGIC_OP32" value="19"/>
     <value name="LOAD_MULTIPLE" value="20"/>
     <value name="STORE_MULTIPLE" value="21"/>
@@ -569,49 +555,6 @@
     <value name="SYNC_ADD64" value="51"/>
     <value name="SYNC_SET64" value="52"/>
     <value name="SYNC_WAIT64" value="53"/>
-    <value name="ARITH_REG64" value="57"/>
-  </enum>
-
-  <enum name="CS ARITH_REG32 Sub Opcode">
-    <value name="UMIN32" value="0"/>
-    <value name="ADD32" value="1"/>
-    <value name="SUB32" value="2"/>
-    <value name="LSHIFT32" value="3"/>
-    <value name="RSHIFT_U32" value="4"/>
-    <value name="RSHIFT_S32" value="5"/>
-    <value name="BFINS32" value="6"/>
-  </enum>
-
-  <enum name="CS ARITH_REG64 Sub Opcode">
-    <value name="UMIN64" value="0"/>
-    <value name="ADD64" value="1"/>
-    <value name="SUB64" value="2"/>
-    <value name="LSHIFT64" value="3"/>
-    <value name="RSHIFT_U64" value="4"/>
-    <value name="RSHIFT_S64" value="5"/>
-    <value name="BFINS64" value="6"/>
-  </enum>
-
-  <enum name="CS ARITH_IMM32 Sub Opcode">
-    <value name="ADD_IMM32" value="0"/>
-    <value name="LSHIFT_IMM32" value="1"/>
-    <value name="RSHIFT_IMM_U32" value="2"/>
-    <value name="RSHIFT_IMM_S32" value="3"/>
-    <value name="BFEXT_U32" value="4"/>
-    <value name="BFEXT_S32" value="5"/>
-    <value name="BFINS_IMM32" value="6"/>
-    <value name="UMIN_IMM32" value="7"/>
-  </enum>
-
-  <enum name="CS ARITH_IMM64 Sub Opcode">
-    <value name="ADD_IMM64" value="0"/>
-    <value name="LSHIFT_IMM64" value="1"/>
-    <value name="RSHIFT_IMM_U64" value="2"/>
-    <value name="RSHIFT_IMM_S64" value="3"/>
-    <value name="BFEXT_U64" value="4"/>
-    <value name="BFEXT_S64" value="5"/>
-    <value name="BFINS_IMM64" value="6"/>
-    <value name="UMIN_IMM64" value="7"/>
   </enum>
 
   <enum name="CS Progress Increment">
@@ -622,15 +565,6 @@
   <enum name="CS Defer Mode">
     <value name="Defer Immediate" value="0"/>
     <value name="Defer Indirect" value="1"/>
-  </enum>
-
-  <enum name="IDVS Pipeline Stage">
-    <value name="Internal" value="0"/>
-    <value name="Compute" value="1"/>
-    <value name="Vertex" value="2"/>
-    <value name="Tess Control" value="3"/>
-    <value name="Tess Eval" value="4"/>
-    <value name="Geometry" value="5"/>
   </enum>
 
   <enum name="Finish Fragment Heap">
@@ -727,11 +661,6 @@
     <value name="Defer Indirect" value="1"/>
   </enum>
 
-  <enum name="IDVS Shading Mode">
-    <value name="Early" value="0"/>
-    <value name="Deferred" value="1"/>
-  </enum>
-
   <struct name="CS Base" size="2">
     <field name="Data" size="56" start="0" type="hex"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode"/>
@@ -765,14 +694,26 @@
   <struct name="CS RUN_COMPUTE" size="2">
     <field name="Task Increment" size="14" start="0" type="uint"/>
     <field name="Task Axis" size="2" start="14" type="Task Axis"/>
-    <field name="Ep Limit" size="8" start="16" type="uint"/>
     <field name="Progress Increment" size="1" start="32" type="CS Progress Increment" default="No Increment"/>
     <field name="SRT Select" size="2" start="40" type="uint"/>
     <field name="SPD Select" size="2" start="42" type="uint"/>
     <field name="TSD Select" size="2" start="44" type="uint"/>
     <field name="FAU Select" size="2" start="46" type="uint"/>
-    <field name="Stage" size="4" start="48" type="IDVS Pipeline Stage" default="Internal"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="RUN_COMPUTE"/>
+  </struct>
+
+  <struct name="CS RUN_IDVS" size="2">
+    <field name="Flags Override" size="32" start="0" type="hex"/>
+    <field name="Progress Increment" size="1" start="32" type="CS Progress Increment" default="No Increment"/>
+    <field name="Malloc enable" size="1" start="33" type="bool"/>
+    <field name="Draw ID register enable" size="1" start="34" type="bool"/>
+    <field name="Varying SRT select" size="1" start="35" type="bool"/>
+    <field name="Varying FAU select" size="1" start="36" type="bool"/>
+    <field name="Varying TSD select" size="1" start="37" type="bool"/>
+    <field name="Fragment SRT select" size="1" start="38" type="bool"/>
+    <field name="Fragment TSD select" size="1" start="39" type="bool"/>
+    <field name="Draw ID" size="8" start="40" type="uint"/>
+    <field name="Opcode" size="8" start="56" type="CS Opcode" default="RUN_IDVS"/>
   </struct>
 
   <struct name="CS RUN_FRAGMENT" size="2">
@@ -801,43 +742,29 @@
     <field name="Last Heap Chunk" size="8" start="32" type="uint"/>
     <field name="First Heap Chunk" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="FINISH_FRAGMENT"/>
-  </struct>
-
-  <struct name="CS RUN_IDVS2" size="2">
-    <field name="Flags Override" size="32" start="0" type="hex"/>
-    <field name="Progress Increment" size="1" start="32" type="CS Progress Increment" default="No Increment"/>
-    <field name="Malloc Enable" size="1" start="33" type="CS Memory Allocation Enable" default="No Malloc"/>
-    <field name="Draw ID Register Enable" size="1" start="34" type="CS Draw ID Register Enable" default="No Drawid"/>
-    <field name="Vertex Shading Mode" size="2" start="35" type="IDVS Shading Mode" default="Early"/>
-    <field name="Draw ID" size="8" start="40" type="uint"/>
-    <field name="Stage" size="4" start="48" type="IDVS Pipeline Stage" default="Internal"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="RUN_IDVS2"/>
   </struct>
 
   <struct name="CS ADD_IMM32" size="2">
     <field name="Immediate" size="32" start="0" type="int"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="ADD_IMM32"/>
     <field name="Source" size="8" start="40" type="uint"/>
     <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
+    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ADD_IMMEDIATE32"/>
   </struct>
 
   <struct name="CS ADD_IMM64" size="2">
     <field name="Immediate" size="32" start="0" type="int"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="ADD_IMM64"/>
     <field name="Source" size="8" start="40" type="uint"/>
     <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
+    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ADD_IMMEDIATE64"/>
   </struct>
 
   <struct name="CS UMIN32" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode" default="UMIN32"/>
     <field name="Source 1" size="8" start="32" type="uint"/>
     <field name="Source 0" size="8" start="40" type="uint"/>
     <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
+    <field name="Opcode" size="8" start="56" type="CS Opcode" default="COMPARE_SELECT32"/>
   </struct>
 
   <struct name="CS LOGIC_OP32" size="2">
@@ -914,7 +841,7 @@
     <field name="SB Mask" size="16" start="16" type="hex"/>
     <field name="Progress Increment" size="1" start="32" type="CS Progress Increment" default="No Increment"/>
     <field name="Shared Entry" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Shared SB Increment Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Shared SB Increment Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="SHARED_SB_INC"/>
   </struct>
 
@@ -952,7 +879,7 @@
     <field name="Wait Mask" size="16" start="16" type="hex"/>
     <field name="Latest Flush ID" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="FLUSH_CACHE2"/>
   </struct>
 
@@ -963,7 +890,7 @@
     <field name="Data" size="8" start="32" type="uint"/>
     <field name="Address" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="SYNC_ADD32"/>
   </struct>
 
@@ -974,7 +901,7 @@
     <field name="Data" size="8" start="32" type="uint"/>
     <field name="Address" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="SYNC_SET32"/>
   </struct>
 
@@ -993,7 +920,7 @@
     <field name="State" size="8" start="32" type="CS State"/>
     <field name="Address" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="STORE_STATE"/>
   </struct>
 
@@ -1014,13 +941,11 @@
 
   <struct name="CS RUN_COMPUTE_INDIRECT" size="2">
     <field name="Workgroups Per Task" size="16" start="0" type="uint"/>
-    <field name="Ep Limit" size="8" start="16" type="uint"/>
     <field name="Progress Increment" size="1" start="32" type="CS Progress Increment" default="No Increment"/>
     <field name="SRT Select" size="2" start="40" type="uint"/>
     <field name="SPD Select" size="2" start="42" type="uint"/>
     <field name="TSD Select" size="2" start="44" type="uint"/>
     <field name="FAU Select" size="2" start="46" type="uint"/>
-    <field name="Stage" size="4" start="48" type="IDVS Pipeline Stage" default="Internal"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="RUN_COMPUTE_INDIRECT"/>
   </struct>
 
@@ -1037,7 +962,7 @@
     <field name="Wait Mask" size="16" start="16" type="hex"/>
     <field name="Operation" size="3" start="32" type="CS Heap Operation"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="HEAP_OPERATION"/>
   </struct>
 
@@ -1046,7 +971,7 @@
     <field name="Base Register" size="8" start="32" type="uint"/>
     <field name="Register count" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="TRACE_POINT"/>
   </struct>
 
@@ -1057,7 +982,7 @@
     <field name="Data" size="8" start="32" type="uint"/>
     <field name="Address" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="SYNC_ADD64"/>
   </struct>
 
@@ -1068,7 +993,7 @@
     <field name="Data" size="8" start="32" type="uint"/>
     <field name="Address" size="8" start="40" type="uint"/>
     <field name="Signal slot" size="4" start="48" type="uint"/>
-    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode" default="Defer Immediate"/>
+    <field name="Defer Mode" size="1" start="52" type="CS Defer Mode"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="SYNC_SET64"/>
   </struct>
 
@@ -1079,56 +1004,6 @@
     <field name="Data" size="8" start="32" type="uint"/>
     <field name="Address" size="8" start="40" type="uint"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="SYNC_WAIT64"/>
-  </struct>
-
-  <struct name="CS ADD32" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode" default="ADD32"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
-  </struct>
-
-  <struct name="CS ADD64" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode" default="ADD64"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
-  </struct>
-
-  <struct name="CS ARITH_IMM32 Base" size="2">
-    <field name="Immediate" size="32" start="0" type="int"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode"/>
-  </struct>
-
-  <struct name="CS ARITH_REG32 Base" size="2">
-    <field name="Immediate" size="24" start="0" type="int"/>
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
-  </struct>
-
-  <struct name="CS ARITH_IMM64 Base" size="2">
-    <field name="Immediate" size="32" start="0" type="int"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode"/>
-  </struct>
-
-  <struct name="CS ARITH_REG64 Base" size="2">
-    <field name="Immediate" size="24" start="0" type="int"/>
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
   </struct>
 
   <struct name="CS MOVE_REG32" size="2">
@@ -1192,218 +1067,6 @@
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="LOGIC_OP32"/>
   </struct>
 
-  <struct name="CS BFEXT_U32" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="BFEXT_U32"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-  </struct>
-
-  <struct name="CS BFEXT_U64" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="BFEXT_U64"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-  </struct>
-
-  <struct name="CS BFEXT_S32" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="BFEXT_S32"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-  </struct>
-
-  <struct name="CS BFEXT_S64" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="BFEXT_S64"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-  </struct>
-
-  <struct name="CS BFINS32" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode" default="BFINS32"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
-  </struct>
-
-  <struct name="CS BFINS_IMM32" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Imm" size="16" start="16" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="BFINS_IMM32"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-  </struct>
-
-  <struct name="CS BFINS64" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode" default="BFINS64"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
-  </struct>
-
-  <struct name="CS BFINS_IMM64" size="2">
-    <field name="Position" size="8" start="0" type="uint"/>
-    <field name="Width" size="8" start="8" type="uint"/>
-    <field name="Imm" size="16" start="16" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="BFINS_IMM64"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-  </struct>
-
-  <struct name="CS LSHIFT32" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode" default="LSHIFT32"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
-  </struct>
-
-  <struct name="CS LSHIFT64" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode" default="LSHIFT64"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
-  </struct>
-
-  <struct name="CS LSHIFT_IMM32" size="2">
-    <field name="Shift Amount" size="5" start="0" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="LSHIFT_IMM32"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-  </struct>
-
-  <struct name="CS LSHIFT_IMM64" size="2">
-    <field name="Shift Amount" size="6" start="0" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="LSHIFT_IMM64"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-  </struct>
-
-  <struct name="CS RSHIFT_U32" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode" default="RSHIFT_U32"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
-  </struct>
-
-  <struct name="CS RSHIFT_U64" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode" default="RSHIFT_U64"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
-  </struct>
-
-  <struct name="CS RSHIFT_IMM_U32" size="2">
-    <field name="Shift Amount" size="5" start="0" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="RSHIFT_IMM_U32"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-  </struct>
-
-  <struct name="CS RSHIFT_IMM_U64" size="2">
-    <field name="Shift Amount" size="6" start="0" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="RSHIFT_IMM_U64"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-  </struct>
-
-  <struct name="CS RSHIFT_S32" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode" default="RSHIFT_S32"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
-  </struct>
-
-  <struct name="CS RSHIFT_S64" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode" default="RSHIFT_S64"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
-  </struct>
-
-  <struct name="CS RSHIFT_IMM_S32" size="2">
-    <field name="Shift Amount" size="5" start="0" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="RSHIFT_IMM_S32"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-  </struct>
-
-  <struct name="CS RSHIFT_IMM_S64" size="2">
-    <field name="Shift Amount" size="6" start="0" type="uint"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="RSHIFT_IMM_S64"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-  </struct>
-
-  <struct name="CS SUB32" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG32 Sub Opcode" default="SUB32"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG32"/>
-  </struct>
-
-  <struct name="CS SUB64" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode" default="SUB64"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
-  </struct>
-
-  <struct name="CS UMIN64" size="2">
-    <field name="Sub Opcode" size="8" start="24" type="CS ARITH_REG64 Sub Opcode" default="UMIN64"/>
-    <field name="Source 1" size="8" start="32" type="uint"/>
-    <field name="Source 0" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_REG64"/>
-  </struct>
-
-  <struct name="CS UMIN_IMM64" size="2">
-    <field name="Immediate" size="32" start="0" type="hex"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM64 Sub Opcode" default="UMIN_IMM64"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM64"/>
-  </struct>
-
-  <struct name="CS UMIN_IMM32" size="2">
-    <field name="Immediate" size="32" start="0" type="hex"/>
-    <field name="Sub Opcode" size="8" start="32" type="CS ARITH_IMM32 Sub Opcode" default="UMIN_IMM32"/>
-    <field name="Source" size="8" start="40" type="uint"/>
-    <field name="Destination" size="8" start="48" type="uint"/>
-    <field name="Opcode" size="8" start="56" type="CS Opcode" default="ARITH_IMM32"/>
-  </struct>
-
   <enum name="COMPUTE SR">
     <value name="SRT_0" value="0"/>
     <value name="SRT_1" value="2"/>
@@ -1434,47 +1097,46 @@
   </enum>
 
   <enum name="IDVS SR">
-    <value name="VERTEX_SRT" value="0"/>
-    <value name="FRAGMENT_SRT" value="2"/>
-    <value name="VERTEX_FAU" value="8"/>
-    <value name="FRAGMENT_FAU" value="10"/>
-    <value name="VERTEX_SPD" value="16"/>
-    <value name="FRAGMENT_SPD" value="18"/>
-    <value name="VERTEX_TSD" value="24"/>
-    <value name="FRAGMENT_TSD" value="26"/>
+    <value name="SRT_0" value="0"/>
+    <value name="SRT_1" value="2"/>
+    <value name="SRT_2" value="4"/>
+    <value name="SRT_3" value="6"/>
+    <value name="FAU_0" value="8"/>
+    <value name="FAU_1" value="10"/>
+    <value name="FAU_2" value="12"/>
+    <value name="FAU_3" value="14"/>
+    <value name="SPD_0" value="16"/>
+    <value name="SPD_1" value="18"/>
+    <value name="SPD_2" value="20"/>
+    <value name="SPD_3" value="22"/>
+    <value name="TSD_0" value="24"/>
+    <value name="TSD_1" value="26"/>
+    <value name="TSD_2" value="28"/>
+    <value name="TSD_3" value="30"/>
     <value name="GLOBAL_ATTRIBUTE_OFFSET" value="32"/>
     <value name="INDEX_COUNT" value="33"/>
     <value name="INSTANCE_COUNT" value="34"/>
     <value name="INDEX_OFFSET" value="35"/>
     <value name="VERTEX_OFFSET" value="36"/>
     <value name="INSTANCE_OFFSET" value="37"/>
+    <value name="DCD2" value="38"/>
+    <value name="INDEX_BUFFER_SIZE" value="39"/>
     <value name="TILER_CTX" value="40"/>
     <value name="SCISSOR_BOX" value="42"/>
-    <value name="VIEWPORT_HIGH" value="44"/>
-    <value name="VIEWPORT_LOW" value="46"/>
-    <value name="INDEX_BUFFER" value="48"/>
-    <value name="INDEX_BUFFER_SIZE" value="50"/>
-    <value name="VARY_SIZE" value="51"/>
+    <value name="LOW_DEPTH_CLAMP" value="44"/>
+    <value name="HIGH_DEPTH_CLAMP" value="45"/>
+    <value name="OQ" value="46"/>
+    <value name="VARY_SIZE" value="48"/>
+    <value name="BLEND_DESC" value="50"/>
     <value name="ZSD" value="52"/>
-    <value name="BLEND_DESC" value="54"/>
+    <value name="INDEX_BUFFER" value="54"/>
     <value name="TILER_FLAGS" value="56"/>
     <value name="DCD0" value="57"/>
     <value name="DCD1" value="58"/>
-    <value name="DCD2" value="59"/>
-    <value name="LINE_WIDTH" value="60"/>
+    <value name="PRIMITIVE_SIZE" value="60"/>
     <value name="TILER_FLAGS2" value="61"/>
     <value name="ITER_TRACE_ID0" value="62"/>
     <value name="ITER_TRACE_ID1" value="63"/>
-    <value name="OQ" value="64"/>
-  </enum>
-
-  <enum name="FULLSCREEN SR">
-    <value name="TILER_CTX" value="40"/>
-    <value name="SCISSOR_BOX" value="42"/>
-    <value name="TILER_FLAGS" value="56"/>
-    <value name="TILER_DCD_FLAGS0" value="57"/>
-    <value name="TILER_DCD_FLAGS1" value="58"/>
-    <value name="TILER_DCD_FLAGS2" value="59"/>
   </enum>
 
   <enum name="FRAGMENT SR">
@@ -1485,6 +1147,12 @@
     <value name="TEM_ROW_STRIDE" value="46"/>
     <value name="ITER_TRACE_ID0" value="62"/>
     <value name="ITER_TRACE_ID1" value="63"/>
+  </enum>
+
+  <enum name="FULLSCREEN SR">
+    <value name="TILER_CTX" value="40"/>
+    <value name="SCISSOR_BOX" value="42"/>
+    <value name="TILER_FLAGS" value="56"/>
   </enum>
 
   <struct name="Descriptor Header" size="1" align="32">
@@ -1625,6 +1293,12 @@
     <field name="Conversion" size="32" start="7:0" type="Internal Conversion"/>
   </struct>
 
+  <enum name="Point Size Array Format">
+    <value name="None" value="0"/>
+    <value name="FP16" value="2"/>
+    <value name="FP32" value="3"/>
+  </enum>
+
   <enum name="FIFO format">
     <value name="Auto" value="0"/>
     <value name="Basic" value="1"/>
@@ -1634,6 +1308,7 @@
   <struct name="Primitive Flags" size="1">
     <field name="Draw mode" size="4" start="0:0" type="Draw Mode" default="None"/>
     <field name="Index type" size="3" start="0:8" type="Index Type" default="None"/>
+    <field name="Point size array format" size="2" start="0:11" type="Point Size Array Format"/>
     <field name="Primitive Index Enable" size="1" start="0:13" type="bool"/>
     <field name="Primitive Index Override" size="1" start="0:14" type="bool"/>
     <field name="Allow rotating primitives" size="1" start="0:15" type="bool"/>
@@ -1676,6 +1351,7 @@
   <struct name="Primitive">
     <field name="Draw mode" size="8" start="0:0" type="Draw Mode" default="None"/>
     <field name="Index type" size="3" start="0:8" type="Index Type" default="None"/>
+    <field name="Point size array format" size="2" start="0:11" type="Point Size Array Format"/>
     <field name="Primitive Index Enable" size="1" start="0:13" type="bool"/>
     <field name="Primitive Index Override" size="1" start="0:14" type="bool"/>
     <field name="Allow rotating primitives" size="1" start="0:15" type="bool"/>
@@ -1914,8 +1590,8 @@
   </struct>
 
   <struct name="Plane Header" size="1" align="32">
-    <field name="Type" size="4" start="0:0" type="Descriptor Type"/>
-    <field name="Plane type" size="4" start="0:4" type="Plane Type"/>
+    <field name="Type" size="4" start="0:0" type="Descriptor Type" default="Plane"/>
+    <field name="Plane type" size="4" start="0:4" type="Plane Type" default="Null"/>
     <field name="Ignore" size="24" start="0:8" type="uint"/>
   </struct>
 
@@ -2072,10 +1748,18 @@
     <value name="GL" value="1"/>
   </enum>
 
+  <enum name="Warp limit">
+    <value name="Full" value="0"/>
+    <value name="Half" value="1"/>
+    <value name="One-quarter" value="2"/>
+    <value name="One-height" value="3"/>
+  </enum>
+
   <struct name="Shader Program" size="8" align="32">
     <field name="Type" size="4" start="0:0" type="Descriptor Type" default="Shader"/>
     <field name="Stage" size="4" start="0:4" type="Shader stage"/>
     <field name="Fragment coverage bitmask type" size="1" start="0:8" type="Coverage bitmask type"/>
+    <field name="Vertex warp limit" size="2" start="0:8" type="Warp limit"/>
     <field name="Suppress NaN" size="1" start="0:16" type="bool"/>
     <field name="Flush to zero mode" size="2" start="0:17" type="Flush to zero mode"/>
     <field name="Suppress Inf" size="1" start="0:19" type="bool"/>
@@ -2083,7 +1767,6 @@
     <field name="Shader contains JUMP_EX" size="1" start="0:29" type="bool"/>
     <field name="Register allocation" size="2" start="0:30" type="Shader Register Allocation"/>
     <field name="Preload" size="16" start="1:0" type="Preload"/>
-    <field name="Max Warps" size="16" start="1:16" type="uint"/>
     <field name="Binary" size="64" start="2:0" type="address"/>
   </struct>
 
@@ -2225,7 +1908,6 @@
     <value name="Rotated 4x Grid" value="2"/>
     <value name="D3D 8x Grid" value="3"/>
     <value name="D3D 16x Grid" value="4"/>
-    <value name="Rotated 2x Grid" value="5"/>
   </enum>
 
   <enum name="Z Internal Format">
@@ -2238,8 +1920,8 @@
     <value name="Never" value="0"/>
     <value name="Always" value="1"/>
     <value name="Intersect" value="2"/>
-    <value name="Prepass Always" value="5"/>
-    <value name="Prepass Intersect" value="6"/>
+    <value name="Early ZS Always" value="3"/>
+    <value name="Early ZS Intersect" value="4"/>
   </enum>
 
   <enum name="Downscale">
@@ -2254,24 +1936,11 @@
     <value name="Granule 32x32" value="2"/>
   </enum>
 
-  <struct name="Viewport" align="16">
-    <field name="Min X" size="16" start="0:0" type="uint"/>
-    <field name="Min Y" size="16" start="0:16" type="uint"/>
-    <field name="Max X" size="16" start="1:0" type="uint"/>
-    <field name="Max Y" size="16" start="1:16" type="uint"/>
-    <field name="Min Depth" size="32" start="2:0" type="float"/>
-    <field name="Max Depth" size="32" start="3:0" type="float"/>
-  </struct>
-
   <struct name="Framebuffer Parameters" align="64">
     <field name="Pre Frame 0" size="3" start="0:0" type="Pre Post Frame Shader Mode"/>
     <field name="Pre Frame 1" size="3" start="0:3" type="Pre Post Frame Shader Mode"/>
     <field name="Post Frame" size="3" start="0:6" type="Pre Post Frame Shader Mode"/>
     <field name="Downscale geometry" size="2" start="0:9" type="Downscale"/>
-    <field name="HSR Prepass Enable" size="1" start="0:11" type="bool"/>
-    <field name="HSR Prepass Interleaving Enable" size="1" start="0:12" type="bool"/>
-    <field name="HSR Prepass Filter Enable" size="1" start="0:13" type="bool"/>
-    <field name="HSR Hierarchical Optimizations Enable" size="1" start="0:14" type="bool"/>
     <field name="Internal layer index" size="8" start="0:24" type="uint"/>
     <field name="Frame argument" size="64" start="2:0" type="hex"/>
     <field name="Sample Locations" size="64" start="4:0" type="address"/>
@@ -2399,6 +2068,11 @@
     <value name="256" value="1"/>
   </enum>
 
+  <enum name="RT Downscale">
+    <value name="None" value="0"/>
+    <value name="2x" value="1"/>
+  </enum>
+
   <struct name="RT Clear">
     <field name="Color 0" size="32" start="0:0" type="uint"/>
     <field name="Color 1" size="32" start="1:0" type="uint"/>
@@ -2420,6 +2094,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
+    <field name="Downscale Mode" size="2" start="1:29" type="RT Downscale"/>
     <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="Writeback buffer" size="128" start="8:0" type="RT Buffer"/>
     <field name="Clear" size="128" start="12:0" type="RT Clear"/>
@@ -2466,6 +2141,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
+    <field name="Downscale Mode" size="2" start="1:29" type="RT Downscale"/>
     <!-- Must be set if either one of the effective tile size dimension is
          smaller than the AFBC superblock dimension. -->
     <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
@@ -2526,10 +2202,11 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
+    <field name="Downscale Mode" size="2" start="1:29" type="RT Downscale"/>
     <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="AFRC Block Size" size="4" start="2:4" type="AFRC Block Size"/>
     <field name="AFRC Format" size="8" start="2:8" type="AFRC Format"/>
-    <field name="Codec args" size="8" start="3:0" type="uint"/>
+    <field name="AFRC Codec args" size="8" start="3:0" type="uint"/>
     <field name="Writeback buffer" size="128" start="8:0" type="RT Buffer"/>
     <field name="Clear" size="128" start="12:0" type="RT Clear"/>
   </struct>
@@ -2611,7 +2288,6 @@
     <field name="Sample Pattern" size="3" start="2:13" type="Sample Pattern"/>
     <field name="Sample test disable" size="1" start="2:17" type="bool"/>
     <field name="First provoking vertex" size="1" start="2:18" type="bool"/>
-    <field name="Effective Tile Size" size="4" start="2:20" type="uint" modifier="log2"/>
     <field name="FB Width" size="16" start="3:0" type="uint" modifier="minus(1)"/>
     <field name="FB Height" size="16" start="3:16" type="uint" modifier="minus(1)"/>
     <field name="Layer count" size="8" start="4:0" type="uint" default="1" modifier="minus(1)"/>
@@ -2637,6 +2313,29 @@
     <field name="ZS CRC Extension present" start="1" size="1" type="bool"/>
     <field name="Render target count" start="2" size="4" type="uint" modifier="minus(1)"/>
     <field name="Pointer" start="6" size="58" type="address" modifier="shr(6)"/>
+  </struct>
+
+  <struct name="Fragment Job Payload" size="8">
+    <field name="Bound Min X" size="12" start="0:0" type="uint"/>
+    <field name="Bound Min Y" size="12" start="0:16" type="uint"/>
+    <field name="Bound Max X" size="12" start="1:0" type="uint"/>
+    <field name="Bound Max Y" size="12" start="1:16" type="uint"/>
+    <field name="Tile render order" size="3" start="1:28" type="Tile Render Order"/>
+    <field name="Has Tile Enable Map" size="1" start="1:31" type="bool"/>
+    <field name="Framebuffer" size="64" start="2:0" type="address"/>
+    <field name="Tile Enable Map" size="64" start="4:0" type="address"/>
+    <field name="Tile Enable Map Row Stride" size="8" start="6:0" type="uint"/>
+  </struct>
+
+  <struct name="Shader Environment" size="16" align="64">
+    <field name="Attribute offset" start="0:0" size="32" type="uint"/>
+    <field name="FAU count" start="1:0" size="8" type="uint"/>
+    <field name="Resources" start="8:0" size="64" type="address"/>
+    <field name="Shader" start="10:0" size="64" type="address"/>
+    <field name="Thread storage" start="12:0" size="64" type="address"/>
+    <field name="FAU" start="14:0" size="64" type="address"/>
+
+    <value name="Mali resource table size alignment" value="4"/>
   </struct>
 
   <struct name="Compute size workgroup" size="1">
@@ -2670,6 +2369,7 @@
     <field name="Back value mask" size="8" start="1:24" type="hex"/>
     <field name="Front reference value" size="8" start="2:0" type="hex"/>
     <field name="Back reference value" size="8" start="2:8" type="hex"/>
+    <field name="Separated Dependency Tracking" size="1" start="4:21" type="bool"/>
     <field name="Depth cull enable" size="1" start="4:22" type="bool" default="true"/>
     <field name="Depth clamp mode" size="2" start="4:23" type="Depth Clamp Mode" default="[0, 1]"/>
     <field name="Depth source" size="2" start="4:25" type="Depth Source" default="Fixed function"/>
@@ -2679,6 +2379,17 @@
     <field name="Depth units" size="32" start="5:0" type="float"/>
     <field name="Depth factor" size="32" start="6:0" type="float"/>
     <field name="Depth bias clamp" size="32" start="7:0" type="float"/>
+  </struct>
+
+  <struct name="Vertex Array" size="3">
+    <field name="Packet" size="1" start="0:0" type="bool"/>
+
+    <!-- Written by hardware in packet mode -->
+    <field name="Pointer" size="58" start="0:6" type="address" modifier="shr(6)"/>
+
+    <!-- Written by hardware, leave zero -->
+    <field name="Vertex packet stride" size="16" start="2:0" type="uint"/>
+    <field name="Vertex attribute stride" size="16" start="2:16" type="uint"/>
   </struct>
 
   <enum name="Conservative Rast Mode">
@@ -2691,12 +2402,12 @@
     <field name="Allow Forward Pixel To Be Killed" size="1" start="1" type="bool"/>
     <field name="Pixel Kill Operation" size="2" start="2" type="Pixel Kill"/>
     <field name="ZS Update Operation" size="2" start="4" type="Pixel Kill"/>
+    <field name="Allow Primitive Reorder" size="1" start="6" type="bool"/>
     <field name="Overdraw Alpha0" size="1" start="7" type="bool"/>
     <field name="Overdraw Alpha1" size="1" start="8" type="bool"/>
     <field name="Clean Fragment Write" size="1" start="9" type="bool"/>
     <field name="Primitive Barrier" size="1" start="10" type="bool"/>
     <field name="Evaluate per-sample" size="1" start="11" type="bool"/>
-    <field name="Disable VRS Clamp 2x2" size="1" start="12" type="bool"/>
     <field name="Aligned line-ends" size="1" start="13" type="bool"/>
     <field name="Occlusion Query" size="2" start="14" type="Occlusion Mode"/>
     <field name="Front Face CCW" size="1" start="16" type="bool"/>
@@ -2709,63 +2420,38 @@
     <field name="Scissor To Bounding Box" size="1" start="23" type="bool"/>
     <field name="Conservative Rast Mode" size="2" start="24" type="Conservative Rast Mode"/>
     <field name="Cull Zero Area" size="1" start="26" type="bool"/>
-    <field name="Conservative Tracking" size="1" start="27" type="bool"/>
   </struct>
 
   <struct name="DCD Flags 1" size="1">
     <field name="Sample Mask" size="16" start="0" type="hex"/>
-    <field name="Render Target Mask" size="12" start="16" type="hex"/>
+    <field name="Render Target Mask" size="11" start="16" type="hex"/>
+    <field name="Enable VRS Clamp 2x2" size="1" start="27" type="bool"/>
   </struct>
-
-  <enum name="HSR Update">
-    <value name="Early" value="0"/>
-    <value name="Late" value="1"/>
-  </enum>
-
-  <enum name="HSR Prepass Kill">
-    <value name="Follow HSR Update" value="0"/>
-    <value name="Late" value="1"/>
-  </enum>
 
   <struct name="DCD Flags 2" size="1">
     <field name="Read Mask" size="12" start="0" type="hex"/>
     <field name="Write Mask" size="12" start="12" type="hex"/>
     <field name="No Shader Stencil Read" size="1" start="24" type="bool"/>
     <field name="No Shader Depth Read" size="1" start="25" type="bool"/>
-    <field name="HSR Can Cull" size="1" start="26" type="bool"/>
-    <field name="HSR Can Be Culled" size="1" start="27" type="bool"/>
-    <field name="Z Write Or Stencil" size="1" start="28" type="bool"/>
-    <field name="Enable Varying Shading In Pre Pass" size="1" start="29" type="bool"/>
-    <field name="HSR Update Operation" size="1" start="30" type="HSR Update"/>
-    <field name="HSR Prepass Kill Operation" size="1" start="31" type="HSR Prepass Kill"/>
-  </struct>
-
-  <struct name="FAU Pointer" size="2">
-    <field name="Pointer" start="0" size="56" type="address"/>
-    <field name="Count" start="56" size="8" type="uint"/>
   </struct>
 
   <struct name="Draw" align="64">
     <field name="Flags 0" size="32" start="0:0" type="DCD Flags 0"/>
     <field name="Flags 1" size="32" start="1:0" type="DCD Flags 1"/>
-    <field name="Vertex pointer" start="2:0" size="64" type="address"/>
-
+    <field name="Vertex array" start="2:0" size="96" type="Vertex Array"/>
     <field name="Flags 2" start="5:0" size="32" type="DCD Flags 2"/>
-
+    <field name="Minimum Z" start="6:0" size="32" type="float"/>
+    <field name="Maximum Z" start="7:0" size="32" type="float"/>
     <field name="Depth/stencil" start="10:0" size="64" type="address"/>
     <field name="Blend count" start="12:0" size="4" type="uint"/>
     <field name="Blend" start="12:4" size="60" type="address" modifier="shr(4)"/>
     <field name="Occlusion" size="64" start="14:0" type="address"/>
+    <field name="Shader" start="16:0" size="512" type="Shader Environment"/>
+  </struct>
 
-    <field name="Vertex Resources" start="18:0" size="64" type="address"/>
-    <field name="Vertex Shader" start="20:0" size="64" type="address"/>
-    <field name="Vertex FAU" start="22:0" size="64" type="FAU Pointer"/>
-    <field name="Fragment Resources" start="24:0" size="64" type="address"/>
-    <field name="Fragment Shader" start="26:0" size="64" type="address"/>
-    <field name="Thread storage" start="28:0" size="64" type="address"/>
-    <field name="Fragment FAU" start="30:0" size="64" type="FAU Pointer"/>
-
-    <value name="Mali resource table size alignment" value="4"/>
+  <struct name="Primitive Size" size="2">
+    <field name="Fixed Sized" size="32" start="0:0" type="float"/>
+    <field name="Size Array" size="64" start="0:0" type="uint"/>
   </struct>
 
 </panxml>

@@ -369,8 +369,7 @@ translate_superblock_size(uint64_t modifier)
    } while (0)
 #endif
 
-/* arch 11 shares the v10 XML, which has no 64-bit size/stride split */
-#if PAN_ARCH > 11
+#if PAN_ARCH > 10
 #define PLANE_SET_SIZE(cfg__, size__)                                          \
    do {                                                                        \
       (cfg__).size = size__ & BITFIELD_MASK(32);                               \
@@ -661,8 +660,7 @@ emit_afbc_plane(const struct pan_image_view *iview, int plane_idx,
       cfg.pointer = header_addr;
       cfg.header_row_stride = header_row_stride;
       cfg.header_slice_size = header_slice_size;
-/* arch 11 shares the v10 XML, which has no 64-bit stride split */
-#if PAN_ARCH <= 11
+#if PAN_ARCH <= 10
       cfg.header_slice_stride = header_slice_stride;
 #else
       cfg.header_slice_stride = header_slice_stride & BITFIELD_MASK(32);

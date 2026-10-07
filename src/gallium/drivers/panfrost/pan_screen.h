@@ -180,6 +180,7 @@ void panfrost_cmdstream_screen_init_v6(struct panfrost_screen *screen);
 void panfrost_cmdstream_screen_init_v7(struct panfrost_screen *screen);
 void panfrost_cmdstream_screen_init_v9(struct panfrost_screen *screen);
 void panfrost_cmdstream_screen_init_v10(struct panfrost_screen *screen);
+void panfrost_cmdstream_screen_init_v11(struct panfrost_screen *screen);
 void panfrost_cmdstream_screen_init_v12(struct panfrost_screen *screen);
 void panfrost_cmdstream_screen_init_v13(struct panfrost_screen *screen);
 void panfrost_cmdstream_screen_init_v14(struct panfrost_screen *screen);

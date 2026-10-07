@@ -1774,7 +1774,8 @@ cs_render_desc_ringbuf_reserve(struct cs_builder *b, uint32_t size)
 
    /* Wait for the other end to release memory. */
    cs_move32_to(b, sz_reg, size - 1);
-   cs_sync32_wait(b, false, MALI_CS_CONDITION_GREATER, sz_reg, ringbuf_sync);
+   cs_sync32_wait(b, false, MALI_CS_SYNC_SCOPE_CSG,
+                  MALI_CS_CONDITION_GREATER, sz_reg, ringbuf_sync);
 
    /* Decrement the syncobj to reflect the fact we're reserving memory. */
    cs_move32_to(b, sz_reg, -size);
@@ -2689,6 +2690,8 @@ build_zsd(struct panvk_cmd_buffer *cmdbuf, struct pan_earlyzs_state earlyzs,
       if (fs) {
 #if PAN_ARCH <= 10
          cfg.shader_read_only_z_s = earlyzs.shader_readonly_zs;
+#elif PAN_ARCH == 11
+         cfg.separated_dependency_tracking = true;
 #endif
          cfg.depth_source = pan_depth_source(&fs->info);
       }
@@ -2964,7 +2967,7 @@ build_dcd_flags(struct panvk_cmd_buffer *cmdbuf,
       cfg.occlusion_query = cmdbuf->state.gfx.occlusion_query.mode;
       cfg.alpha_to_coverage = alpha_to_coverage;
       cfg.scissor_to_bounding_box = true;
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       cfg.conservative_rast_mode =
          rs->conservative_mode ==
                VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT
@@ -2984,7 +2987,7 @@ build_dcd_flags(struct panvk_cmd_buffer *cmdbuf,
    pan_pack(&out->flags_2, DCD_FLAGS_2, cfg) {
       cfg.read_mask = out->rt_read;
       cfg.write_mask = out->rt_written;
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       if (fs) {
          cfg.no_shader_depth_read = !z_attachment_read(fs, &dyns->ial);
          cfg.no_shader_stencil_read = !s_attachment_read(fs, &dyns->ial);
@@ -3080,7 +3083,7 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf,
       (cmdbuf->state.gfx.tess.tes.shader &&
        !cmdbuf->state.gfx.gs.shader &&
        dyn_gfx_state_dirty(cmdbuf, TS_DOMAIN_ORIGIN)) ||
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       dyn_gfx_state_dirty(cmdbuf, RS_CONSERVATIVE_MODE) ||
 #endif
       dyn_gfx_state_dirty(cmdbuf, MS_RASTERIZATION_SAMPLES) ||
@@ -3208,7 +3211,7 @@ set_tiler_idvs_flags(struct cs_builder *b, struct panvk_cmd_buffer *cmdbuf,
       }
 
       cs_move32_to(b, cs_sr_reg32(b, IDVS, TILER_FLAGS), tiler_idvs_flags.opaque[0]);
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       struct mali_primitive_flags_2_packed tiler_flags_2;
       pan_pack(&tiler_flags_2, PRIMITIVE_FLAGS_2, cfg) {
 #if PAN_ARCH >= 14
@@ -5412,8 +5415,14 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
       return;
    }
 
+   /* An indirect draw commonly covers 10^4-10^6 vertices (GPU-driven
+    * rendering), so credit it far above a trivial fixed estimate: at 256
+    * units/draw a UE4-class frame barely moved the renewal work counter,
+    * letting one heap generation accumulate hundreds of MiB of tiler output
+    * until the kernel's OOM grow failed (max_chunks) and it terminated the
+    * CSG -- whose teardown race is the 2026-10-07 kernel-panic trigger. */
    if (draw.indirect.buffer_dev_addr)
-      account_tiler_work(cmdbuf, (uint64_t)draw.indirect.draw_count * 256);
+      account_tiler_work(cmdbuf, (uint64_t)draw.indirect.draw_count * 4096);
    else
       account_tiler_work(cmdbuf,
                          (uint64_t)draw.vertex.count * draw.instance.count);
@@ -6159,7 +6168,7 @@ cmd_run_fullscreen(struct panvk_cmd_buffer *cmdbuf, uint64_t dcd,
 
    struct cs_index draw_ptr = cs_scratch_reg64(b, 0);
    struct cs_index tf_tmp = cs_scratch_reg32(b, 2);
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
    struct cs_index tf2_tmp = cs_scratch_reg32(b, 3);
 #endif
 #if PAN_ARCH >= 13
@@ -6175,7 +6184,7 @@ cmd_run_fullscreen(struct panvk_cmd_buffer *cmdbuf, uint64_t dcd,
    /* We need to set our own tiler flags so save them off */
    cs_move_reg32(b, tf_tmp, cs_sr_reg32(b, IDVS, TILER_FLAGS));
 
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
    cs_move_reg32(b, tf2_tmp, cs_sr_reg32(b, IDVS, TILER_FLAGS2));
    cs_update_vt_ctx(b) {
       struct mali_primitive_flags_2_packed tiler_flags_2;
@@ -6293,7 +6302,7 @@ cmd_run_fullscreen(struct panvk_cmd_buffer *cmdbuf, uint64_t dcd,
 
    cs_update_vt_ctx(b) {
       cs_move_reg32(b, cs_sr_reg32(b, IDVS, TILER_FLAGS), tf_tmp);
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       cs_move_reg32(b, cs_sr_reg32(b, IDVS, TILER_FLAGS2), tf2_tmp);
 #endif
 #if PAN_ARCH >= 13
@@ -6334,7 +6343,7 @@ panvk_per_arch(cmd_fb_barrier)(struct panvk_cmd_buffer *cmdbuf)
 
       cfg.flags_2.read_mask = 0;
       cfg.flags_2.write_mask = 0;
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       cfg.flags_2.no_shader_depth_read = true;
       cfg.flags_2.no_shader_stencil_read = true;
 #endif
@@ -6368,7 +6377,7 @@ flush_tiling(struct panvk_cmd_buffer *cmdbuf)
     * skip an ADD operation on the syncobjs pointer. */
    STATIC_ASSERT(PANVK_SUBQUEUE_VERTEX_TILER == 0);
 
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
    struct cs_index sync_addr = cs_scratch_reg64(b, 0);
    struct cs_index add_val = cs_scratch_reg64(b, 2);
 
@@ -6435,8 +6444,8 @@ wait_finish_tiling(struct panvk_cmd_buffer *cmdbuf)
                 rel_vt_sync_point);
 
    panvk_instr_sync64_wait(cmdbuf, PANVK_SUBQUEUE_FRAGMENT, false,
-                           MALI_CS_CONDITION_GREATER, vt_sync_point,
-                           vt_sync_addr);
+                           cmdbuf->sync_scope, MALI_CS_CONDITION_GREATER,
+                           vt_sync_point, vt_sync_addr);
 }
 
 static uint32_t
@@ -6772,7 +6781,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
        * No need to wait for sb_upd_ctx.next_sb, this is taken care of in
        * the cs_iter_sb_update() preamble.
        */
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       const struct cs_async_op async = cs_defer_indirect();
 
       cs_set_state(b, MALI_CS_SET_STATE_TYPE_SB_SEL_DEFERRED,
@@ -6800,7 +6809,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
          cs_frag_end(b, async);
       }
 
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       cs_set_state_imm32(b, MALI_CS_SET_STATE_TYPE_SB_SEL_DEFERRED,
                          SB_ID(DEFERRED_SYNC));
 #else
@@ -6816,7 +6825,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
          struct cs_index flush_id = oq_chain_lo;
          cs_move32_to(b, flush_id, 0);
 
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
          /* FLUSH_CACHE2 is part of the deferred group so we need to
           * temporarily set DEFERRED_FLUSH here to use the right scoreboard in
           * indirect mode */
@@ -6827,7 +6836,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
 #endif
          cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_CLEAN,
                          MALI_CS_OTHER_FLUSH_MODE_NONE, flush_id, async);
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
          cs_set_state_imm32(b, MALI_CS_SET_STATE_TYPE_SB_SEL_DEFERRED,
                             SB_ID(DEFERRED_SYNC));
 #else

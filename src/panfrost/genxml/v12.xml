@@ -934,6 +934,7 @@
 
   <struct name="CS SYNC_WAIT32" size="2">
     <field name="Error Reject" size="1" start="0" type="bool"/>
+    <field name="Scope" size="2" start="1" type="CS Sync Scope"/>
     <field name="Condition" size="4" start="28" type="CS Condition"/>
     <field name="Data" size="8" start="32" type="uint"/>
     <field name="Address" size="8" start="40" type="uint"/>
@@ -1027,6 +1028,7 @@
 
   <struct name="CS SYNC_WAIT64" size="2">
     <field name="Error Reject" size="1" start="0" type="bool"/>
+    <field name="Scope" size="2" start="1" type="CS Sync Scope"/>
     <field name="Condition" size="4" start="28" type="CS Condition"/>
     <field name="Data" size="8" start="32" type="uint"/>
     <field name="Address" size="8" start="40" type="uint"/>

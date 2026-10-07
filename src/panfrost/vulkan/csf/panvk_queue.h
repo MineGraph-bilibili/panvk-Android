@@ -108,6 +108,12 @@ struct panvk_subqueue {
       uint32_t last_stream_size;
       uint32_t last_flush_id;
       uint64_t last_stream_addr;
+      /* DIAG-ONLY (panvk.17-diag): CPU mapping of the last stream submitted
+       * on this subqueue.  The 16-diag ring census proved the 64KB ring holds
+       * no sync atoms (entries are pure CALL trampolines); the fence/semaphore
+       * signal atoms live in the stream reached through cs_call(), so the
+       * fatal dump needs the stream's CPU mapping to census them. */
+      const void *last_stream_cpu;
 
       struct panvk_priv_mem init_cs;
       uint64_t init_stream_addr;
@@ -139,10 +145,10 @@ struct panvk_gpu_queue {
    struct panvk_priv_mem syncobjs;
 
 #ifdef HAVE_PAN_KMOD_KBASE
-   /* Per-subqueue completion seqno cells (panvk_cs_sync64 layout), bumped
-    * by a SYNC_ADD64 at the end of every ring entry and polled by the CPU.
-    * Must live in GPU-uncached memory: on inner-shareable pages the sync
-    * write can linger in the GPU L2 where the CPU never sees it. */
+   /* Per-subqueue completion seqno cells (panvk_cs_sync64 layout), written
+    * with a plain LS store at the end of every ring entry and polled by the
+    * CPU.  Must live in GPU-uncached memory: on inner-shareable pages the
+    * sync write can linger in the GPU L2 where the CPU never sees it. */
    struct {
       struct pan_kmod_bo *bo;
       void *cpu;
@@ -150,6 +156,21 @@ struct panvk_gpu_queue {
    } kbase_seqnos;
    uint32_t kbase_tiler_submit_count;
    uint64_t kbase_tiler_work_count;
+   /* DIAG-ONLY (panvk.15-diag): fires the immediate fatal-state dump exactly
+    * once, as close to the faulting atomic as possible.  The 10s timeout
+    * snapshot lands long after the fatal notification was consumed, and the
+    * exception tears the CS down asynchronously -- the widest evidence is
+    * right after the notification read returns. */
+   bool kbase_fatal_dumped;
+   /* Consecutive skipped renewals (retirement ring full or no free desc
+    * slot).  While a renewal skips, the current heap generation keeps
+    * growing through the kernel's grow-on-fault path; if the skips persist
+    * the generation hits max_chunks and the kernel's unhandled-OOM
+    * termination of the CSG is the panic trigger.  After
+    * KBASE_RENEW_SKIP_DRAIN_THRESHOLD consecutive skips the next attempt
+    * falls back to the old drain-per-renewal semantics, which always makes
+    * progress.  Submit-thread only, no lock needed. */
+   uint32_t kbase_renew_skip_count;
    /* Tiler heap generations retired by past heap renewals.  Renewal no
     * longer drains the graphics subqueues: it switches to a brand-new
     * kernel heap (fresh chunk pool) and parks the old context here until
@@ -157,8 +178,11 @@ struct panvk_gpu_queue {
     * retirement (their in-flight HEAP_SETs still reference it).  Slots are
     * destroyed lazily, but only at graphics-silence points (both graphics
     * subqueues fully drained); a renewal that finds no free slot falls
-    * back to the old graphics drain. */
-#define KBASE_RETIRED_HEAP_SLOTS 4
+    * back to the old graphics drain.  16 slots: the 32x renew-work cadence
+    * rotates ~4x more often than the original 128x one, so the ring grew
+    * 4x to match, keeping the full-ring skip rare under sustained tiler
+    * load (2026-10-07). */
+#define KBASE_RETIRED_HEAP_SLOTS 16
    struct {
       uint32_t count;
       struct {

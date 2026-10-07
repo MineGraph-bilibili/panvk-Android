@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 pan_packers = []
-foreach packer : ['common', 'v4', 'v5', 'v6', 'v7', 'v9', 'v10', 'v12', 'v13', 'v14']
+foreach packer : ['common', 'v4', 'v5', 'v6', 'v7', 'v9', 'v10', 'v11', 'v12', 'v13', 'v14']
   pan_packers += custom_target(
     packer + '_pack.h',
     input : ['gen_pack.py', packer + '.xml'],
@@ -20,7 +20,7 @@ idep_pan_packers = declare_dependency(
 
 libpanfrost_decode_per_arch = []
 
-foreach ver : ['4', '5', '6', '7', '9', '10', '12', '13', '14']
+foreach ver : ['4', '5', '6', '7', '9', '10', '11', '12', '13', '14']
   libpanfrost_decode_per_arch += static_library(
     'pandecode-arch-v' + ver,
     ['decode.c', 'decode_jm.c', 'decode_csf.c', pan_packers],

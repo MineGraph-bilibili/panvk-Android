@@ -775,7 +775,7 @@ cs_end(struct cs_builder *b)
 struct cs_async_op {
    uint16_t wait_mask;
    uint8_t signal_slot;
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
    bool indirect;
 #endif
 };
@@ -803,7 +803,7 @@ cs_now(void)
    };
 }
 
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
 static inline struct cs_async_op
 cs_defer_indirect(void)
 {
@@ -851,7 +851,7 @@ cs_instr_is_asynchronous(enum mali_cs_opcode opcode, uint16_t wait_mask)
    case MALI_CS_OPCODE_STORE_STATE:
    case MALI_CS_OPCODE_TRACE_POINT:
    case MALI_CS_OPCODE_HEAP_OPERATION:
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
    case MALI_CS_OPCODE_SHARED_SB_INC:
 #endif
       /* Asynchronous only if wait_mask != 0. */
@@ -863,8 +863,7 @@ cs_instr_is_asynchronous(enum mali_cs_opcode opcode, uint16_t wait_mask)
 }
 
 /* TODO: was the signal_slot comparison bugged? */
-/* arch 11 shares the v10 XML, which has no defer_mode field */
-#if PAN_ARCH <= 11
+#if PAN_ARCH == 10
 #define cs_apply_async(I, async)                                               \
    do {                                                                        \
       I.wait_mask = async.wait_mask;                                           \
@@ -1726,7 +1725,7 @@ cs_umin32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
 static inline void
 cs_move_reg32(struct cs_builder *b, struct cs_index dest, struct cs_index src)
 {
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
    cs_emit(b, MOVE_REG32, I) {
       I.destination = cs_dst32(b, dest);
       I.source = cs_src32(b, src);
@@ -1743,7 +1742,7 @@ cs_move_reg64(struct cs_builder *b, struct cs_index dest, struct cs_index src)
    cs_move_reg32(b, cs_extract32(b, dest, 1), cs_extract32(b, src, 1));
 }
 
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
 static inline void
 cs_and32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
          struct cs_index src1)
@@ -2163,7 +2162,7 @@ cs_store64(struct cs_builder *b, struct cs_index data, struct cs_index address,
    cs_store(b, data, address, BITFIELD_MASK(2), offset);
 }
 
-#if PAN_ARCH < 12
+#if PAN_ARCH < 11
 /*
  * Select which scoreboard entry will track endpoint tasks and other tasks
  * respectively. Pass to cs_wait to wait later.
@@ -2209,8 +2208,7 @@ cs_set_state_imm32(struct cs_builder *b, enum mali_cs_set_state_type state,
 static inline void
 cs_select_endpoint_sb(struct cs_builder *b, unsigned ep)
 {
-/* arch 11 shares the v10 XML, which has no SET_STATE instruction */
-#if PAN_ARCH <= 11
+#if PAN_ARCH == 10
    cs_set_scoreboard_entry(b, ep, b->conf.ls_sb_slot);
 #else
    cs_set_state_imm32(b, MALI_CS_SET_STATE_TYPE_SB_SEL_ENDPOINT, ep);
@@ -2303,13 +2301,15 @@ cs_flush_caches(struct cs_builder *b, enum mali_cs_flush_mode l2,
    }                                                                           \
                                                                                \
    static inline void cs_sync##__cnt_width##_wait(                             \
-      struct cs_builder *b, bool reject_error, enum mali_cs_condition cond,    \
+      struct cs_builder *b, bool reject_error,                                 \
+      enum mali_cs_sync_scope scope, enum mali_cs_condition cond,              \
       struct cs_index ref, struct cs_index addr)                               \
    {                                                                           \
       assert(cond == MALI_CS_CONDITION_LEQUAL ||                               \
              cond == MALI_CS_CONDITION_GREATER);                               \
       cs_emit(b, SYNC_WAIT##__cnt_width, I) {                                  \
          I.error_reject = reject_error;                                        \
+         I.scope = scope;                                                      \
          I.condition = cond;                                                   \
          I.data = cs_src##__cnt_width(b, ref);                                 \
          I.address = cs_src64(b, addr);                                        \
@@ -2867,7 +2867,7 @@ cs_trace_run_fragment(struct cs_builder *b, const struct cs_tracing_ctx *ctx,
 #define CS_RUN_FULLSCREEN_SR_MASK \
    (BITFIELD64_RANGE(40, 4) | BITFIELD64_RANGE(56, 4) | BITFIELD64_RANGE(61, 3))
 #define CS_RUN_FULLSCREEN_SR_COUNT 11
-#elif PAN_ARCH >= 12
+#elif PAN_ARCH >= 11
 #define CS_RUN_FULLSCREEN_SR_MASK \
    (BITFIELD64_RANGE(40, 4) | BITFIELD64_BIT(56) | BITFIELD64_RANGE(61, 3))
 #define CS_RUN_FULLSCREEN_SR_COUNT 8

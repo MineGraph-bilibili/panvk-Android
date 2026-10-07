@@ -39,7 +39,7 @@ void panvk_per_arch(cmd_signal_barrier)(
 
    switch (barrier) {
    case PANVK_CSF_BARRIER_SYNC : {
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       struct cs_index sync_addr = cs_scratch_reg64(b, 0);
       struct cs_index add_val = cs_scratch_reg64(b, 2);
 
@@ -79,7 +79,7 @@ void panvk_per_arch(cmd_signal_barrier)(
    }
 
    case PANVK_CSF_BARRIER_WAIT: {
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       cs_wait_indirect(b);
 #else
       struct cs_index iter_sb = cs_scratch_reg32(b, 0);

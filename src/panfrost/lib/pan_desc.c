@@ -281,8 +281,7 @@ get_afbc_att_mem_props(struct pan_image_plane_ref pref, unsigned mip_level,
    *header = plane->base + slayout->offset_B + (stride_B * layer_or_z_slice);
 }
 
-/* arch 11 shares the v10 XML, which has no 64-bit stride split */
-#if PAN_ARCH <= 11
+#if PAN_ARCH <= 10
 #define SET_SURFACE_STRIDE(cfg__, val__) (cfg__).surface_stride = val__
 #else
 #define SET_SURFACE_STRIDE(cfg__, val__)                                       \

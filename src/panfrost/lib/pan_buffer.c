@@ -35,8 +35,7 @@ GENX(pan_buffer_texture_emit)(const struct pan_buffer_view *bview,
       cfg.type = MALI_DESCRIPTOR_TYPE_BUFFER;
       cfg.buffer_type = MALI_BUFFER_TYPE_STRUCTURE;
 
-/* arch 11 shares the v10 XML, which has no 64-bit size split */
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
       cfg.size = buffer_size & BITFIELD_MASK(32);
       cfg.size_hi = buffer_size >> 32;
 #else

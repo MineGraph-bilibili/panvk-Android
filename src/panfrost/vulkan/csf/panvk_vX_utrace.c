@@ -26,7 +26,7 @@ cmd_write_timestamp(const struct panvk_device *dev, struct cs_builder *b,
    /* Overwrite the signal_slot. Note that this has no effect in case of
     * synchronous or indirect syncs. */
    assert(!ts_async_op.wait_mask ||
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
           ts_async_op.indirect ||
 #endif
           ts_async_op.signal_slot == 0);

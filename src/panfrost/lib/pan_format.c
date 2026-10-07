@@ -495,8 +495,7 @@ const struct pan_format GENX(pan_pipe_format)[PIPE_FORMAT_COUNT] = {
    FMT(A4R4G4B4_UNORM,          RGBA4_UNORM,     ARGB, L, VTR___),
    FMT(A4B4G4R4_UNORM,          RGBA4_UNORM,     ABGR, L, VTR___),
    FMT(R16G16B16A16_UNORM,      RGBA16_UNORM,    RGBA, L, VTR_IB),
-/* v10 XML (shared with arch 11) has no 10x6 format enum */
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
    FMT(X6R10X6G10X6B10X6A10_UNORM, R10X6G10X6B10X6A10X6_UNORM, RGBA, L, _T____),
 #endif
    FMT(B8G8R8A8_UNORM,          RGBA8_UNORM,     BGRA, L, VTR_IB),

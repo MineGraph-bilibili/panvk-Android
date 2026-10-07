@@ -26,13 +26,7 @@ panvk_per_arch(precomp_cache_init)(struct panvk_device *dev)
 
    simple_mtx_init(&res->lock, mtx_plain);
    res->dev = dev;
-#if PAN_ARCH == 11
-   /* arch 11 shares the v10 genxml namespace (GENX() -> _v10), but libpan
-    * shader symbols are suffixed with the arch version. */
-   res->programs = libpan_shaders_default_v11;
-#else
    res->programs = GENX(libpan_shaders_default);
-#endif
 
    return res;
 }

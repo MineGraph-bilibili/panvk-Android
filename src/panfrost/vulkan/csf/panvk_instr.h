@@ -111,13 +111,14 @@ void panvk_per_arch(panvk_instr_end_work_async)(
                                                                                \
    static inline void panvk_instr_sync##__cnt_width##_wait(                    \
       struct panvk_cmd_buffer *cmdbuf, enum panvk_subqueue_id id,              \
-      bool reject_error, enum mali_cs_condition cond, struct cs_index ref,     \
+      bool reject_error, enum mali_cs_sync_scope scope,                        \
+      enum mali_cs_condition cond, struct cs_index ref,                        \
       struct cs_index addr)                                                    \
    {                                                                           \
       struct cs_builder *b = panvk_get_cs_builder(cmdbuf, id);                 \
       panvk_per_arch(panvk_instr_begin_work)(                                  \
          id, cmdbuf, PANVK_INSTR_WORK_TYPE_SYNC##__cnt_width##_WAIT);          \
-      cs_sync##__cnt_width##_wait(b, reject_error, cond, ref, addr);           \
+      cs_sync##__cnt_width##_wait(b, reject_error, scope, cond, ref, addr);    \
       struct panvk_instr_end_args instr_info = {                               \
          .sync = {.addr_regs = addr, .val_regs = ref, .cond = cond},           \
       };                                                                       \

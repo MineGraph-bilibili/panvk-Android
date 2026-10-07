@@ -169,7 +169,7 @@ struct panvk_cs_occlusion_query {
 
 struct panvk_cs_subqueue_context {
    uint64_t syncobjs;
-#if PAN_ARCH <= 11
+#if PAN_ARCH == 10
    /* must follow syncobjs immediately for cs_load_to */
    uint32_t iter_sb;
 #else
@@ -270,6 +270,8 @@ enum panvk_cs_regs {
 
 #if PAN_ARCH >= 12
    PANVK_CS_REG_RUN_IDVS_SR_END = 65,
+#elif PAN_ARCH == 11
+   PANVK_CS_REG_RUN_IDVS_SR_END = 63,
 #else
    PANVK_CS_REG_RUN_IDVS_SR_END = 60,
 #endif
@@ -668,7 +670,7 @@ extern const struct vk_command_buffer_ops panvk_per_arch(cmd_buffer_ops);
 
 void panvk_per_arch(cmd_fb_barrier)(struct panvk_cmd_buffer *cmdbuf);
 
-#if PAN_ARCH <= 11
+#if PAN_ARCH == 10
 /* Match against all possible iter_sb values. The constant iter_sb value for
  * the current match arm is in '__val'. */
 #define cs_match_iter_sb(__b, __val, __iter_sb, __scratch)                     \
@@ -677,10 +679,7 @@ void panvk_per_arch(cmd_fb_barrier)(struct panvk_cmd_buffer *cmdbuf);
          cs_case(__b, SB_ITER(__val))
 #endif
 
-/* arch >= 12 dynamic scoreboard-mask path requires the SET_STATE instruction,
- * which only exists in the v12+ XML; arch 11 shares the v10 XML and therefore
- * uses the static iter_sb rotation above. */
-#if PAN_ARCH >= 12
+#if PAN_ARCH >= 11
 struct cs_iter_sb_update_ctx {
    struct cs_builder *b;
    uint16_t all_iters_mask;

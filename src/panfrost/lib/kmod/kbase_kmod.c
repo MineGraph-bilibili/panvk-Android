@@ -771,6 +771,13 @@ kbase_log_csf_notification(struct pan_kmod_dev *dev,
                 "(exception 0x%02x), sideband 0x%016" PRIx64,
                 group_handle, payload->status, payload->status & 0xff,
                 (uint64_t)payload->sideband);
+      /* DIAG-ONLY (panvk.15-diag): decode the fatal status bitfields --
+       * [7:0] is the exception type (0x88 = SHAREABILITY_FAULT),
+       * [15:8] the access subcode, [31:16] group-level info. */
+      mesa_loge("kbase: fatal status decode: [31:16]=0x%04x [15:8]=0x%02x "
+                "[7:0]=exception 0x%02x",
+                (payload->status >> 16) & 0xffff,
+                (payload->status >> 8) & 0xff, payload->status & 0xff);
       break;
    }
 
