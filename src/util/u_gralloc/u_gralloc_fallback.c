@@ -6,8 +6,10 @@
  */
 
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <sys/system_properties.h>
 #include "u_gralloc_internal.h"
 
 #include <hardware/gralloc.h>
@@ -15,6 +17,7 @@
 #include "drm-uapi/drm_fourcc.h"
 #include "util/log.h"
 #include "util/macros.h"
+#include "util/u_debug.h"
 #include "util/u_memory.h"
 
 #include <dlfcn.h>
@@ -71,39 +74,79 @@ static int panvk_v19_mapper_status = -ENOTSUP;
 static void
 panvk_v19_mapper_init_once(void)
 {
-   void *so = NULL;
-   const char *how = "NONE";
+   /* Doc-recommended hardening: don't hardcode one vendor mapper name.
+    * Probe the SoC name from build properties and walk the common defaults
+    * so other devices in the support matrix (G710/G610/...) can reach their
+    * real vendor AIMapper before we ever fall back to guessing the layout. */
+   char plat[PROP_VALUE_MAX] = {0}, hw[PROP_VALUE_MAX] = {0};
+   __system_property_get("ro.board.platform", plat);
+   __system_property_get("ro.hardware", hw);
+
+   const char *names[5];
+   int name_count = 0;
+   names[name_count++] = "mediatek";
+   names[name_count++] = "arm";
+   if (plat[0] && strcmp(plat, "mediatek") && strcmp(plat, "arm"))
+      names[name_count++] = plat;
+   if (hw[0] && strcmp(hw, "mediatek") && strcmp(hw, "arm") &&
+       (!plat[0] || strcmp(hw, plat)))
+      names[name_count++] = hw;
+   names[name_count++] = "default";
+
    void *bn = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
    if (!bn)
       bn = dlopen("/system/lib64/libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
-   if (bn) {
-      panvk_v19_open_passthrough_fn open_hal =
+   panvk_v19_open_passthrough_fn open_hal = NULL;
+   if (bn)
+      open_hal =
          (panvk_v19_open_passthrough_fn)dlsym(bn, "AServiceManager_openDeclaredPassthroughHal");
-      if (open_hal) {
-         so = open_hal("mapper", "mediatek", RTLD_NOW | RTLD_LOCAL);
-         if (so) how = "BINDER_PASSTHROUGH";
+
+   void *vs = dlopen("libvndksupport.so", RTLD_NOW | RTLD_LOCAL);
+   if (!vs)
+      vs = dlopen("/system/lib64/libvndksupport.so", RTLD_NOW | RTLD_LOCAL);
+   panvk_v19_load_sphal_fn load_sphal = NULL;
+   if (vs)
+      load_sphal =
+         (panvk_v19_load_sphal_fn)dlsym(vs, "android_load_sphal_library");
+
+   void *so = NULL;
+   const char *how = "NONE";
+   const char *used = NULL;
+   char tried[256] = "";
+
+   for (int i = 0; i < name_count; i++) {
+      size_t len = strlen(tried);
+      snprintf(tried + len, sizeof(tried) - len, "%s%s", len ? ", " : "", names[i]);
+
+      if (open_hal &&
+          (so = open_hal("mapper", names[i], RTLD_NOW | RTLD_LOCAL))) {
+         how = "BINDER_PASSTHROUGH";
+         used = names[i];
+         break;
+      }
+
+      char so_name[PROP_VALUE_MAX + 16];
+      char so_path[PROP_VALUE_MAX + 48];
+      snprintf(so_name, sizeof(so_name), "mapper.%s.so", names[i]);
+      snprintf(so_path, sizeof(so_path), "/vendor/lib64/hw/mapper.%s.so", names[i]);
+
+      if (load_sphal &&
+          ((so = load_sphal(so_name, RTLD_NOW | RTLD_LOCAL)) ||
+           (so = load_sphal(so_path, RTLD_NOW | RTLD_LOCAL)))) {
+         how = "SPHAL";
+         used = names[i];
+         break;
+      }
+
+      if ((so = dlopen(so_path, RTLD_NOW | RTLD_LOCAL))) {
+         how = "DIRECT";
+         used = names[i];
+         break;
       }
    }
+
    if (!so) {
-      void *vs = dlopen("libvndksupport.so", RTLD_NOW | RTLD_LOCAL);
-      if (!vs)
-         vs = dlopen("/system/lib64/libvndksupport.so", RTLD_NOW | RTLD_LOCAL);
-      if (vs) {
-         panvk_v19_load_sphal_fn load_sphal =
-            (panvk_v19_load_sphal_fn)dlsym(vs, "android_load_sphal_library");
-         if (load_sphal) {
-            so = load_sphal("mapper.mediatek.so", RTLD_NOW | RTLD_LOCAL);
-            if (!so) so = load_sphal("/vendor/lib64/hw/mapper.mediatek.so", RTLD_NOW | RTLD_LOCAL);
-            if (so) how = "SPHAL";
-         }
-      }
-   }
-   if (!so) {
-      so = dlopen("/vendor/lib64/hw/mapper.mediatek.so", RTLD_NOW | RTLD_LOCAL);
-      if (so) how = "DIRECT";
-   }
-   if (!so) {
-      mesa_logw("[P0A-V19-FULLPLANE] mapper load failed");
+      mesa_logw("[P0A-V19-FULLPLANE] mapper load failed (tried: %s)", tried);
       return;
    }
    panvk_v19_load_mapper_fn load =
@@ -113,7 +156,7 @@ panvk_v19_mapper_init_once(void)
       return;
    }
    int32_t rc = load(&panvk_v19_mapper_ptr);
-   mesa_logi("[P0A-V19-FULLPLANE] init how=%s rc=%d mapper=%p version=%u", how, rc,
+   mesa_logi("[P0A-V19-FULLPLANE] init how=%s name=%s rc=%d mapper=%p version=%u", how, used, rc,
              panvk_v19_mapper_ptr, panvk_v19_mapper_ptr ? panvk_v19_mapper_ptr->version : 0);
    if (rc || !panvk_v19_mapper_ptr || panvk_v19_mapper_ptr->version < 5 ||
        !panvk_v19_mapper_ptr->v5.importBuffer || !panvk_v19_mapper_ptr->v5.freeBuffer ||
@@ -363,6 +406,72 @@ fallback_gralloc_get_yuv_info(struct u_gralloc *gralloc,
    return 0;
 }
 
+/* Vendor metadata route: MTK's gralloc_extra plain-C API -- the same metadata
+ * core the vendor mapper4 impl links against (libgralloc_extra.so is in its
+ * DT_NEEDED), reachable from an untrusted app because it is a plain function
+ * call, no HIDL/binder/ioctl.  Semantics pinned by the panvk.24 GED-DIAG
+ * device dump on a real BGRA_8888 640x454 swapchain buffer: attr 12 = 640
+ * (stride/width px), 13 = 454 (height), 14 = 1162240 == stride*height*bpp,
+ * proving plain linear.  When the size matches, emit exact metadata (fourcc +
+ * LINEAR + stride) so the buffer import no longer relies on a blind guess;
+ * a size mismatch means vendor compression or a multi-plane layout, which
+ * the linear guess cannot represent.  drm_fourcc and stride are the
+ * caller-validated values derived from the AHB/ANB descriptor.
+ * Returns 0 on accepted metadata, -EINVAL for a non-linear (unrepresentable)
+ * layout, -ENOTSUP when the vendor API is unavailable. */
+static int
+panvk_v19_query_gralloc_extra(struct u_gralloc_buffer_handle *hnd,
+                              uint32_t drm_fourcc, int stride,
+                              struct u_gralloc_buffer_basic_info *out)
+{
+   static int (*ge_query)(const native_handle_t *, unsigned int, void *);
+   static bool ge_tried = false;
+
+   if (!ge_tried) {
+      ge_tried = true;
+      /* Preload the one vendor dependency so its soname resolves. */
+      dlopen("/vendor/lib64/libged.so", RTLD_NOW | RTLD_LOCAL);
+      void *so = dlopen("/vendor/lib64/libgralloc_extra.so", RTLD_NOW | RTLD_LOCAL);
+      if (so) {
+         ge_query = (int (*)(const native_handle_t *, unsigned int, void *))
+            dlsym(so, "gralloc_extra_query");
+      }
+      if (!ge_query) {
+         mesa_logw("[P0A-V19-FULLPLANE] vendor gralloc_extra unavailable: %s",
+                   dlerror() ? dlerror() : "gralloc_extra_query absent");
+         return -ENOTSUP;
+      }
+   }
+
+   int32_t width = 0, height = 0, size = 0;
+   if (!ge_query || ge_query(hnd->handle, 12, &width) ||
+       ge_query(hnd->handle, 13, &height) || ge_query(hnd->handle, 14, &size) ||
+       width <= 0 || height <= 0 || size <= 0)
+      return -ENOTSUP;
+
+   int bpp = get_hal_format_bpp(hnd->hal_format);
+   if (bpp <= 0 || stride <= 0)
+      return -ENOTSUP;
+
+   int64_t linear = (int64_t)stride * height;
+   if ((int64_t)size != linear) {
+      mesa_logw("[P0A-V19-FULLPLANE] vendor metadata: size=%d != linear %lld "
+                "(attr12=%d bpp=%d h=%d) -- layout not plain linear",
+                size, (long long)linear, width, bpp, height);
+      return -EINVAL;
+   }
+
+   out->drm_fourcc = drm_fourcc;
+   out->modifier = DRM_FORMAT_MOD_LINEAR;
+   out->num_planes = 1;
+   out->fds[0] = hnd->handle->data[0];
+   out->strides[0] = stride;
+   out->offsets[0] = 0;
+   mesa_logi("[P0A-V19-FULLPLANE] vendor metadata accepted fourcc=0x%08x modifier=LINEAR stride=%d (size=%d h=%d)",
+             drm_fourcc, stride, size, height);
+   return 0;
+}
+
 static int
 fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
                                  struct u_gralloc_buffer_handle *hnd,
@@ -431,8 +540,24 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
     * formats that cannot be guessed are rejected earlier in this function.
     */
    int stable_ret = panvk_v19_query_mapper(hnd->handle, out);
-   if (stable_ret != 0) {
-      mesa_logi("[P0A-V19-FULLPLANE] mapper metadata unavailable rc=%d; using guessed RGB layout fourcc=0x%08x stride=%d",
+   if (stable_ret != 0)
+      stable_ret = panvk_v19_query_gralloc_extra(hnd, drm_fourcc, stride, out);
+
+   if (stable_ret == -EINVAL) {
+      /* Vendor metadata proved the physical layout is not plain linear; the
+       * LINEAR guess would render garbage (doc side-effect: AFBC detected).
+       * Refuse under the escape hatch, warn loudly otherwise. */
+      if (debug_get_bool_option("PANVK_KBASE_NO_GUESS", false)) {
+         mesa_logw("[P0A-V19-FULLPLANE] vendor metadata says NOT linear and "
+                   "PANVK_KBASE_NO_GUESS=1: refusing import (fourcc=0x%08x stride=%d)",
+                   drm_fourcc, stride);
+         return -ENOTSUP;
+      }
+      mesa_logw("[P0A-V19-FULLPLANE] guessing LINEAR on a non-linear buffer "
+                "(fourcc=0x%08x stride=%d); set PANVK_KBASE_NO_GUESS=1 to refuse instead",
+                drm_fourcc, stride);
+   } else if (stable_ret != 0) {
+      mesa_logi("[P0A-V19-FULLPLANE] no mapper/vendor metadata (rc=%d); using guessed RGB layout fourcc=0x%08x stride=%d",
                 stable_ret, drm_fourcc, stride);
    }
 
