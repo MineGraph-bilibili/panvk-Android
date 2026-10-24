@@ -911,6 +911,49 @@ brw_lower_send_gather(brw_shader &s)
    return progress;
 }
 
+static bool
+brw_lower_sendg_ind_desc_to_arf_inst(brw_shader &s, brw_inst *inst, enum send_srcs src)
+{
+   brw_builder ubld = brw_builder(inst).uniform();
+
+   assert(inst->src[src].file == IMM ||
+          inst->src[src].file == FIXED_GRF);
+   assert(inst->src[src].type == BRW_TYPE_UQ);
+
+   brw_reg s0 = brw_s0(BRW_TYPE_UQ, src == SENDG_SRC_IND_0_DESC ? 0 : 1);
+   ubld.MOV(s0, inst->src[src]);
+   inst->src[src] = s0;
+
+   return true;
+}
+
+bool
+brw_lower_sendg_ind_desc_to_arf(brw_shader &s)
+{
+   assert(s.grf_used || !"Must be called after register allocation");
+
+   bool progress = false;
+
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
+      if (inst->opcode != SHADER_OPCODE_SEND)
+         continue;
+
+      if (inst->src[SENDG_SRC_IND_0_DESC].file != BAD_FILE &&
+          inst->src[SENDG_SRC_IND_0_DESC].file != ARF)
+         progress |= brw_lower_sendg_ind_desc_to_arf_inst(s, inst, SENDG_SRC_IND_0_DESC);
+
+      if (inst->src[SENDG_SRC_IND_1_DESC].file != BAD_FILE &&
+          inst->src[SENDG_SRC_IND_1_DESC].file != ARF)
+         progress |= brw_lower_sendg_ind_desc_to_arf_inst(s, inst, SENDG_SRC_IND_1_DESC);
+   }
+
+   if (progress)
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
+
+   return progress;
+}
+
 bool
 brw_lower_load_subgroup_invocation(brw_shader &s)
 {

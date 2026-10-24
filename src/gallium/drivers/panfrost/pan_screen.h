@@ -108,6 +108,16 @@ struct panfrost_vtable {
    /* Run a compute shader to detile an MTK 16L32 image */
    void (*mtk_detile)(struct panfrost_context *ctx, struct pipe_blit_info *info);
 
+   /* Run the libpan copy compute kernel to copy size bytes between two
+    * PIPE_BUFFER resources. Requires at least 4-byte aligned offsets and a
+    * 4-byte-multiple size.
+    */
+   void (*compute_copy_buffer)(struct pipe_context *pctx,
+                               struct panfrost_resource *dst,
+                               unsigned dst_offset,
+                               struct panfrost_resource *src,
+                               unsigned src_offset, unsigned size);
+
    /* construct a render target blend descriptor */
    uint64_t (*get_conv_desc)(enum pipe_format fmt, unsigned rt,
                              unsigned force_size, bool dithered);

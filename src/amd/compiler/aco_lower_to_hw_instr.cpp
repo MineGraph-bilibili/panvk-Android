@@ -1889,7 +1889,8 @@ handle_operands(std::map<PhysReg, copy_operation>& copy_map, lower_context* ctx,
                                                      other->second.op.physReg() == it->first);
             bool unused_hi = !other->second.is_used ||
                              (other->second.is_used == 0x0101 && it->second.op.physReg() == reg_hi);
-            if (unused_lo && unused_hi) {
+            if (unused_lo && unused_hi && it->second.op.physReg().byte() % 2 == 0 &&
+                other->second.op.physReg().byte() % 2 == 0) {
                Operand lo = it->second.op;
                Operand hi = other->second.op;
                do_pack_2x16(ctx, bld, Definition(it->first, v1), lo, hi);

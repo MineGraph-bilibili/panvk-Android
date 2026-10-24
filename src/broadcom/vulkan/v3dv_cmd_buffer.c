@@ -96,6 +96,13 @@ cmd_buffer_init(struct v3dv_cmd_buffer *cmd_buffer,
    cmd_buffer->state.subpass_idx = -1;
    cmd_buffer->state.meta.subpass_idx = -1;
 
+   /* A job type -1 is how we tell perfetto that this is not a real job
+    * and we are instead tracking the entire command buffer.
+    */
+   cmd_buffer->trace_marker_job.type = -1;
+   cmd_buffer->trace_marker_job.cmd_buffer = cmd_buffer;
+   cmd_buffer->trace_queue_mask = 0;
+
    cmd_buffer->status = V3DV_CMD_BUFFER_STATUS_INITIALIZED;
 }
 
@@ -127,6 +134,7 @@ cmd_buffer_create(struct vk_command_pool *pool, VkCommandBufferLevel level,
    }
 
    cmd_buffer_init(cmd_buffer, device);
+   u_trace_init(&cmd_buffer->trace, &device->utrace.utrace_ctx);
 
    *cmd_buffer_out = &cmd_buffer->vk;
 
@@ -315,6 +323,7 @@ cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
    struct v3dv_cmd_buffer *cmd_buffer =
       container_of(vk_cmd_buffer, struct v3dv_cmd_buffer, vk);
 
+   u_trace_fini(&cmd_buffer->trace);
    cmd_buffer_free_resources(cmd_buffer);
    vk_command_buffer_finish(&cmd_buffer->vk);
    vk_free(&cmd_buffer->vk.pool->alloc, cmd_buffer);
@@ -814,6 +823,7 @@ v3dv_job_init(struct v3dv_job *job,
    /* Make sure we haven't made this new job current before calling here */
    assert(!cmd_buffer || cmd_buffer->state.job != job);
 
+   job->id = p_atomic_inc_return(&device->job_id_counter);
    job->type = type;
 
    job->device = device;
@@ -922,10 +932,13 @@ cmd_buffer_reset(struct vk_command_buffer *vk_cmd_buffer,
       /* FIXME: For now we always free all resources as if
        * VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT was set.
        */
-      if (cmd_buffer->status != V3DV_CMD_BUFFER_STATUS_NEW)
+      if (cmd_buffer->status != V3DV_CMD_BUFFER_STATUS_NEW) {
+         u_trace_fini(&cmd_buffer->trace);
          cmd_buffer_free_resources(cmd_buffer);
+      }
 
       cmd_buffer_init(cmd_buffer, device);
+      u_trace_init(&cmd_buffer->trace, &device->utrace.utrace_ctx);
    }
 
    assert(cmd_buffer->status == V3DV_CMD_BUFFER_STATUS_INITIALIZED);
@@ -2328,7 +2341,7 @@ emit_scissor(struct v3dv_cmd_buffer *cmd_buffer)
 
    struct v3dv_dynamic_state *dynamic = &cmd_buffer->state.dynamic;
 
-   /* FIXME: right now we only support one viewport. viewporst[0] would work
+   /* FIXME: right now we only support one viewport. viewports[0] would work
     * now, but would need to change if we allow multiple viewports.
     */
    float *vptranslate = dynamic->viewport.translate[0];

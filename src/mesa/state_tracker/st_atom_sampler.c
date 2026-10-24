@@ -268,8 +268,8 @@ update_shader_samplers(struct st_context *st,
             st_get_texture_object(st->ctx, prog, unit);
       struct pipe_sampler_state *sampler = samplers + unit;
 
-      /* if resource format matches then YUV wasn't lowered */
-      if (!stObj || st_get_view_format(stObj) == stObj->pt->format)
+      /* if no extra YUV plane views are needed, skip */
+      if (!stObj || !stObj->needs_yuv_plane_views)
          continue;
 
       switch (st_get_view_format(stObj)) {

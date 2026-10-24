@@ -34,6 +34,7 @@
 
 reference_frames_tracker_av1::reference_frames_tracker_av1( void *logId,
                                                             struct pipe_video_codec *codec,
+                                                            eAVEncAV1VProfile av1profile,
                                                             uint32_t textureWidth,
                                                             uint32_t textureHeight,
                                                             uint32_t gopLength,
@@ -56,7 +57,7 @@ reference_frames_tracker_av1::reference_frames_tracker_av1( void *logId,
         m_codec,
         textureWidth,
         textureHeight,
-        ConvertProfileToFormat( m_codec->profile ),
+        ConvertAVEncVProfileToPipeFormat( av1profile ),
         m_codec->max_references + 1 /*curr pic*/ +
            ( bLowLatency ? 0 : MFT_INPUT_QUEUE_DEPTH ) /*MFT process input queue depth for delayed in flight recon pic release*/,
         hr ),

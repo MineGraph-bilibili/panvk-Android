@@ -32,12 +32,19 @@ struct panvk_sync_scope {
    VkAccessFlags2 access;
 };
 
-#define MAX_VBS 32
+#define MAX_VBS 16
 #define MAX_RTS 8
 #if PAN_ARCH >= 14
 #define MAX_LAYERS_PER_TILER_DESC 256
 #else
 #define MAX_LAYERS_PER_TILER_DESC 8
+#endif
+#if PAN_ARCH == 10
+#define PAN_CRC_VALID_OFFSET  0
+#endif
+#if PAN_ARCH >= 11
+#define PAN_CRC_INIT_OFFSET  0
+#define PAN_CRC_INIT_MASK    0xffff
 #endif
 
 struct panvk_cs_sync32 {
@@ -50,6 +57,16 @@ struct panvk_cs_sync64 {
    uint32_t error;
    uint32_t pad;
 };
+
+/* The queue syncobjs BO holds a panvk_cs_sync64 per subqueue, then the
+ * panvk_cs_sync32 ready/free handshake of the gpu_prerast tessellation loops,
+ * then the render descriptor ringbuf sync. That BO is CSF event memory on
+ * kbase, which kbase needs to re-evaluate the SYNC_WAIT of an evicted CSG.
+ */
+#define PANVK_QUEUE_TESS_READY_SYNC_OFFSET 64
+#define PANVK_QUEUE_TESS_FREE_SYNC_OFFSET  128
+#define PANVK_QUEUE_DESC_RINGBUF_SYNC_OFFSET 192
+#define PANVK_QUEUE_SYNCOBJS_SIZE          256
 
 enum panvk_kbase_progress_marker {
    PANVK_KBASE_PROGRESS_CMDBUF_START = 0x001,
@@ -185,6 +202,14 @@ struct panvk_cs_subqueue_context {
       /* Timestamp queries that need to happen after the current rp. */
       struct cs_single_link_list ts_chain;
       struct cs_single_link_list ts_done_chain;
+      /* Fields used to pass layer count information from primary cmdbufs to
+       * secondary cmdbufs. */
+#if PAN_ARCH >= 14
+      uint32_t layer_count;
+#else
+      uint32_t td_count;
+      uint32_t last_td_fullscreen_tiler_flags;
+#endif
    } render;
    struct {
       uint32_t counter;
@@ -198,12 +223,19 @@ struct panvk_cs_subqueue_context {
       uint64_t ir_descs[PANVK_IR_PASS_COUNT];
       uint32_t td_count;
       uint32_t layer_count;
+
+      /* Spill target and final regular target can differ for
+       * the same RT index and point to two different images. For CRC tracking,
+       * we need to store two CRC header addresses, one for the regular and one
+       * for the spill. */
+      uint32_t crc_header_addr_count;
+      uint64_t crc_header_addrs[PAN_MAX_RTS * 2];
    } tiler_oom_ctx;
    struct {
       struct {
          uint64_t cs;
       } tracebuf;
-      uint64_t kbase_progress_addr;
+   uint64_t kbase_progress_addr;
    } debug;
    /* Non-zero when draws should execute, zero when they should be
     * skipped. Written by the primary before cs_call, read by inherited
@@ -216,6 +248,22 @@ struct panvk_cache_flush_info {
    enum mali_cs_flush_mode l2;
    enum mali_cs_flush_mode lsc;
    enum mali_cs_other_flush_mode others;
+};
+
+/* Execute CRC state updates on a destination subqueue when possible.
+ * Fall back to compute when the destination scope maps to no subqueue.
+ */
+static inline enum panvk_subqueue_id
+panvk_crc_exec_subqueue(uint32_t dst_mask)
+{
+   return dst_mask ? u_bit_scan(&dst_mask) : PANVK_SUBQUEUE_COMPUTE;
+}
+
+struct panvk_cs_crc_deps {
+   const uint64_t *addrs;
+   uint32_t count;
+   uint32_t src_subqueue_mask;
+   uint32_t dst_subqueue_mask;
 };
 
 struct panvk_cs_deps {
@@ -232,6 +280,17 @@ struct panvk_cs_deps {
       enum mali_cs_condition cond;
       struct cs_index cond_value;
    } dst[PANVK_SUBQUEUE_COUNT];
+
+   struct panvk_cs_crc_deps crc;
+
+   /* Subqueues whose wait on the fragment subqueue may be deferred (see
+    * lazy_wait in panvk_cmd_buffer): a barrier of the dependency made the
+    * subqueue wait and allowed deferring it (frag_lazy_mask), and no
+    * barrier that made it wait forbade it (frag_lazy_veto). */
+   uint32_t frag_lazy_mask;
+   uint32_t frag_lazy_veto;
+   /* Subqueues whose part of some destination scope writes memory. */
+   uint32_t dst_writes_mask;
 };
 
 enum panvk_sb_ids {
@@ -539,16 +598,9 @@ struct panvk_cond_render_state {
 struct panvk_cmd_buffer {
    struct vk_command_buffer vk;
    VkCommandBufferUsageFlags flags;
-   enum mali_cs_sync_scope sync_scope;
    struct panvk_pool cs_pool;
    struct panvk_pool desc_pool;
    struct panvk_pool tls_pool;
-
-   struct {
-      struct panvk_priv_bo *bo;
-      struct pan_ptr header;
-   } poly_heap;
-
    struct list_head push_sets;
 
    struct {
@@ -560,6 +612,14 @@ struct panvk_cmd_buffer {
       struct panvk_cmd_compute_state compute;
       struct panvk_push_constant_state push_constants;
       struct panvk_cs_state cs[PANVK_SUBQUEUE_COUNT];
+      /* Deferred waits of the vertex/tiler and compute subqueues on the
+       * fragment subqueue: the fragment sync point to wait for before the
+       * next work on that subqueue that may observe what the fragment
+       * subqueue wrote (see panvk_vX_cmd_buffer.c). */
+      struct {
+         bool pending;
+         int32_t frag_sync_point;
+      } lazy_wait[PANVK_SUBQUEUE_COUNT];
       struct panvk_tls_state tls;
       bool contains_timestamp_queries;
       /* CPU-side estimate used by the kbase queue to choose a conservative
@@ -567,7 +627,21 @@ struct panvk_cmd_buffer {
       uint64_t tiler_work_estimate;
 
       struct panvk_cond_render_state cond_render;
+      VkDeviceAddress bound_desc_buffers[MAX_SETS];
    } state;
+
+   /* Attachment-less secondary: its CS is cut where rasterizationSamples
+    * changes (cmd_cut_vmr_segment). struct panvk_vmr_segment, the finished
+    * segments; the builders hold the last one, with gfx.render.vmr_samples.
+    */
+   struct util_dynarray vmr_segs;
+};
+
+struct panvk_vmr_segment {
+   uint64_t addr[PANVK_SUBQUEUE_COUNT];
+   uint32_t size[PANVK_SUBQUEUE_COUNT];
+   uint32_t req_resource_mask[PANVK_SUBQUEUE_COUNT];
+   uint8_t samples;
 };
 
 VK_DEFINE_HANDLE_CASTS(panvk_cmd_buffer, vk.base, VkCommandBuffer,
@@ -858,7 +932,10 @@ void panvk_per_arch(add_cs_deps)(
    bool is_set_event);
 
 VkResult panvk_per_arch(cmd_prepare_exec_cmd_for_draws)(
-   struct panvk_cmd_buffer *primary, struct panvk_cmd_buffer *secondary);
+   struct panvk_cmd_buffer *primary, struct panvk_cmd_buffer *secondary,
+   uint32_t samples);
+
+void panvk_per_arch(cmd_cut_vmr_segment)(struct panvk_cmd_buffer *cmdbuf);
 
 void panvk_per_arch(cmd_inherit_render_state)(
    struct panvk_cmd_buffer *cmdbuf, const VkCommandBufferBeginInfo *pBeginInfo);
@@ -931,6 +1008,7 @@ panvk_get_subqueue_stages(enum panvk_subqueue_id subqueue)
              VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
              VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
              VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+             VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
              VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT;
    case PANVK_SUBQUEUE_FRAGMENT:
       return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
@@ -942,8 +1020,11 @@ panvk_get_subqueue_stages(enum panvk_subqueue_id subqueue)
              VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT;
    case PANVK_SUBQUEUE_COMPUTE:
       return VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+             VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+             VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
              VK_PIPELINE_STAGE_2_COPY_BIT |
              VK_PIPELINE_STAGE_2_COPY_INDIRECT_BIT_KHR |
+             VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |
              VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT;
    default:
       UNREACHABLE("Invalid subqueue id");
@@ -1004,6 +1085,70 @@ void panvk_per_arch(kbase_mark_progress)(
    struct panvk_cmd_buffer *cmdbuf, enum panvk_subqueue_id subqueue,
    enum panvk_kbase_progress_marker marker);
 
+struct panvk_draw_info;
+struct panvk_dispatch_info;
+struct panvk_shader_variant;
+
+void panvk_per_arch(cmd_pstats_draw)(struct panvk_cmd_buffer *cmdbuf,
+                                     const struct panvk_draw_info *draw);
+void panvk_per_arch(cmd_pstats_dispatch)(
+   struct panvk_cmd_buffer *cmdbuf, const struct panvk_shader_variant *cs,
+   const struct panvk_dispatch_info *info);
+void panvk_per_arch(cmd_pstats_flush_pending)(struct panvk_cmd_buffer *cmdbuf);
+
+void panvk_per_arch(rp_trace)(const char *what, uint64_t a, uint64_t b,
+                              uint64_t c, uint64_t d);
+void panvk_per_arch(barrier_stats_log)(void);
+void panvk_per_arch(dispatch_stats_record)(bool reads_images, bool writes_memory);
+/* Render pass merging (PANVK_RP_MERGE). */
+void panvk_per_arch(cmd_rp_merge_flush)(struct panvk_cmd_buffer *cmdbuf);
+bool panvk_per_arch(cmd_rp_merge_barrier_ok)(const struct panvk_cmd_buffer *cmdbuf,
+                                             const VkDependencyInfo *dep);
+
+/* Why a deferred vertex/tiler wait was emitted (debug stats). */
+enum panvk_lazy_vt_flush_reason {
+   PANVK_LAZY_VT_DRAW,
+   PANVK_LAZY_VT_BARRIER,
+   PANVK_LAZY_VT_META,
+   PANVK_LAZY_VT_EVENT,
+   PANVK_LAZY_VT_QUERY,
+   PANVK_LAZY_VT_END,
+   PANVK_LAZY_VT_EXEC,
+   PANVK_LAZY_VT_MARKER,
+   PANVK_LAZY_VT_DISPATCH,
+   PANVK_LAZY_VT_REASONS,
+};
+
+/* Emit the deferred wait of one subqueue on the fragment subqueue. */
+void panvk_per_arch(cmd_lazy_flush)(struct panvk_cmd_buffer *cmdbuf,
+                                   enum panvk_subqueue_id subqueue,
+                                   enum panvk_lazy_vt_flush_reason reason);
+/* Whether vkd3d-proton or DXVK drives the device.  Both put write access
+ * in the destination scope of any barrier that orders reads before later
+ * writes of a resource (vkd3d-proton: D3D12 requires an explicit transition
+ * to a write state; DXVK: a flushed access barrier names every usage the
+ * resource allows, writes included), so a shader write never relies on the
+ * execution dependency of a barrier whose destination scope only reads. */
+bool panvk_per_arch(cmd_d3d12_semantics)(const struct panvk_cmd_buffer *cmdbuf);
+
+static inline void
+panvk_cmd_lazy_vt_flush_pending(struct panvk_cmd_buffer *cmdbuf,
+                                enum panvk_lazy_vt_flush_reason reason)
+{
+   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
+      if (cmdbuf->state.lazy_wait[i].pending)
+         panvk_per_arch(cmd_lazy_flush)(cmdbuf, i, reason);
+   }
+}
+
+static inline void
+panvk_cmd_rp_merge_flush_pending(struct panvk_cmd_buffer *cmdbuf)
+{
+   if (cmdbuf->state.gfx.rp_merge.pending)
+      panvk_per_arch(cmd_rp_merge_flush)(cmdbuf);
+}
+void panvk_per_arch(cmd_pstats_restore_oq)(struct panvk_cmd_buffer *cmdbuf);
+
 #if PAN_ARCH >= 14
 static inline void
 cs_emit_layer_fragment_state(struct cs_builder *b, struct cs_index fbd_ptr)
@@ -1028,5 +1173,11 @@ cs_emit_layer_fragment_state(struct cs_builder *b, struct cs_index fbd_ptr)
                 offsetof(struct panvk_fb_layer_state, dcd_pointer));
 }
 #endif /* PAN_ARCH >= 14 */
+
+void panvk_per_arch(collect_crc_invalidation_deps)(const VkDependencyInfo *info,
+                                                   struct panvk_cs_deps *deps,
+                                                   uint64_t *crc_addrs);
+void panvk_per_arch(cmd_invalidate_crc)(struct cs_builder *b,
+                                        uint64_t crc_header_addr);
 
 #endif /* PANVK_CMD_BUFFER_H */

@@ -36,6 +36,7 @@
 #define LP_SCENE_H
 
 #include "util/u_thread.h"
+#include "util/u_atomic.h"
 #include "lp_rast.h"
 #include "lp_debug.h"
 
@@ -198,6 +199,7 @@ struct lp_scene {
    unsigned tiles_x, tiles_y;
 
    int curr_x, curr_y;  /**< for iterating over bins */
+   int curr_bin;        /**< atomic index for iterating over bins */
    mtx_t mutex;
 
    unsigned num_alloced_tiles;

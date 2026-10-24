@@ -225,18 +225,6 @@ pipe_loader_drm_probe(struct pipe_loader_device **devs, int ndev);
 int
 pipe_loader_accel_probe(struct pipe_loader_device **devs, int ndev);
 
-#if defined(HAVE_PAN_KMOD_KBASE)
-/**
- * Get a list of known kbase (Mali) non-DRM devices.
- *
- * This function is platform-specific.
- *
- * \sa pipe_loader_probe
- */
-int
-pipe_loader_kbase_probe(struct pipe_loader_device **devs, int ndev);
-#endif
-
 #ifdef HAVE_ZINK
 /**
  * Get a list of known DRM devices compatible with zink.

@@ -1,9 +1,9 @@
 /*
  * Copyright © 2024 Collabora Ltd.
+ * Copyright © 2026 NXP
  * SPDX-License-Identifier: MIT
  */
 
-#include <stdint.h>
 #include "drm-uapi/panthor_drm.h"
 
 #include "genxml/cs_builder.h"
@@ -27,9 +27,7 @@
 #include "vk_sync.h"
 
 #ifdef HAVE_PAN_KMOD_KBASE
-#include <errno.h>
 #include <inttypes.h>
-#include <string.h>
 #include <unistd.h>
 #include "drm-uapi/mali_kbase_ioctl.h"
 #include "kmod/kbase_kmod.h"
@@ -56,19 +54,20 @@
  * for completion; ordinary queue submission remains asynchronous.
  */
 
-#define KBASE_RINGBUF_SIZE     (64 * 1024)
+/* 64KB (the panthor default) is only ~1.5 frames of command stream on a
+ * tiled render pass: kbase_subqueue_reserve_ring() then has to block on the
+ * GPU seqno in the middle of building a submission. 256KB leaves enough
+ * slack to keep the CPU ahead. Kept deliberately modest: the kernel rejects
+ * a queue size it does not support at CS_QUEUE_REGISTER time, which would
+ * fail queue creation, and the accepted maximum is not exposed to
+ * userspace. */
+#define KBASE_RINGBUF_SIZE     (256 * 1024)
 /* Worst-case size of one ring entry, in bytes. Diagnostic breadcrumbs add a
  * few extra LS stores, so keep this conservatively above the normal panthor
  * kernel ring slot size. */
-#define KBASE_RING_JOB_MAX_SIZE 640
+#define KBASE_RING_JOB_MAX_SIZE 512
 /* Generous timeout for the synchronous submission model. */
 #define KBASE_WAIT_TIMEOUT_NS  (10ll * 1000000000ll)
-/* CPU-side blocking slice shared by wait_cqs64() and wait_event(): the CSF
- * event notification normally wakes the waiter early, so this only bounds
- * how often the waiter re-checks seqno/error progress when no notification
- * arrives.  3ms cuts the worst-case completion-detection latency from 20ms
- * to 3ms without touching the GPU-visible sync protocol. */
-#define PANVK_KBASE_WAIT_SLICE_US 3000
 #define KBASE_SEQNO_LS_COPY_OFFSET       16
 #define KBASE_SEQNO_MARK_PRE_CALL_OFFSET 24
 #define KBASE_SEQNO_MARK_POST_CALL_OFFSET 32
@@ -78,51 +77,14 @@
 #define KBASE_SEQNO_MARK_POST_CALL 0x200000000000ull
 #define KBASE_SEQNO_MARK_POST_WAIT 0x300000000000ull
 #define KBASE_CACHELINE_SIZE 64
-/* With firmware chunk recycling disarmed on kbase (VT and fragment work run
- * in separate CS groups, so the kernel's "Invalid Heap statistics" validation
- * rejects the firmware heap protocol; see cmdbuf_skips_gpu_heap_ops()), the
- * heap only grows between renewals and renewal is the only mechanism that
- * reclaims tiler heap memory.
- *
- * WARNING: do not enlarge the generation budget naively.  A generation that
- * spans several frames accumulates tiler heap chunks across those frames
- * (per-frame tiling output is never recycled); once the heap hits
- * max_chunks (400 x 1 MiB on v10+) the firmware OOM cannot be satisfied and
- * the whole CSG is descheduled forever -- every subqueue freezes with
- * active=0, extract frozen mid-entry, no error (observed 2026-09-28 on
- * G715/MT6985 with Unearthed/ROT; the kernel reports
- * BASE_GPU_QUEUE_GROUP_ERROR_TILER_HEAP_OOM which the driver only logs).
- * The old cadence keeps one generation to roughly one large submission,
- * which never OOMs.  Real relief for GPU utilization requires heap rotation
- * (switch to a fresh heap without draining, recycle the old one once its
- * seqnos complete), not larger generations.
- *
- * Env-ladder experiment 2026-09-29 (G715/MT6985 v10, DXVK game workload):
- * PANVK_KBASE_HEAP_RENEW_WORK raised 8x/32x/128x with ~16k submits at the
- * top step -- zero tiler-heap OOM notifications (mesa_loge, release-visible)
- * and no freezes.  The kernel OOM path grows chunks on demand, so the
- * 65536-vertex cadence was draining the graphics subqueues on every submit
- * for no stability benefit.  The 128x budget is therefore the v10 default;
- * other arches keep the conservative value (untested there). */
+/* With firmware chunk recycling disarmed (no FRAGMENT_COMPLETED heap ops on
+ * kbase), the heap only grows between renewals.  Light submissions can share
+ * a heap generation, while command buffers with enough estimated tiler work
+ * force renewal after the current submission.  This keeps Minecraft's large
+ * frames within the heap limit without draining the queues after every small
+ * vkmark/vkcube frame. */
 #define KBASE_TILER_HEAP_RENEW_INTERVAL 128
-/* Official v10 defaults restored (2026-10-07 user request): the 128x budget
- * with the 128-submit check interval.  Ladder history: 32x/128 tried in
- * panvk.10, 64x/64 in panvk.11, both reverted back to the official values;
- * the OOM guard (indirect accounting + skip-drain backstop) stays. */
-#if PAN_ARCH <= 11
-#define KBASE_TILER_HEAP_RENEW_WORK (128 * 65536)
-#else
 #define KBASE_TILER_HEAP_RENEW_WORK 65536
-#endif
-
-/* After this many consecutive skipped renewals the next attempt falls back
- * to the drain-per-renewal path: while a renewal skips, the live generation
- * keeps growing and an unbounded generation ends in the kernel's unhandled
- * tiler-heap OOM termination of the CSG (the 2026-10-07 panic trigger), so a
- * rare one-off graphics drain is strictly better than letting it grow.  The
- * drain empties the retirement ring (everything retired becomes destroyable)
- * so the following renewal cannot skip again. */
-#define KBASE_RENEW_SKIP_DRAIN_THRESHOLD 4
 
 /* Diagnostic override for the tiler-heap renewal cadence.
  * PANVK_KBASE_HEAP_RENEW_INTERVAL=0 disables renewal entirely; any positive
@@ -151,26 +113,8 @@ kbase_tiler_heap_renew_work(void)
                                        KBASE_TILER_HEAP_RENEW_WORK);
       threshold = v > 0 ? v : 0;
    }
+
    return threshold;
-}
-
-/* Fallback switch restoring the old drain-per-renewal semantics.  The
- * per-generation descriptor scheme below makes the drain unnecessary, so
- * this defaults to off; the drain-for-diagnosis experiment (FCL/zink,
- * 2026-10-02) still hung with the same fragment WAIT signature, so the
- * no-drain rotation stays the default.  PANVK_KBASE_HEAP_DRAIN=1 restores
- * the old drain-per-renewal semantics for on-device diagnosis. */
-static bool
-kbase_tiler_heap_drain_mode(void)
-{
-   static int8_t mode = -1;
-
-   if (mode < 0) {
-      int64_t v = debug_get_num_option("PANVK_KBASE_HEAP_DRAIN", 0);
-      mode = v ? 1 : 0;
-   }
-
-   return mode != 0;
 }
 
 static VkResult
@@ -439,320 +383,16 @@ kbase_log_subqueue_state(struct panvk_gpu_queue *queue, uint32_t subqueue,
                           subq->kbase.last_job_offset);
 }
 
-/* DIAG-ONLY (panvk.15-diag): wide ring window around a reference offset.
- * The faulting atomic is reported asynchronously -- the CS may have flowed
- * past the instruction that raised 0x88 by the time the group-fatal
- * notification lands, and the 8-qword extract line covers only +/-56 bytes.
- * Dump [-128B, +256B) around the reference in 8-qword lines. */
-static void
-kbase_log_ring_window(const struct panvk_subqueue *subq, uint32_t subqueue,
-                      const char *label, uint64_t byte_offset)
-{
-   const uint64_t ref = byte_offset & ~(uint64_t)7;
-
-   for (int line = -2; line < 4; line++) {
-      const uint64_t base = ref + (uint64_t)line * 64;
-
-      mesa_loge("kbase: subqueue %u %s win[%+d..%+d] @%" PRIu64
-                " 0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64
-                "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64
-                " ops %02x/%02x/%02x/%02x/%02x/%02x/%02x/%02x",
-                subqueue, label, line * 64, line * 64 + 63, base,
-                kbase_ring_qword(subq, base + 0),
-                kbase_ring_qword(subq, base + 8),
-                kbase_ring_qword(subq, base + 16),
-                kbase_ring_qword(subq, base + 24),
-                kbase_ring_qword(subq, base + 32),
-                kbase_ring_qword(subq, base + 40),
-                kbase_ring_qword(subq, base + 48),
-                kbase_ring_qword(subq, base + 56),
-                (unsigned)(kbase_ring_qword(subq, base + 0) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 8) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 16) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 24) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 32) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 40) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 48) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 56) >> 56));
-   }
-}
-
-/* DIAG-ONLY (panvk.16-diag): forward ring dump, n_lines x 64B from an
- * offset.  Used for the full last-written entry: the fence/semaphore signal
- * atoms live in its tail, which the 15-diag windows missed. */
-static void
-kbase_log_ring_range(const struct panvk_subqueue *subq, uint32_t subqueue,
-                     const char *label, uint64_t byte_offset,
-                     uint32_t n_lines)
-{
-   for (uint32_t line = 0; line < n_lines; line++) {
-      const uint64_t base = byte_offset + (uint64_t)line * 64;
-
-      mesa_loge("kbase: subqueue %u %s [%u..%u] @%" PRIu64
-                " 0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64
-                "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64
-                " ops %02x/%02x/%02x/%02x/%02x/%02x/%02x/%02x",
-                subqueue, label, line * 64, line * 64 + 63, base,
-                kbase_ring_qword(subq, base + 0),
-                kbase_ring_qword(subq, base + 8),
-                kbase_ring_qword(subq, base + 16),
-                kbase_ring_qword(subq, base + 24),
-                kbase_ring_qword(subq, base + 32),
-                kbase_ring_qword(subq, base + 40),
-                kbase_ring_qword(subq, base + 48),
-                kbase_ring_qword(subq, base + 56),
-                (unsigned)(kbase_ring_qword(subq, base + 0) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 8) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 16) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 24) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 32) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 40) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 48) >> 56),
-                (unsigned)(kbase_ring_qword(subq, base + 56) >> 56));
-   }
-}
-
-/* DIAG-ONLY (panvk.16-diag): census every sync instruction retained in the
- * 64KB ring.  The faulting atomic is reported asynchronously and the 15-diag
- * windows only cover +/-384B around extract/insert -- an in-stream atom can
- * sit further back in the retained history.  Scan the whole ring for
- * SYNC_ADD32/SET32/WAIT32 (opcode 37/38/39) and SYNC_ADD64/SET64/WAIT64
- * (51/52/53); Scope bits [2:1]: 0=System 2=CSG, error_propagate = bit 0.
- * All our emissions are cs_sync32_*(CSG); a System-scope hit or an
- * unexpected address would be the smoking gun. */
-static void
-kbase_census_sync_atoms(const struct panvk_subqueue *subq, uint32_t subqueue)
-{
-#define KBASE_CENSUS_MAX_HITS 16
-   uint64_t hit_q[KBASE_CENSUS_MAX_HITS];
-   uint64_t hit_prev[KBASE_CENSUS_MAX_HITS];
-   uint32_t hit_off[KBASE_CENSUS_MAX_HITS];
-   unsigned hits = 0;
-   unsigned n_add32 = 0, n_set32 = 0, n_wait32 = 0;
-   unsigned n_add64 = 0, n_set64 = 0, n_wait64 = 0;
-   unsigned scope_sys = 0, scope_csg = 0, scope_other = 0, n_prop = 0;
-
-   for (uint32_t off = 0; off < KBASE_RINGBUF_SIZE; off += 8) {
-      const uint64_t q = kbase_ring_qword(subq, off);
-      bool is_sync = false;
-
-      switch (q >> 56) {
-      case 37: n_add32++; is_sync = true; break;
-      case 38: n_set32++; is_sync = true; break;
-      case 39: n_wait32++; is_sync = true; break;
-      case 51: n_add64++; is_sync = true; break;
-      case 52: n_set64++; is_sync = true; break;
-      case 53: n_wait64++; is_sync = true; break;
-      default: break;
-      }
-      if (!is_sync)
-         continue;
-
-      switch ((q >> 1) & 3) {
-      case 0: scope_sys++; break;
-      case 2: scope_csg++; break;
-      default: scope_other++; break;
-      }
-      if (q & 1)
-         n_prop++;
-
-      const unsigned slot = hits % KBASE_CENSUS_MAX_HITS;
-      hit_q[slot] = q;
-      hit_prev[slot] = kbase_ring_qword(subq, off - 8);
-      hit_off[slot] = off;
-      hits++;
-   }
-
-   mesa_loge("kbase: census subqueue %u: add32=%u set32=%u wait32=%u "
-             "add64=%u set64=%u wait64=%u | scope: system=%u csg=%u "
-             "other=%u | error_propagate=%u total=%u",
-             subqueue, n_add32, n_set32, n_wait32, n_add64, n_set64,
-             n_wait64, scope_sys, scope_csg, scope_other, n_prop, hits);
-
-   const unsigned shown = MIN2(hits, KBASE_CENSUS_MAX_HITS);
-   for (unsigned k = 0; k < shown; k++) {
-      const unsigned idx = (hits - shown + k) % KBASE_CENSUS_MAX_HITS;
-
-      mesa_loge("kbase: census subqueue %u recent[%u] @%u prev 0x%" PRIx64
-                " atom 0x%" PRIx64 " op %02x scope %u prop %u",
-                subqueue, k, hit_off[idx], hit_prev[idx], hit_q[idx],
-                (unsigned)(hit_q[idx] >> 56), (unsigned)((hit_q[idx] >> 1) & 3),
-                (unsigned)(hit_q[idx] & 1));
-   }
-#undef KBASE_CENSUS_MAX_HITS
-}
-
-/* DIAG-ONLY (panvk.17-diag): the 16-diag ring census found zero sync atoms in
- * the whole retained 64KB ring -- ring entries are pure CALL trampolines and
- * the real PanVK command stream (jobs, plus the fence/semaphore signal atoms
- * in its tail) lives in separate stream memory reached through cs_call().
- * Census the sync atoms of the last stream submitted on each subqueue
- * instead: same opcode set (37/38/39 add/set/wait32, 51/52/53 add/set/wait64),
- * Scope bits [2:1] (0=System 2=CSG), error_propagate = bit 0.  A System-scope
- * atom here is the smoking gun; an all-CSG result whose operands point at the
- * uncached seqno cells would mean every atom we emit is clean and the
- * faulting atomic is issued by the microcode/kernel layer instead.
- *
- * Note: the CPU mapping may have been recycled by a newer command buffer by
- * the time the fatal notification lands (the dump runs asynchronously), so
- * the censused bytes are the stream of the most recent submission that
- * touched this subqueue, not necessarily the faulting one. */
-static void
-kbase_census_stream_sync_atoms(uint32_t subqueue, uint64_t stream_addr,
-                               uint32_t stream_size, const void *stream_cpu)
-{
-#define KBASE_CENSUS_MAX_HITS 16
-   const uint64_t *stream = stream_cpu;
-   uint64_t hit_q[KBASE_CENSUS_MAX_HITS];
-   uint64_t hit_prev[KBASE_CENSUS_MAX_HITS];
-   uint32_t hit_off[KBASE_CENSUS_MAX_HITS];
-   unsigned hits = 0;
-   unsigned n_add32 = 0, n_set32 = 0, n_wait32 = 0;
-   unsigned n_add64 = 0, n_set64 = 0, n_wait64 = 0;
-   unsigned scope_sys = 0, scope_csg = 0, scope_other = 0, n_prop = 0;
-   const uint32_t n_qwords = stream_size / sizeof(uint64_t);
-
-   if (!stream || !n_qwords)
-      return;
-
-   for (uint32_t q = 0; q < n_qwords; q++) {
-      const uint64_t w = kbase_stream_qword(stream, stream_size, q);
-      bool is_sync = false;
-
-      switch (w >> 56) {
-      case 37: n_add32++; is_sync = true; break;
-      case 38: n_set32++; is_sync = true; break;
-      case 39: n_wait32++; is_sync = true; break;
-      case 51: n_add64++; is_sync = true; break;
-      case 52: n_set64++; is_sync = true; break;
-      case 53: n_wait64++; is_sync = true; break;
-      default: break;
-      }
-      if (!is_sync)
-         continue;
-
-      switch ((w >> 1) & 3) {
-      case 0: scope_sys++; break;
-      case 2: scope_csg++; break;
-      default: scope_other++; break;
-      }
-      if (w & 1)
-         n_prop++;
-
-      const unsigned slot = hits % KBASE_CENSUS_MAX_HITS;
-      hit_q[slot] = w;
-      hit_prev[slot] = q ? kbase_stream_qword(stream, stream_size, q - 1) : 0;
-      hit_off[slot] = q * sizeof(uint64_t);
-      hits++;
-   }
-
-   mesa_loge("kbase: stream census subqueue %u 0x%" PRIx64 "/%u cpu %p: "
-             "add32=%u set32=%u wait32=%u add64=%u set64=%u wait64=%u | "
-             "scope: system=%u csg=%u other=%u | error_propagate=%u "
-             "total=%u",
-             subqueue, stream_addr, stream_size, stream_cpu,
-             n_add32, n_set32, n_wait32, n_add64, n_set64, n_wait64,
-             scope_sys, scope_csg, scope_other, n_prop, hits);
-
-   const unsigned shown = MIN2(hits, KBASE_CENSUS_MAX_HITS);
-   for (unsigned k = 0; k < shown; k++) {
-      const unsigned idx = (hits - shown + k) % KBASE_CENSUS_MAX_HITS;
-
-      mesa_loge("kbase: stream census subqueue %u recent[%u] @%u "
-                "prev 0x%" PRIx64 " atom 0x%" PRIx64 " op %02x scope %u "
-                "prop %u",
-                subqueue, k, hit_off[idx], hit_prev[idx], hit_q[idx],
-                (unsigned)(hit_q[idx] >> 56),
-                (unsigned)((hit_q[idx] >> 1) & 3),
-                (unsigned)(hit_q[idx] & 1));
-   }
-
-   /* Dump the last 256B of the stream: fence/semaphore signal atoms are
-    * emitted at the very end of a submission, so the tail carries them
-    * together with their target addresses as operands. */
-   const uint32_t qw_tail_start = n_qwords >= 32 ? n_qwords - 32 : 0;
-
-   for (uint32_t q = qw_tail_start; q < n_qwords; q += 8) {
-      mesa_loge("kbase: stream tail subqueue %u qwords[%u..%u] "
-                "0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64
-                "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64 "/0x%" PRIx64
-                " ops %02x/%02x/%02x/%02x/%02x/%02x/%02x/%02x",
-                subqueue, q, MIN2(q + 7, n_qwords - 1),
-                kbase_stream_qword(stream, stream_size, q + 0),
-                kbase_stream_qword(stream, stream_size, q + 1),
-                kbase_stream_qword(stream, stream_size, q + 2),
-                kbase_stream_qword(stream, stream_size, q + 3),
-                kbase_stream_qword(stream, stream_size, q + 4),
-                kbase_stream_qword(stream, stream_size, q + 5),
-                kbase_stream_qword(stream, stream_size, q + 6),
-                kbase_stream_qword(stream, stream_size, q + 7),
-                kbase_stream_opcode(stream, stream_size, q + 0),
-                kbase_stream_opcode(stream, stream_size, q + 1),
-                kbase_stream_opcode(stream, stream_size, q + 2),
-                kbase_stream_opcode(stream, stream_size, q + 3),
-                kbase_stream_opcode(stream, stream_size, q + 4),
-                kbase_stream_opcode(stream, stream_size, q + 5),
-                kbase_stream_opcode(stream, stream_size, q + 6),
-                kbase_stream_opcode(stream, stream_size, q + 7));
-   }
-#undef KBASE_CENSUS_MAX_HITS
-}
-
-/* DIAG-ONLY (panvk.15-diag): full three-subqueue state dump taken right
- * after the fatal notification is consumed, before the 10s timeout path.
- * Includes the wide extract window: look for a SYNC_ADD32/64 (opcode 37/51)
- * or SYNC_SET32/64 (38/52) whose Scope bits [2:1] encode System (0). */
-static void
-kbase_dump_fatal_state(struct panvk_gpu_queue *queue)
-{
-   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
-      struct panvk_subqueue *subq = &queue->subqueues[i];
-
-      if (!subq->kbase.user_io || !subq->kbase.ringbuf_cpu)
-         continue;
-
-      kbase_log_subqueue_state(queue, i, "fatal");
-
-      const uint8_t *output_page = (uint8_t *)subq->kbase.user_io + 8192;
-      const uint64_t extract =
-         *(volatile uint64_t *)(output_page + CS_USER_IO_OUTPUT_CS_EXTRACT);
-      const uint64_t insert = subq->kbase.insert;
-
-      kbase_log_ring_window(subq, i, "extract", extract);
-      if (insert != extract)
-         kbase_log_ring_window(subq, i, "insert", insert);
-
-      /* DIAG-ONLY (panvk.16-diag): full retained-history sync-atom census
-       * plus the complete last-written entry (its tail holds the signal
-       * atoms -- prime suspect given error_propagate async reporting). */
-      kbase_census_sync_atoms(subq, i);
-      if (subq->kbase.last_job_size)
-         kbase_log_ring_range(subq, i, "lastjob",
-                              subq->kbase.last_job_offset,
-                              DIV_ROUND_UP(subq->kbase.last_job_size, 64));
-
-      /* DIAG-ONLY (panvk.17-diag): census the last stream called on this
-       * subqueue -- the 16-diag ring census came back empty, so if the
-       * faulting atomic is one we emit, it lives in this stream. */
-      if (subq->kbase.last_stream_size)
-         kbase_census_stream_sync_atoms(i, subq->kbase.last_stream_addr,
-                                        subq->kbase.last_stream_size,
-                                        subq->kbase.last_stream_cpu);
-   }
-
-   kbase_log_queue_syncobjs(queue);
-}
-
 static VkResult
 kbase_init_seqnos(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
 
-   /* Completion publishes each seqno with a plain LS store, so request CSF
-    * event notifications for this BO.  This wakes ppoll() as soon as a pending
-    * fence target retires instead of making a waiter sleep until its periodic
-    * timeout.  Keep the normal cached memory path: GPU-uncached BOs are not
-    * CPU-observable on all Android kbase stacks. */
+   /* Completion uses SYNC_ADD64, so request CSF event notifications for this
+    * BO.  This wakes ppoll() as soon as a pending fence target retires instead
+    * of making a waiter sleep until its periodic timeout.  Keep the normal
+    * cached memory path: GPU-uncached BOs are not CPU-observable on all
+    * Android kbase stacks. */
    queue->kbase_seqnos.bo =
       pan_kmod_bo_alloc(dev->kmod.dev, dev->kmod.vm, 4096,
                        PAN_KMOD_BO_FLAG_CSF_EVENT);
@@ -790,10 +430,9 @@ kbase_init_seqnos(struct panvk_gpu_queue *queue)
 }
 
 /* Emit one job into the subqueue ring: cache maintenance, a CALL to the
- * command stream, then a plain-store publish of the subqueue seqno cell
- * deferred on all scoreboard slots (a SYSTEM-scope SYNC_ADD64 here raises
- * SHAREABILITY_FAULT 0x88 on non-io-coherent SoCs, see the publish site
- * below).  Only the FW-unpreserved registers (the top
+ * command stream, then a SYNC_ADD64 on the subqueue seqno cell deferred on
+ * all scoreboard slots — the same sequence the panthor kernel driver emits
+ * into its kernel-owned rings.  Only the FW-unpreserved registers (the top
  * 4 of the register file) are clobbered, which the rest of the driver
  * stays away from. */
 static VkResult
@@ -829,11 +468,35 @@ kbase_subqueue_reserve_ring(struct panvk_gpu_queue *queue,
    return VK_SUCCESS;
 }
 
+/* PANVK_KBASE_HEAP_SLOTS TILER_HEAP descriptors live at the start of
+ * tiler_heap.desc (the geometry buffer starts at +4096). */
+#define KBASE_HEAP_DESC_SLOT_STRIDE 64
+
+/* Per-heap chunk limit: the configured count, but never below 200 MiB. The
+ * panthor-derived limit of 64 chunks stranded large geometry workloads on
+ * the tiler iterator, and the floor is kept in bytes so that larger chunks
+ * do not raise it. */
+static uint32_t
+kbase_tiler_heap_max_chunks(const struct panvk_physical_device *phys_dev)
+{
+   return MAX2(phys_dev->csf.tiler.max_chunks,
+               DIV_ROUND_UP(200u << 20, phys_dev->csf.tiler.chunk_size));
+}
+static_assert(PANVK_KBASE_HEAP_SLOTS * KBASE_HEAP_DESC_SLOT_STRIDE <= 4096,
+              "heap descriptor slots overlap the geometry buffer");
+
+static uint64_t
+kbase_heap_desc_addr(const struct panvk_gpu_queue *queue)
+{
+   return panvk_priv_mem_dev_addr(queue->tiler_heap.desc) +
+          queue->kbase_heap_slot * KBASE_HEAP_DESC_SLOT_STRIDE;
+}
+
 static VkResult
 kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
                         uint64_t stream_addr, uint32_t stream_size,
-                        const void *stream_cpu, uint32_t flush_id,
-                        uint64_t gpu_id)
+                        uint32_t flush_id, uint64_t gpu_id,
+                        const uint64_t *wait_seqnos, bool flush_caches)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    const struct drm_panthor_csif_info *csif_info = panvk_get_csif_props(dev);
@@ -926,6 +589,17 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
    uint64_t seqno_addr = kbase_subqueue_seqno_dev_addr(queue, subqueue);
    uint64_t target_seqno = subq->kbase.emitted_jobs + 1;
 
+   for (uint32_t i = 0; wait_seqnos && i < PANVK_SUBQUEUE_COUNT; i++) {
+      if (!wait_seqnos[i])
+         continue;
+      flush_id = 0;
+      if (i == subqueue)
+         continue;
+      cs_move64_to(&b, addr64, kbase_subqueue_seqno_dev_addr(queue, i));
+      cs_move64_to(&b, val64, wait_seqnos[i] - 1);
+      cs_sync64_wait(&b, false, MALI_CS_CONDITION_GREATER, val64, addr64);
+   }
+
    /* The heap context can be renewed between synchronous submissions to
     * release chunks that proprietary kbase accounts per CSG.  Refresh the
     * firmware heap state at every graphics CALL so it observes the current
@@ -933,6 +607,21 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
    if (subqueue != PANVK_SUBQUEUE_COMPUTE) {
       cs_move64_to(&b, addr64, queue->tiler_heap.context.dev_addr);
       cs_heap_set(&b, addr64);
+
+      /* A renewal moves the heap to the other TILER_HEAP descriptor slot.
+       * Point the context at it from the ring, so entries emitted before
+       * the renewal keep the old descriptor and no drain is needed. */
+      uint64_t heap_desc = kbase_heap_desc_addr(queue);
+      if (subq->kbase.heap_desc != heap_desc) {
+         cs_move64_to(&b, addr64,
+                      panvk_priv_mem_dev_addr(subq->context) +
+                         offsetof(struct panvk_cs_subqueue_context,
+                                  render.tiler_heap));
+         cs_move64_to(&b, val64, heap_desc);
+         cs_store64(&b, val64, addr64, 0);
+         cs_wait_slot(&b, SB_ID(LS));
+         subq->kbase.heap_desc = heap_desc;
+      }
    }
 
    /* Diagnostic breadcrumbs are useful when investigating a hang, but each
@@ -953,13 +642,18 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
    if (stream_size) {
       /* Make CPU-written command-stream/descriptor memory visible to the
        * GPU before calling into it (0x233 flush, same as the panthor
-       * kernel: clean+invalidate L2/LSC, invalidate other caches). */
-      cs_move32_to(&b, val32, flush_id);
-      cs_flush_caches(&b, MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
-                      MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
-                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, val32,
-                      cs_defer(0, SB_ID(IMM_FLUSH)));
-      cs_wait_slot(&b, SB_ID(IMM_FLUSH));
+       * kernel: clean+invalidate L2/LSC, invalidate other caches).
+       * Within one submit batch every CPU write is published before the
+       * ioctl and ring entries on a subqueue run in order, so the first
+       * job's flush covers the later ones: emit it once per subqueue. */
+      if (flush_caches) {
+         cs_move32_to(&b, val32, flush_id);
+         cs_flush_caches(&b, MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
+                         MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
+                         MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, val32,
+                         cs_defer(0, SB_ID(IMM_FLUSH)));
+         cs_wait_slot(&b, SB_ID(IMM_FLUSH));
+      }
 
       cs_move64_to(&b, addr64, stream_addr);
       cs_move32_to(&b, val32, stream_size);
@@ -973,30 +667,32 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
       cs_wait_slot(&b, SB_ID(LS));
    }
 
-   /* Signal completion once all prior operations retired. */
+   /* Signal completion once all prior operations retired: an explicit WAIT
+    * on all scoreboard slots followed by a SYNC_ADD64 on the cell proper
+    * with an empty wait mask, matching the panthor kernel and proprietary
+    * timeline path.  A deferred op's wait mask must not include its own
+    * signal slot, so waiting through the defer is not an option.
+    *
+    * Keep the secondary LS completion copy as diagnostic instrumentation.
+    * It adds an LS transaction and a scoreboard stall to every submitted
+    * job, while normal completion and CQS notification already use the
+    * system-scope SYNC_ADD64 below.  Nothing is emitted after that sync
+    * operation (except the register-less ERROR_BARRIER), so its operands
+    * cannot be clobbered while the deferred operation is in flight. */
    cs_move64_to(&b, addr64, seqno_addr);
    cs_wait_slots(&b, dev->csf.sb.all_mask);
+   if (PANVK_DEBUG(KBASE_DIAG)) {
+      cs_move64_to(&b, val64, KBASE_SEQNO_MARK_POST_WAIT | target_seqno);
+      cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_POST_WAIT_OFFSET);
+      cs_wait_slot(&b, SB_ID(LS));
 
-   /* Signal completion without a system-scope atomic: on SoCs whose GPU has
-    * no coherent interconnect (this kbase backend reports
-    * is_io_coherent = false), SYNC_ADD64 with SYSTEM scope raises
-    * SHAREABILITY_FAULT (group fatal exception 0x88) whenever the atomic
-    * crosses the GPU/IO boundary -- which happens nondeterministically
-    * depending on cache residency.  Store the new seqno as a plain LS
-    * operation instead.  This matches the CSG scope used by every other
-    * sync emitted on kbase.
-    *
-    * No cache flush is needed here: the seqno cell lives in GPU-uncached
-    * CSF_EVENT memory, so this plain store reaches DRAM directly, and the
-    * CPU waiters observe it by dropping their own stale cached lines with
-    * DC CIVAC (kbase_cache_invalidate_range in the poll loop).  Written
-    * command-stream output is already cleaned by the PanVK stream itself at
-    * command-buffer boundaries.  Every scoreboard round-trip removed here
-    * also removes one firmware wake event per ring entry, which matters on
-    * the single-CSG layout where one CSG carries all CSIs. */
-   cs_move64_to(&b, val64, target_seqno);
-   cs_store64(&b, val64, addr64, 0);
-   cs_wait_slot(&b, SB_ID(LS));
+      cs_move64_to(&b, val64, target_seqno);
+      cs_store64(&b, val64, addr64, KBASE_SEQNO_LS_COPY_OFFSET);
+      cs_wait_slot(&b, SB_ID(LS));
+   }
+   cs_move64_to(&b, val64, 1);
+   cs_sync64_add(&b, true, MALI_CS_SYNC_SCOPE_SYSTEM, val64, addr64,
+                 cs_defer(0, SB_ID(DEFERRED_SYNC)));
 
    /* Fault-recovery boundary, matching the panthor kernel sequence. */
    cs_error_barrier(&b);
@@ -1025,7 +721,6 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
    subq->kbase.last_job_entry_size = entry_size;
    subq->kbase.last_stream_addr = stream_addr;
    subq->kbase.last_stream_size = stream_size;
-   subq->kbase.last_stream_cpu = stream_cpu;
    subq->kbase.last_flush_id = flush_id;
 
    /* kbase queue rings follow the proprietary userspace model: CPU-written
@@ -1160,12 +855,28 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
          break;
 
       if (cell->error) {
-         mesa_loge("kbase: CS error 0x%x on subqueue %u", cell->error,
-                   subqueue);
+         /* CS output block mirrors the CS registers. cell->error is only
+          * a fault flag; CS_FAULT (0x80) and CS_FAULT_INFO (0x88) carry
+          * the exception type and the fault address. A real fault has a
+          * non-zero exception type. Exception type 0 with info 0 is not
+          * a GPU exception — keep waiting for the seqno. */
+         uint32_t cs_fault = *(volatile uint32_t *)(output_page + 0x80);
+         uint32_t cs_fault_lo = *(volatile uint32_t *)(output_page + 0x88);
+         uint32_t cs_fault_hi = *(volatile uint32_t *)(output_page + 0x8c);
+         uint32_t exc = cs_fault & 0xffu;
+         if (exc == 0 && cs_fault_lo == 0 && cs_fault_hi == 0)
+            goto kbase_wait_continue;
+         mesa_loge("kbase: CS error 0x%x on subqueue %u"
+                   " fault 0x%x info 0x%08x%08x",
+                   cell->error, subqueue, cs_fault, cs_fault_hi, cs_fault_lo);
          return vk_queue_set_lost(&queue->vk,
-                                  "kbase: CS error 0x%x on subqueue %u",
-                                  cell->error, subqueue);
+                                  "kbase: CS error 0x%x on subqueue %u"
+                                  " fault 0x%x info 0x%08x%08x",
+                                  cell->error, subqueue, cs_fault,
+                                  cs_fault_hi, cs_fault_lo);
       }
+
+   kbase_wait_continue:
 
       int64_t now = os_time_get_nano();
 
@@ -1277,7 +988,7 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
        * still fire. */
       int64_t remaining = deadline > (uint64_t)now
                              ? MIN2(deadline - (uint64_t)now,
-                                    (uint64_t)PANVK_KBASE_WAIT_SLICE_US * 1000)
+                                    20ull * 1000000ull)
                              : 0;
       int cqs_ret = target_seqno
                        ? kbase_kmod_csf_wait_cqs64(
@@ -1287,17 +998,6 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
 
       if (cqs_ret < 0) {
          int error_type = kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
-
-         /* DIAG-ONLY (panvk.15-diag): the fatal notification was just
-          * consumed -- dump the full state now, while the CS is as close to
-          * the fault as it will ever be observed from userspace. */
-         if (!queue->kbase_fatal_dumped &&
-             kbase_kmod_csf_has_error(dev->kmod.dev)) {
-            queue->kbase_fatal_dumped = true;
-            mesa_loge("kbase: FATAL dump (notification consumed, error_type %d)",
-                      error_type);
-            kbase_dump_fatal_state(queue);
-         }
 
          if (dev->debug.decode_ctx && insert > extract && error_type) {
             // pandecode_user_msg(dev->debug.decode_ctx,
@@ -1365,8 +1065,6 @@ static void
 kbase_destroy_group(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
-   uint32_t group_handles[PANVK_SUBQUEUE_COUNT];
-   unsigned n_groups = 0;
 
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
       struct panvk_subqueue *subq = &queue->subqueues[i];
@@ -1379,20 +1077,12 @@ kbase_destroy_group(struct panvk_gpu_queue *queue)
       subq->kbase.ringbuf_bo = NULL;
       subq->kbase.user_io = NULL;
 
-      /* Destroy each distinct CSG once, after every queue that could still
-       * hold a HEAP_SET reference is terminated. */
       if (subq->kbase.group_handle != UINT32_MAX) {
-         bool known = false;
-         for (uint32_t j = 0; j < n_groups; j++)
-            known |= (group_handles[j] == subq->kbase.group_handle);
-         if (!known)
-            group_handles[n_groups++] = subq->kbase.group_handle;
+         kbase_kmod_csf_group_destroy(dev->kmod.dev,
+                                      subq->kbase.group_handle);
          subq->kbase.group_handle = UINT32_MAX;
       }
    }
-
-   for (uint32_t j = 0; j < n_groups; j++)
-      kbase_kmod_csf_group_destroy(dev->kmod.dev, group_handles[j]);
 }
 
 static VkResult
@@ -1406,31 +1096,15 @@ kbase_create_group(struct panvk_gpu_queue *queue)
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
       queue->subqueues[i].kbase.group_handle = UINT32_MAX;
 
-   /* Single merged CSG carrying all CSIs (VT/FRAG/COMPUTE = CSI 0/1/2).
-    * The stock per-subqueue topology (one CSG each, the "beta.9" layout)
-    * deadlocks the MT6985 kbase firmware under heavy DX12-class load: the
-    * groups bind but stream progress never advances, every subqueue times
-    * out with stream progress 0x0 and no error flag (observed 2026-10-05,
-    * G720/v10, winlator + vkd3d-proton).  The merged layout keeps the whole
-    * dependency graph intra-CSG and is the only topology verified to run
-    * DX12 on this firmware.  The sync path already emits plain stores with
-    * CSG scope, matching this layout. */
-   if (kbase_kmod_csf_group_create(dev->kmod.dev, PANVK_SUBQUEUE_COUNT,
-                                   &queue->group_handle)) {
-      result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
-                            "Failed to create the kbase queue group");
-      goto err_destroy_group;
-   }
-   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
-      queue->subqueues[i].kbase.group_handle = queue->group_handle;
-   mesa_logi("kbase: single merged CSG %u carrying %u CSIs",
-             queue->group_handle, PANVK_SUBQUEUE_COUNT);
-
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
       struct panvk_subqueue *subq = &queue->subqueues[i];
 
-      /* Group handles were pre-recorded on each subqueue at creation time
-       * so that the err path reclaims them even before this loop runs. */
+      if (kbase_kmod_csf_group_create(dev->kmod.dev, 1,
+                                      &subq->kbase.group_handle)) {
+         result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                               "Failed to create a kbase queue group");
+         goto err_destroy_group;
+      }
 
       subq->kbase.ringbuf_bo =
          pan_kmod_bo_alloc(dev->kmod.dev, dev->kmod.vm, KBASE_RINGBUF_SIZE,
@@ -1476,7 +1150,7 @@ kbase_create_group(struct panvk_gpu_queue *queue)
       }
 
       subq->kbase.user_io = kbase_kmod_csf_queue_bind(
-         dev->kmod.dev, subq->kbase.group_handle, i,
+         dev->kmod.dev, subq->kbase.group_handle, 0,
          subq->kbase.ringbuf_dev,
          KBASE_RINGBUF_SIZE);
       if (!subq->kbase.user_io) {
@@ -1487,9 +1161,9 @@ kbase_create_group(struct panvk_gpu_queue *queue)
 
       subq->kbase.insert = 0;
       subq->kbase.emitted_jobs = 0;
-      mesa_logd("kbase: bound subqueue %u to group %u CSI%u, ring CPU %p, "
+      mesa_logd("kbase: bound subqueue %u to group %u CSI0, ring CPU %p, "
                 "ring VA 0x%" PRIx64 ", user_io %p",
-                i, subq->kbase.group_handle, i, subq->kbase.ringbuf_cpu,
+                i, subq->kbase.group_handle, subq->kbase.ringbuf_cpu,
                 subq->kbase.ringbuf_dev,
                 subq->kbase.user_io);
    }
@@ -1509,8 +1183,6 @@ finish_render_desc_ringbuf(struct panvk_gpu_queue *queue)
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    const bool tracing_enabled = PANVK_DEBUG(TRACE);
    struct panvk_desc_ringbuf *ringbuf = &queue->render_desc_ringbuf;
-
-   panvk_pool_free_mem(&ringbuf->syncobj);
 
    if (dev->debug.decode_ctx && ringbuf->addr.dev) {
       pandecode_inject_free(dev->debug.decode_ctx, ringbuf->addr.dev,
@@ -1691,29 +1363,10 @@ ringbuf_mapped:
          pandecode_inject_mmap(dev->debug.decode_ctx,
                                ringbuf->addr.dev + ringbuf->size,
                                ringbuf->addr.host, ringbuf->size, NULL);
-   }
+    }
 
-   struct panvk_pool_alloc_info alloc_info = {
-      .size = sizeof(struct panvk_cs_sync32),
-      .alignment = 64,
-   };
-
-   ringbuf->syncobj = panvk_pool_alloc_mem(&dev->mempools.rw, alloc_info);
-   if (!panvk_priv_mem_check_alloc(ringbuf->syncobj))
-      return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                          "Failed to create the render desc ringbuf context");
-
-   panvk_priv_mem_write(ringbuf->syncobj, 0, struct panvk_cs_sync32, syncobj) {
-      *syncobj = (struct panvk_cs_sync32){
-         .seqno = RENDER_DESC_RINGBUF_SIZE,
-      };
-   }
-#ifdef HAVE_PAN_KMOD_KBASE
-   if (gpu_queue_uses_kbase(dev))
-      kbase_clean_priv_mem(ringbuf->syncobj, 0,
-                           sizeof(struct panvk_cs_sync32));
-#endif
-
+   /* The ringbuf sync lives in the queue syncobjs BO, which is CSF event
+    * memory on kbase. init_queue() wrote its initial seqno. */
    return VK_SUCCESS;
 }
 
@@ -1746,8 +1399,9 @@ finish_subqueue_tracing(struct panvk_gpu_queue *queue,
          pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
       assert(!ret);
 
-      panvk_as_free(dev, dev->as.priv_heap, subq->tracebuf.addr.dev,
-                    subq->tracebuf.size + pgsize);
+      if (!(dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA))
+         panvk_as_free(dev, dev->as.priv_heap, subq->tracebuf.addr.dev,
+                       subq->tracebuf.size + pgsize);
    }
 
    if (subq->tracebuf.addr.host) {
@@ -1779,9 +1433,8 @@ kbase_submit_init_subqueues(struct panvk_gpu_queue *queue)
       VkResult res =
          kbase_subqueue_emit_job(queue, subqueue, subq->kbase.init_stream_addr,
                                  subq->kbase.init_stream_size,
-                                 panvk_priv_mem_host_addr(subq->kbase.init_cs),
                                  subq->kbase.init_flush_id,
-                                 phys_dev->kmod.dev->props.gpu_id);
+                                 phys_dev->kmod.dev->props.gpu_id, NULL, true);
       if (res != VK_SUCCESS)
          return panvk_errorf(dev->vk.physical, VK_ERROR_INITIALIZATION_FAILED,
                              "Failed to initialize subqueue");
@@ -1844,14 +1497,19 @@ init_subqueue_tracing(struct panvk_gpu_queue *queue,
                           "Failed to CPU map tracebuf");
    }
 
-   /* Add a guard page. */
+   /* Add a guard page.  kbase (AUTO_VA) assigns the VA itself and cannot map
+    * at a caller-chosen address, so there is no guard page there. */
    uint64_t pgsize = panvk_get_gpu_page_size(dev);
-   dev_addr = panvk_as_alloc(dev, dev->as.priv_heap,
-                             subq->tracebuf.size + pgsize, pgsize);
+   const bool auto_va = dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA;
+   dev_addr = PAN_KMOD_VM_MAP_AUTO_VA;
+   if (!auto_va) {
+      dev_addr = panvk_as_alloc(dev, dev->as.priv_heap,
+                                subq->tracebuf.size + pgsize, pgsize);
 
-   if (!dev_addr)
-      return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                          "Failed to allocate virtual address for tracebuf");
+      if (!dev_addr)
+         return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                             "Failed to allocate virtual address for tracebuf");
+   }
 
    struct pan_kmod_vm_op vm_op = {
       .type = PAN_KMOD_VM_OP_TYPE_MAP,
@@ -1870,13 +1528,14 @@ init_subqueue_tracing(struct panvk_gpu_queue *queue,
    int ret =
       pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &vm_op, 1);
    if (ret) {
-      panvk_as_free(dev, dev->as.priv_heap, dev_addr,
-                    subq->tracebuf.size + pgsize);
+      if (!auto_va)
+         panvk_as_free(dev, dev->as.priv_heap, dev_addr,
+                       subq->tracebuf.size + pgsize);
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                          "Failed to GPU map ringbuf BO"); // FAILED panvk_vX_gpu_queue
+                          "Failed to GPU map ringbuf BO");
    }
 
-   subq->tracebuf.addr.dev = dev_addr;
+   subq->tracebuf.addr.dev = auto_va ? vm_op.va.start : dev_addr;
 
    panvk_address_binding_report(dev, NULL, subq->tracebuf.addr.dev,
                                 subq->tracebuf.size,
@@ -1915,8 +1574,7 @@ init_utrace(struct panvk_gpu_queue *queue)
 
 #ifdef HAVE_PAN_KMOD_KBASE
    /* kbase queues use the synchronous submission model and never process
-    * utrace on the GPU timeline (timestamp_frequency is 0 there), so no
-    * utrace sync object is needed. */
+    * utrace on the GPU timeline, so no utrace sync object is needed. */
    if (gpu_queue_uses_kbase(dev))
       return VK_SUCCESS;
 #endif
@@ -2058,11 +1716,14 @@ init_subqueue(struct panvk_gpu_queue *queue, enum panvk_subqueue_id subqueue)
           * to the tiler descriptors. */
          cs_ctx->render.geom_buf =
             (cs_ctx->render.tiler_heap + 4096) | ((64 * 1024) >> 12);
+#ifdef HAVE_PAN_KMOD_KBASE
+         subq->kbase.heap_desc = cs_ctx->render.tiler_heap;
+#endif
 
          /* Initialize the ringbuf */
          cs_ctx->render.desc_ringbuf = (struct panvk_cs_desc_ringbuf){
-            .syncobj =
-               panvk_priv_mem_dev_addr(queue->render_desc_ringbuf.syncobj),
+            .syncobj = panvk_priv_mem_dev_addr(queue->syncobjs) +
+                       PANVK_QUEUE_DESC_RINGBUF_SYNC_OFFSET,
             .ptr = queue->render_desc_ringbuf.addr.dev,
             .pos = 0,
          };
@@ -2255,9 +1916,19 @@ init_queue(struct panvk_gpu_queue *queue)
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    VkResult result;
 
+   static_assert(sizeof(struct panvk_cs_sync64) * PANVK_SUBQUEUE_COUNT <=
+                    PANVK_QUEUE_TESS_READY_SYNC_OFFSET,
+                 "subqueue syncobjs overlap the tess syncs");
+   static_assert(PANVK_QUEUE_TESS_FREE_SYNC_OFFSET +
+                    sizeof(struct panvk_cs_sync32) <=
+                    PANVK_QUEUE_DESC_RINGBUF_SYNC_OFFSET,
+                 "tess syncs overlap the render desc ringbuf sync");
+   static_assert(PANVK_QUEUE_DESC_RINGBUF_SYNC_OFFSET +
+                    sizeof(struct panvk_cs_sync32) <=
+                    PANVK_QUEUE_SYNCOBJS_SIZE,
+                 "render desc ringbuf sync exceeds the syncobjs BO");
    struct panvk_pool_alloc_info alloc_info = {
-      .size =
-         ALIGN_POT(sizeof(struct panvk_cs_sync64), 64) * PANVK_SUBQUEUE_COUNT,
+      .size = PANVK_QUEUE_SYNCOBJS_SIZE,
       .alignment = 64,
    };
 
@@ -2284,11 +1955,30 @@ init_queue(struct panvk_gpu_queue *queue)
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Failed to allocate subqueue sync objects");
 
+   /* The tessellation loops leave ready at 0 and free at 1. */
+   panvk_priv_mem_write(queue->syncobjs, PANVK_QUEUE_TESS_READY_SYNC_OFFSET,
+                        struct panvk_cs_sync32, sync) {
+      *sync = (struct panvk_cs_sync32){0};
+   }
+   panvk_priv_mem_write(queue->syncobjs, PANVK_QUEUE_TESS_FREE_SYNC_OFFSET,
+                        struct panvk_cs_sync32, sync) {
+      *sync = (struct panvk_cs_sync32){.seqno = 1};
+   }
+   /* The fragment subqueue releases RENDER_DESC_RINGBUF_SIZE back into this
+    * counter; a reserve waits until it covers the request. */
+   panvk_priv_mem_write(queue->syncobjs, PANVK_QUEUE_DESC_RINGBUF_SYNC_OFFSET,
+                        struct panvk_cs_sync32, sync) {
+      *sync = (struct panvk_cs_sync32){.seqno = RENDER_DESC_RINGBUF_SIZE};
+   }
+
 #ifdef HAVE_PAN_KMOD_KBASE
    if (gpu_queue_uses_kbase(dev)) {
+      kbase_clean_priv_mem(queue->syncobjs, PANVK_QUEUE_TESS_READY_SYNC_OFFSET,
+                           PANVK_QUEUE_SYNCOBJS_SIZE -
+                              PANVK_QUEUE_TESS_READY_SYNC_OFFSET);
       result = kbase_init_seqnos(queue);
       if (result != VK_SUCCESS)
-         return result;
+         goto err_cleanup_queue;
    }
 #endif
 
@@ -2393,6 +2083,170 @@ destroy_group(struct panvk_gpu_queue *queue)
    assert(!ret);
 }
 
+#ifdef HAVE_PAN_KMOD_KBASE
+static void
+kbase_spare_heap_job(void *job, void *gdata, int thread_index)
+{
+   struct panvk_gpu_queue *queue = job;
+   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+   const struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(dev->vk.physical);
+
+   /* On failure ctx stays 0 and the renewal creates the heap itself. */
+   if (kbase_kmod_csf_tiler_heap_create(
+          dev->kmod.dev, queue->tiler_heap.chunk_size,
+          phys_dev->csf.tiler.initial_chunks,
+          kbase_tiler_heap_max_chunks(phys_dev), 65535, 0,
+          &queue->kbase_spare_heap.ctx, &queue->kbase_spare_heap.first_chunk))
+      queue->kbase_spare_heap.ctx = 0;
+}
+
+static void
+kbase_spare_heap_kick(struct panvk_gpu_queue *queue)
+{
+   if (!queue->kbase_spare_heap.enabled || queue->kbase_spare_heap.pending ||
+       queue->kbase_spare_heap.ctx)
+      return;
+
+   queue->kbase_spare_heap.pending = true;
+   util_queue_add_job(&queue->kbase_spare_heap.thread, queue,
+                      &queue->kbase_spare_heap.fence, kbase_spare_heap_job,
+                      NULL, 0);
+}
+
+/* Takes the pre-created heap context, if any (0 otherwise). */
+static uint64_t
+kbase_spare_heap_take(struct panvk_gpu_queue *queue, uint64_t *first_chunk)
+{
+   if (queue->kbase_spare_heap.pending) {
+      util_queue_fence_wait(&queue->kbase_spare_heap.fence);
+      queue->kbase_spare_heap.pending = false;
+   }
+
+   uint64_t ctx = queue->kbase_spare_heap.ctx;
+   *first_chunk = queue->kbase_spare_heap.first_chunk;
+   queue->kbase_spare_heap.ctx = 0;
+   return ctx;
+}
+
+/* Worker side of the retired-heap destroy ring.  The TERM ioctl only frees the
+ * heap chunks; it does not need to complete before the descriptor slot is
+ * recycled, because the seqno check in kbase_try_destroy_retired_heap()
+ * already proves the firmware no longer references the context. */
+static void
+kbase_destroy_heaps_job(void *job, void *gdata, int thread_index)
+{
+   struct panvk_gpu_queue *queue = job;
+   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+
+   for (;;) {
+      uint32_t tail =
+         __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_RELAXED);
+      uint32_t head =
+         __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE);
+
+      while (tail != head) {
+         kbase_kmod_csf_tiler_heap_destroy(
+            dev->kmod.dev,
+            queue->kbase_destroy.ctxs[tail % PANVK_KBASE_DESTROY_RING]);
+         tail++;
+         __atomic_store_n(&queue->kbase_destroy.tail, tail, __ATOMIC_RELEASE);
+         head = __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE);
+      }
+
+      /* Clear the kick flag before the final check: a producer that pushed
+       * while the flag was still set skipped the kick, so entries added in
+       * that window must be picked up here. */
+      __atomic_store_n(&queue->kbase_destroy.job_pending, false,
+                       __ATOMIC_SEQ_CST);
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
+      if (__atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE) == tail)
+         break;
+   }
+}
+
+static void
+kbase_destroy_heaps_kick(struct panvk_gpu_queue *queue)
+{
+   if (!queue->kbase_spare_heap.enabled)
+      return;
+   if (__atomic_exchange_n(&queue->kbase_destroy.job_pending, true,
+                           __ATOMIC_SEQ_CST))
+      return;
+
+   util_queue_add_job(&queue->kbase_spare_heap.thread, queue,
+                      &queue->kbase_destroy.fence, kbase_destroy_heaps_job,
+                      NULL, 0);
+}
+
+/* Hands a retired heap context to the worker thread, or destroys it inline if
+ * no worker exists or the ring is full (neither happens in practice). */
+static void
+kbase_queue_heap_destroy(struct panvk_gpu_queue *queue, uint64_t ctx)
+{
+   uint32_t head =
+      __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_RELAXED);
+   uint32_t tail =
+      __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_ACQUIRE);
+
+   if (!queue->kbase_spare_heap.enabled ||
+       head - tail >= PANVK_KBASE_DESTROY_RING) {
+      struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
+      return;
+   }
+
+   queue->kbase_destroy.ctxs[head % PANVK_KBASE_DESTROY_RING] = ctx;
+   __atomic_store_n(&queue->kbase_destroy.head, head + 1, __ATOMIC_RELEASE);
+   kbase_destroy_heaps_kick(queue);
+}
+
+static void
+kbase_spare_heap_init(struct panvk_gpu_queue *queue)
+{
+   util_queue_fence_init(&queue->kbase_spare_heap.fence);
+   queue->kbase_spare_heap.enabled =
+      util_queue_init(&queue->kbase_spare_heap.thread, "panvk_heap", 2, 1, 0,
+                      NULL);
+   util_queue_fence_init(&queue->kbase_destroy.fence);
+   queue->kbase_destroy.head = 0;
+   queue->kbase_destroy.tail = 0;
+   queue->kbase_destroy.job_pending = false;
+   kbase_spare_heap_kick(queue);
+}
+
+static void
+kbase_spare_heap_finish(struct panvk_gpu_queue *queue)
+{
+   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+   uint64_t first_chunk;
+   uint64_t ctx = kbase_spare_heap_take(queue, &first_chunk);
+
+   /* util_queue_destroy() drops queued jobs without running them, so drain
+    * whatever the worker has not consumed yet. */
+   if (queue->kbase_spare_heap.enabled)
+      util_queue_destroy(&queue->kbase_spare_heap.thread);
+
+   uint32_t tail =
+      __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_ACQUIRE);
+   const uint32_t head =
+      __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE);
+   for (; tail != head; tail++)
+      kbase_kmod_csf_tiler_heap_destroy(
+         dev->kmod.dev,
+         queue->kbase_destroy.ctxs[tail % PANVK_KBASE_DESTROY_RING]);
+   queue->kbase_destroy.head = 0;
+   queue->kbase_destroy.tail = 0;
+   queue->kbase_destroy.job_pending = false;
+
+   queue->kbase_spare_heap.enabled = false;
+   util_queue_fence_destroy(&queue->kbase_spare_heap.fence);
+   util_queue_fence_destroy(&queue->kbase_destroy.fence);
+   if (ctx)
+      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
+}
+#endif
+
 static VkResult
 init_tiler(struct panvk_gpu_queue *queue)
 {
@@ -2406,7 +2260,7 @@ init_tiler(struct panvk_gpu_queue *queue)
     * so we can pass it through a single 64-bit register to the VERTEX_TILER
     * command streams. */
    struct panvk_pool_alloc_info alloc_info = {
-      .size = (64 * 1024) + 4096,
+      .size = (64 * 1024) + 8192,
       .alignment = 4096,
    };
 
@@ -2445,7 +2299,7 @@ init_tiler(struct panvk_gpu_queue *queue)
        * limit of 64 can strand large geometry workloads on the tiler iterator;
        * larger multi-GiB limits can trigger Android's global OOM killer. */
       const uint32_t tiler_heap_max_chunks =
-         MAX2(phys_dev->csf.tiler.max_chunks, 200);
+         kbase_tiler_heap_max_chunks(phys_dev);
 
       if (kbase_kmod_csf_tiler_heap_create(
              dev->kmod.dev, tiler_heap->chunk_size,
@@ -2458,10 +2312,6 @@ init_tiler(struct panvk_gpu_queue *queue)
 
       tiler_heap->context.handle = 0;
       tiler_heap->context.dev_addr = heap_ctx_va;
-      /* Generation 0 owns desc slot 0; the subqueue contexts were already
-       * pointed at slot 0 during their init. */
-      tiler_heap->desc_slot_cur = 0;
-      tiler_heap->desc_slot_next = 1;
       first_heap_chunk = first_chunk_va;
    } else
 #endif
@@ -2506,6 +2356,7 @@ init_tiler(struct panvk_gpu_queue *queue)
                 first_heap_chunk + tiler_heap->chunk_size,
                 panvk_priv_mem_dev_addr(tiler_heap->desc) + 4096,
                 panvk_priv_mem_dev_addr(tiler_heap->oom_fbd));
+      kbase_spare_heap_init(queue);
    }
 #endif
 
@@ -2525,13 +2376,14 @@ cleanup_tiler(struct panvk_gpu_queue *queue)
 
 #ifdef HAVE_PAN_KMOD_KBASE
    if (gpu_queue_uses_kbase(dev)) {
-      /* The queue groups are terminated by now, so the retired contexts
-       * are no longer firmware-visible and can be destroyed with the
+      /* The queue groups are terminated by now, so the retired context (if
+       * any) is no longer firmware-visible and can be destroyed with the
        * current one. */
-      for (uint32_t i = 0; i < queue->kbase_retired_heaps.count; i++)
+      kbase_spare_heap_finish(queue);
+      for (uint32_t i = 0; i < queue->kbase_retired_heap_count; i++)
          kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev,
-                                           queue->kbase_retired_heaps.slots[i].ctx);
-      queue->kbase_retired_heaps.count = 0;
+                                           queue->kbase_retired_heaps[i].ctx);
+      queue->kbase_retired_heap_count = 0;
       kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev,
                                         tiler_heap->context.dev_addr);
    } else
@@ -2550,198 +2402,104 @@ cleanup_tiler(struct panvk_gpu_queue *queue)
 }
 
 #ifdef HAVE_PAN_KMOD_KBASE
-/* Destroy every retired heap context whose generation is provably no
- * longer firmware-visible.  Two conditions must hold before the destroy
- * ioctl is allowed:
+/* Destroy the retired heap contexts, oldest first, whose graphics subqueues
+ * have completed a ring entry emitted after the retirement.
+ * Each ring entry re-issues HEAP_SET (and its TILER_HEAP descriptor slot)
+ * before its CALL and entries retire in order, so the firmware provably no
+ * longer holds a reference to the retired context.  Destroying
+ * it any earlier lets kbase free (and the custom-VA allocator reuse) its
+ * chunks while a CS HEAP_SET register can still point at them: the firmware
+ * then walks whatever now lives at the old chunk VAs as a chunk list and
+ * faults on a garbage pointer (observed as an exception 0xc0 CSG fatal at a
+ * wild sideband address during heavy allocation churn).  Returns false when
+ * every retired slot is still in use.
  *
- *  1. Graphics silence: every ring entry emitted on BOTH graphics
- *     subqueues has fully retired (seqno >= emitted_jobs).  Destroying a
- *     context while tiler work is still executing or still armed in the
- *     firmware's register file lets kbase free -- and the custom-VA
- *     allocator reuse -- its chunks while a HEAP_SET can still point at
- *     them: the firmware then walks whatever now lives at the old chunk
- *     VAs as a chunk list and faults on a garbage pointer.  The fault
- *     diagnostic path on MT6985 r38p1 additionally dereferences a
- *     half-torn-down heap (kbase_csf_tiler_heap_print_kctx_chunks) and
- *     panics the whole device (observed 2026-10-01), so reclaim is only
- *     allowed at points where both graphics subqueues are fully drained.
- *  2. Per-slot seqno gates in the loop below; the silence check already
- *     implies them for every recorded slot.
- *
- * Returns the number of slots freed.  Safe to call from the submit path
- * and from fence-wait/status threads; the lock serializes the retirement
- * ring mutation. */
-static uint32_t
-kbase_try_destroy_retired_heaps(struct panvk_gpu_queue *queue)
-{
-   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
-   volatile struct panvk_cs_sync64 *vt_cell =
-      kbase_subqueue_seqno_cell(queue, PANVK_SUBQUEUE_VERTEX_TILER);
-   volatile struct panvk_cs_sync64 *frag_cell =
-      kbase_subqueue_seqno_cell(queue, PANVK_SUBQUEUE_FRAGMENT);
-   uint32_t freed = 0;
-
-   kbase_cache_invalidate_range((const void *)vt_cell, sizeof(*vt_cell));
-   kbase_cache_invalidate_range((const void *)frag_cell, sizeof(*frag_cell));
-
-   /* Per-entry reclamation (beta.20.1 semantics, restored in beta.21.4): an
-    * entry is freed once both graphics subqueues have executed every ring
-    * entry that could reference its generation -- that is exactly what the
-    * recorded job counts prove.  The beta.21.2 entry gate additionally
-    * demanded graphics silence (seqno >= emitted on both subqueues), which
-    * pipelined games almost never provide: reclaim starved, retired
-    * generations piled up, and each one pins a kernel VA reservation of
-    * max_chunks * chunk_size (~400 MiB) -- twenty-plus live generations
-    * exhaust the GPU VA space and every tiler-heap grow then fails, leaving
-    * the tiler job SUSPENDED forever (fatal heap OOM or a silent stall, the
-    * 2026-10-01 1-minute game freeze).  A submit racing in below only adds
-    * entries carrying the CURRENT generation, which is never in the
-    * retirement ring, so the per-entry destroys stay race-free; the lock
-    * serializes against concurrent reclaim from fence-wait threads. */
-   simple_mtx_lock(&queue->kbase_retired_heaps_lock);
-
-   for (uint32_t i = 0; i < queue->kbase_retired_heaps.count;) {
-      /* seqno counts completed ring entries; the retirement recorded the
-       * emitted-job count at retirement time, i.e. the index of the last
-       * entry that still carries the retired HEAP_SET. */
-      if (vt_cell->seqno < queue->kbase_retired_heaps.slots[i].vt_jobs ||
-          frag_cell->seqno < queue->kbase_retired_heaps.slots[i].frag_jobs) {
-         i++;
-         continue;
-      }
-
-      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev,
-                                        queue->kbase_retired_heaps.slots[i].ctx);
-      queue->kbase_retired_heaps.slots[i] =
-         queue->kbase_retired_heaps.slots[--queue->kbase_retired_heaps.count];
-      freed++;
-   }
-
-   simple_mtx_unlock(&queue->kbase_retired_heaps_lock);
-
-   if (freed)
-      mesa_logd("kbase: reclaimed %u retired tiler heap generation(s), %u pending",
-                freed, queue->kbase_retired_heaps.count);
-
-   return freed;
-}
-
-/* Does any retired generation still own this desc slot? */
+ * The TERM ioctls themselves are handed to the panvk_heap worker: only the
+ * seqno check has to happen before the descriptor slot is recycled. */
 static bool
-kbase_heap_desc_slot_busy(const struct panvk_gpu_queue *queue, uint32_t slot)
+kbase_try_destroy_retired_heap(struct panvk_gpu_queue *queue)
 {
-   for (uint32_t i = 0; i < queue->kbase_retired_heaps.count; i++) {
-      if (queue->kbase_retired_heaps.slots[i].desc_slot == slot)
-         return true;
-   }
-   return false;
-}
+   if (!queue->kbase_retired_heap_count)
+      return true;
 
-static uint64_t
-kbase_heap_desc_slot_addr(const struct panvk_gpu_queue *queue, uint32_t slot)
-{
-   return panvk_priv_mem_dev_addr(queue->tiler_heap.desc) +
-          slot * KBASE_HEAP_DESC_SLOT_SIZE;
+   /* The seqno cells are CPU-cached: drop stale lines before reading. */
+   kbase_cache_invalidate_range(
+      (const void *)kbase_subqueue_seqno_cell(queue, PANVK_SUBQUEUE_VERTEX_TILER),
+      kbase_seqno_stride());
+   kbase_cache_invalidate_range(
+      (const void *)kbase_subqueue_seqno_cell(queue, PANVK_SUBQUEUE_FRAGMENT),
+      kbase_seqno_stride());
+
+   const uint64_t vt_seqno =
+      kbase_subqueue_seqno_cell(queue, PANVK_SUBQUEUE_VERTEX_TILER)->seqno;
+   const uint64_t frag_seqno =
+      kbase_subqueue_seqno_cell(queue, PANVK_SUBQUEUE_FRAGMENT)->seqno;
+   uint32_t done = 0;
+
+   while (done < queue->kbase_retired_heap_count &&
+          vt_seqno > queue->kbase_retired_heaps[done].vt_jobs &&
+          frag_seqno > queue->kbase_retired_heaps[done].frag_jobs) {
+      kbase_queue_heap_destroy(queue, queue->kbase_retired_heaps[done].ctx);
+      done++;
+   }
+
+   queue->kbase_retired_heap_count -= done;
+   memmove(queue->kbase_retired_heaps, queue->kbase_retired_heaps + done,
+           queue->kbase_retired_heap_count *
+              sizeof(queue->kbase_retired_heaps[0]));
+
+   return queue->kbase_retired_heap_count <
+          ARRAY_SIZE(queue->kbase_retired_heaps);
 }
 
 static VkResult
-kbase_renew_tiler_heap(struct panvk_gpu_queue *queue, bool *rotated_out)
+kbase_renew_tiler_heap(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    const struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(dev->vk.physical);
    struct panvk_tiler_heap *tiler_heap = &queue->tiler_heap;
-   const uint32_t max_chunks = MAX2(phys_dev->csf.tiler.max_chunks, 200);
+   const uint32_t max_chunks = kbase_tiler_heap_max_chunks(phys_dev);
    uint64_t new_ctx, first_chunk;
-   uint32_t new_slot = 0;
 
-   *rotated_out = false;
+   /* Hold at most PANVK_KBASE_HEAP_SLOTS - 1 retired contexts: if they are
+    * all still firmware-visible, skip this renewal (VK_INCOMPLETE) and retry
+    * on a later graphics submission.  The next descriptor slot belonged to
+    * the oldest heap, which is destroyed by now. */
+   if (!kbase_try_destroy_retired_heap(queue))
+      return VK_INCOMPLETE;
 
-   /* Pick a desc slot no in-flight generation still owns.  Slots are
-    * consumed round-robin; a slot is busy while its generation sits in the
-    * retirement ring.  If every slot is busy (or the retirement ring is
-    * full) skip this renewal entirely: the heap keeps growing through the
-    * kernel's grow-on-fault path and we retry on a later submission.  No
-    * waiting, no drain.  The ring is shared with fence-wait destroy
-    * attempts, so all ring access below holds its lock. */
-   simple_mtx_lock(&queue->kbase_retired_heaps_lock);
-
-   for (uint32_t i = 0; i < KBASE_HEAP_DESC_SLOTS; i++) {
-      new_slot = queue->tiler_heap.desc_slot_next++ % KBASE_HEAP_DESC_SLOTS;
-      if (!kbase_heap_desc_slot_busy(queue, new_slot))
-         goto found_slot;
-   }
-   queue->kbase_renew_skip_count++;
-   if ((queue->kbase_renew_skip_count & 63) == 0)
-      mesa_logd("kbase: tiler heap renewal skipped, no free desc slot (%u consecutive)",
-                queue->kbase_renew_skip_count);
-   simple_mtx_unlock(&queue->kbase_retired_heaps_lock);
-   return VK_SUCCESS;
-
-found_slot:
-   if (queue->kbase_retired_heaps.count >= KBASE_RETIRED_HEAP_SLOTS) {
-      queue->kbase_renew_skip_count++;
-      if ((queue->kbase_renew_skip_count & 63) == 0)
-         mesa_logd("kbase: tiler heap renewal skipped, retirement ring full (%u consecutive)",
-                   queue->kbase_renew_skip_count);
-      simple_mtx_unlock(&queue->kbase_retired_heaps_lock);
-      return VK_SUCCESS;
-   }
-
-   if (kbase_kmod_csf_tiler_heap_create(
+   new_ctx = kbase_spare_heap_take(queue, &first_chunk);
+   if (!new_ctx &&
+       kbase_kmod_csf_tiler_heap_create(
           dev->kmod.dev, tiler_heap->chunk_size,
           phys_dev->csf.tiler.initial_chunks, max_chunks, 65535, 0,
           &new_ctx, &first_chunk)) {
-      simple_mtx_unlock(&queue->kbase_retired_heaps_lock);
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Failed to renew the kbase tiler heap");
    }
+   kbase_spare_heap_kick(queue);
 
    uint64_t old_ctx = tiler_heap->context.dev_addr;
-   const uint32_t old_slot = tiler_heap->desc_slot_cur;
    tiler_heap->context.dev_addr = new_ctx;
 
-   panvk_priv_mem_write_desc(
-      tiler_heap->desc, new_slot * KBASE_HEAP_DESC_SLOT_SIZE, TILER_HEAP,
-      cfg) {
+   const uint32_t slot = (queue->kbase_heap_slot + 1) % PANVK_KBASE_HEAP_SLOTS;
+   const uint32_t slot_offset = slot * KBASE_HEAP_DESC_SLOT_STRIDE;
+   panvk_priv_mem_write_desc(tiler_heap->desc, slot_offset, TILER_HEAP, cfg) {
       cfg.size = tiler_heap->chunk_size;
       cfg.base = first_chunk;
       cfg.bottom = cfg.base + 64;
       cfg.top = cfg.base + cfg.size;
    }
-   kbase_clean_priv_mem(tiler_heap->desc,
-                        new_slot * KBASE_HEAP_DESC_SLOT_SIZE,
-                        pan_size(TILER_HEAP));
+   kbase_clean_priv_mem(tiler_heap->desc, slot_offset, pan_size(TILER_HEAP));
+   queue->kbase_heap_slot = slot;
 
-   /* Re-arm every graphics subqueue context to the new generation's slot.
-    * In-flight ring entries already loaded the old slot address into their
-    * own job streams, so rewriting the context memory can only affect
-    * entries emitted from now on. */
-   const uint64_t new_slot_addr = kbase_heap_desc_slot_addr(queue, new_slot);
-   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
-      if (i == PANVK_SUBQUEUE_COMPUTE)
-         continue;
-      struct panvk_cs_subqueue_context *ctx_mem =
-         panvk_priv_mem_host_addr(queue->subqueues[i].context);
-      ctx_mem->render.tiler_heap = new_slot_addr;
-      kbase_clean_priv_mem(queue->subqueues[i].context, 0,
-                           sizeof(*ctx_mem));
-   }
-
-   const uint32_t slot = queue->kbase_retired_heaps.count++;
-
-   queue->kbase_retired_heaps.slots[slot].ctx = old_ctx;
-   queue->kbase_retired_heaps.slots[slot].vt_jobs =
+   uint32_t r = queue->kbase_retired_heap_count++;
+   queue->kbase_retired_heaps[r].ctx = old_ctx;
+   queue->kbase_retired_heaps[r].vt_jobs =
       queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs;
-   queue->kbase_retired_heaps.slots[slot].frag_jobs =
+   queue->kbase_retired_heaps[r].frag_jobs =
       queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs;
-   queue->kbase_retired_heaps.slots[slot].desc_slot = old_slot;
-   tiler_heap->desc_slot_cur = new_slot;
-
-   simple_mtx_unlock(&queue->kbase_retired_heaps_lock);
-
-   queue->kbase_renew_skip_count = 0;
-   *rotated_out = true;
    return VK_SUCCESS;
 }
 #endif
@@ -2766,11 +2524,6 @@ struct panvk_queue_submit {
 
 #ifdef HAVE_PAN_KMOD_KBASE
    uint64_t kbase_target_seqnos[PANVK_SUBQUEUE_COUNT];
-   /* DIAG-ONLY (panvk.17-diag): stream CPU mappings kept in lockstep with
-    * qsubmits[], consumed by kbase_subqueue_emit_job() so the fatal dump can
-    * census the sync atoms that live in stream memory instead of the (clean)
-    * 64KB ring. */
-   const void **kbase_stream_cpus;
 #endif
 
    struct {
@@ -2788,9 +2541,6 @@ struct panvk_queue_submit {
 struct panvk_queue_submit_stack_storage {
    struct drm_panthor_queue_submit qsubmits[8];
    struct drm_panthor_sync_op syncops[8];
-#ifdef HAVE_PAN_KMOD_KBASE
-   const void *kbase_stream_cpus[8];
-#endif
 };
 
 static void
@@ -2809,11 +2559,15 @@ panvk_queue_submit_init(struct panvk_queue_submit *submit,
    submit->process_utrace =
       u_trace_should_process(&submit->dev->utrace.utctx) &&
       submit->phys_dev->kmod.dev->props.timestamp_frequency;
+#ifdef HAVE_PAN_KMOD_KBASE
+   if (gpu_queue_uses_kbase(submit->dev))
+      submit->process_utrace = false;
+#endif
 
    submit->force_sync = PANVK_DEBUG(TRACE) || PANVK_DEBUG(SYNC);
 }
 
-static VkResult
+static void
 panvk_queue_submit_init_storage(
    struct panvk_queue_submit *submit, const struct vk_queue_submit *vk_submit,
    struct panvk_queue_submit_stack_storage *stack_storage)
@@ -2824,16 +2578,6 @@ panvk_queue_submit_init_storage(
    for (uint32_t i = 0; i < vk_submit->command_buffer_count; i++) {
       struct panvk_cmd_buffer *cmdbuf = container_of(
          vk_submit->command_buffers[i], struct panvk_cmd_buffer, vk);
-
-
-      /*
-       * Tessellation command buffers currently carry mutable execution state.
-       * Serialize replay of simultaneous-use tessellation command buffers until
-       * that state is made per-execution.
-       */
-      if ((cmdbuf->flags & VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT) &&
-          cmdbuf->state.gfx.tess.tes.shader)
-         submit->force_sync = true;
 
       if (UINT64_MAX - submit->tiler_work_estimate <
           cmdbuf->state.tiler_work_estimate)
@@ -2933,25 +2677,10 @@ panvk_queue_submit_init_storage(
       submit->qsubmit_count <= ARRAY_SIZE(stack_storage->qsubmits)
          ? stack_storage->qsubmits
          : malloc(sizeof(*submit->qsubmits) * submit->qsubmit_count);
-   if (!submit->qsubmits)
-      return panvk_error(submit->dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-#ifdef HAVE_PAN_KMOD_KBASE
-   submit->kbase_stream_cpus =
-      submit->qsubmit_count <= ARRAY_SIZE(stack_storage->kbase_stream_cpus)
-         ? stack_storage->kbase_stream_cpus
-         : malloc(sizeof(*submit->kbase_stream_cpus) *
-                  submit->qsubmit_count);
-   if (!submit->kbase_stream_cpus)
-      return panvk_error(submit->dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-#endif
 
    submit->wait_ops = syncop_count <= ARRAY_SIZE(stack_storage->syncops)
                          ? stack_storage->syncops
                          : malloc(sizeof(*submit->wait_ops) * syncop_count);
-   if (!submit->wait_ops)
-      return panvk_error(submit->dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-
    submit->signal_ops = submit->wait_ops + vk_submit->wait_count;
 
    /* reset so that we can initialize submit->qsubmits incrementally */
@@ -2961,11 +2690,7 @@ panvk_queue_submit_init_storage(
       submit->utrace.data_storage =
          malloc(sizeof(*submit->utrace.data_storage) *
                 util_bitcount(submit->utrace.queue_mask));
-      if (!submit->utrace.data_storage)
-         return panvk_error(submit->dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
-
-   return VK_SUCCESS;
 }
 
 static void
@@ -2975,10 +2700,6 @@ panvk_queue_submit_cleanup_storage(
 {
    if (submit->qsubmits != stack_storage->qsubmits)
       free(submit->qsubmits);
-#ifdef HAVE_PAN_KMOD_KBASE
-   if (submit->kbase_stream_cpus != stack_storage->kbase_stream_cpus)
-      free(submit->kbase_stream_cpus);
-#endif
    if (submit->wait_ops != stack_storage->syncops)
       free(submit->wait_ops);
 
@@ -3028,10 +2749,6 @@ panvk_queue_submit_init_req_resource(struct panvk_queue_submit *submit)
 
    u_foreach_bit(i, submit->req_resource_subqueue_mask) {
       struct panvk_subqueue *subq = &submit->queue->subqueues[i];
-#ifdef HAVE_PAN_KMOD_KBASE
-      submit->kbase_stream_cpus[submit->qsubmit_count] =
-         panvk_priv_mem_host_addr(subq->req_resource.buf);
-#endif
       submit->qsubmits[submit->qsubmit_count++] =
          (struct drm_panthor_queue_submit){
             .queue_index = i,
@@ -3107,12 +2824,6 @@ panvk_queue_submit_init_cmdbufs(struct panvk_queue_submit *submit,
          //                            b->root_chunk.buffer.cpu);
          // }
          // Use csf decoding instead
-
-         /* DIAG-ONLY (panvk.17-diag): remember the CPU mapping of this
-          * stream so the fatal dump can census its sync atoms (the 16-diag
-          * census proved the ring trampoline itself holds none). */
-         submit->kbase_stream_cpus[submit->qsubmit_count] =
-            b->root_chunk.buffer.cpu;
 #endif
 
          submit->qsubmits[submit->qsubmit_count++] =
@@ -3139,24 +2850,18 @@ panvk_queue_submit_init_cmdbufs(struct panvk_queue_submit *submit,
          struct u_trace clone_ut;
          if (!(cmdbuf->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)) {
             u_trace_init(&clone_ut, &dev->utrace.utctx);
-
-            const uint64_t root_buf_size = sizeof(uint64_t) * 1024;
-            struct panvk_utrace_buf *cs_root_buf =
-               panvk_utrace_create_buffer(&dev->utrace.utctx, root_buf_size);
-            assert(cs_root_buf);
             /* For every sq, the cs buffer needs to be freed. */
             free_data = true;
 
-            const struct cs_buffer cs_root = (struct cs_buffer){
-               .cpu = cs_root_buf->host,
-               .gpu = cs_root_buf->dev,
-               .capacity = root_buf_size / sizeof(uint64_t),
+            /* The clone CS builder allocates all of its chunks (including the
+             * root) from the utrace copy heap via alloc_clone_cs_buffer(). */
+            struct panvk_utrace_clone_cs_ctx clone_ctx = {
+               .dev = dev,
             };
-
-            submit->utrace.data[j]->clone_cs_root = cs_root_buf;
+            util_dynarray_init(&clone_ctx.cs_bufs, NULL);
             struct cs_builder clone_builder;
             panvk_per_arch(utrace_clone_init_builder)(&clone_builder, dev,
-                                                      &cs_root);
+                                                      &clone_ctx);
 
             u_trace_clone_append(
                u_trace_begin_iterator(ut), u_trace_end_iterator(ut), &clone_ut,
@@ -3164,19 +2869,25 @@ panvk_queue_submit_init_cmdbufs(struct panvk_queue_submit *submit,
 
             panvk_per_arch(utrace_clone_finish_builder)(&clone_builder);
 
-#ifdef HAVE_PAN_KMOD_KBASE
-            submit->kbase_stream_cpus[submit->qsubmit_count] =
-               cs_root_buf->host;
-#endif
-            submit->qsubmits[submit->qsubmit_count++] =
-               (struct drm_panthor_queue_submit){
-                  .queue_index = j,
-                  .stream_size = cs_root_chunk_size(&clone_builder),
-                  .stream_addr = cs_root_chunk_gpu_addr(&clone_builder),
-                  .latest_flush = flush_id,
-               };
+            submit->utrace.data[j]->clone_cs_bufs = clone_ctx.cs_bufs;
 
-            ut = &clone_ut;
+            /* A mid-build overflow allocation failure leaves the builder
+             * invalid; flush the original instead of submitting a broken CS. */
+            if (!cs_is_valid(&clone_builder)) {
+               mesa_loge("utrace: clone CS builder invalid (allocation failed "
+                         "mid-build); dropping trace for this submit");
+               u_trace_fini(&clone_ut);
+            } else {
+               submit->qsubmits[submit->qsubmit_count++] =
+                  (struct drm_panthor_queue_submit){
+                     .queue_index = j,
+                     .stream_size = cs_root_chunk_size(&clone_builder),
+                     .stream_addr = cs_root_chunk_gpu_addr(&clone_builder),
+                     .latest_flush = flush_id,
+                  };
+
+               ut = &clone_ut;
+            }
          }
 
          u_trace_flush(ut, submit->utrace.data[j], dev->vk.current_frame,
@@ -3219,7 +2930,53 @@ panvk_queue_submit_init_signals(struct panvk_queue_submit *submit,
    }
 }
 
+/* If we're tracing, reset the desc ringbufs and the CS tracebufs before each
+ * submission (tracing forces synchronous submits, so nothing is in flight).
+ * Without the reset on kbase, every submit re-decoded all earlier traces:
+ * one PanProbe test wrote a 700 MB log with PANVK_DEBUG=trace. */
+static void
+reset_trace_bufs(struct panvk_gpu_queue *queue)
+{
+   if (!PANVK_DEBUG(TRACE))
+      return;
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(queue->subqueues); i++) {
+      panvk_priv_mem_rmw(queue->subqueues[i].context, 0,
+                         struct panvk_cs_subqueue_context, ctx) {
+         if (ctx->render.desc_ringbuf.ptr) {
+            ctx->render.desc_ringbuf.ptr = queue->render_desc_ringbuf.addr.dev;
+            ctx->render.desc_ringbuf.pos = 0;
+         }
+
+         if (ctx->debug.tracebuf.cs)
+            ctx->debug.tracebuf.cs = queue->subqueues[i].tracebuf.addr.dev;
+      }
 #ifdef HAVE_PAN_KMOD_KBASE
+      if (gpu_queue_uses_kbase(to_panvk_device(queue->vk.base.device)))
+         kbase_clean_priv_mem(queue->subqueues[i].context, 0,
+                              sizeof(struct panvk_cs_subqueue_context));
+#endif
+   }
+}
+
+#ifdef HAVE_PAN_KMOD_KBASE
+/* Binary semaphores pending on this queue are waited for on the GPU: each
+ * new ring entry SYNC_WAITs for the other subqueues' seqnos, and its own
+ * subqueue is already in order.  The CPU wait this replaces stalled
+ * vkQueueSubmit/vkQueuePresentKHR until the previous frame finished, so the
+ * CPU and GPU never overlapped (NFS Most Wanted: one 20 ms stall per frame).
+ * Signal targets cover every subqueue's emitted seqno, which already
+ * includes the waited-for targets, so an empty submit still signals after
+ * its waits.  PANVK_KBASE_GPU_SEMAPHORE_WAITS=0 restores the CPU waits. */
+DEBUG_GET_ONCE_BOOL_OPTION(kbase_gpu_semaphore_waits,
+                           "PANVK_KBASE_GPU_SEMAPHORE_WAITS", true)
+
+static bool
+kbase_gpu_waits_disabled(void)
+{
+   return !debug_get_option_kbase_gpu_semaphore_waits();
+}
+
 static VkResult
 kbase_wait_sync_targets(
    void *data, const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
@@ -3239,56 +2996,6 @@ kbase_wait_sync_targets(
 
       VkResult result = kbase_subqueue_wait_seqno(
          queue, i, targets[i], target_mask, false, abs_timeout_ns);
-      if (result != VK_SUCCESS)
-         return result;
-   }
-
-   /* Fence-wait reclaim: this callback runs on app wait threads (fences,
-    * semaphores, present) and on force-sync submits, so a successful wait
-    * proves the waited entries retired -- which is exactly the per-entry
-    * destroy gate of every generation retired before those entries.  Attempt
-    * the reclaim here instead of leaving retired generations pinned until
-    * the next heap rotation (up to a full renewal interval of submits
-    * later): each idle generation keeps its grown chunks resident, so
-    * rotation-only reclaim nearly doubles steady-state heap RAM.  The guard
-    * keeps the empty-ring case to a single relaxed load (benign race: the
-    * worst outcome is one skipped attempt, retried by the next wait); the
-    * lock inside serializes with the submit thread and concurrent
-    * reclaims. */
-   if (queue->kbase_retired_heaps.count)
-      kbase_try_destroy_retired_heaps(queue);
-
-   return VK_SUCCESS;
-}
-
-static VkResult
-kbase_export_sync_targets(struct vk_device *vk_device, void *data,
-   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT], int *sync_file)
-{
-   struct panvk_gpu_queue *queue=data; struct panvk_device *dev=to_panvk_device(vk_device);
-   struct kbase_kmod_cqs_wait waits[PANVK_KBASE_SYNC_TARGET_COUNT]; uint32_t n=0;
-   for(uint32_t i=0;i<PANVK_SUBQUEUE_COUNT;i++) if(targets[i]) waits[n++]=(struct kbase_kmod_cqs_wait){ .addr=kbase_subqueue_seqno_dev_addr(queue,i), .target_minus_one=targets[i]-1 };
-   if(kbase_kmod_csf_export_sync_file(dev->kmod.dev,waits,n,sync_file)==0) return VK_SUCCESS;
-   int e=errno;VkResult r=e==ENOMEM?VK_ERROR_OUT_OF_HOST_MEMORY:VK_ERROR_UNKNOWN;
-   return vk_errorf(vk_device,r,"kbase real sync_file export failed: %s",strerror(e));
-}
-
-static VkResult
-kbase_wait_graphics_targets(
-   struct panvk_gpu_queue *queue,
-   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
-   uint64_t abs_timeout_ns)
-{
-   const uint32_t graphics_mask =
-      BITFIELD_BIT(PANVK_SUBQUEUE_VERTEX_TILER) |
-      BITFIELD_BIT(PANVK_SUBQUEUE_FRAGMENT);
-
-   u_foreach_bit(i, graphics_mask) {
-      if (!targets[i])
-         continue;
-
-      VkResult result = kbase_subqueue_wait_seqno(
-         queue, i, targets[i], graphics_mask, false, abs_timeout_ns);
       if (result != VK_SUCCESS)
          return result;
    }
@@ -3327,23 +3034,42 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
    //              __func__);
    // }
 
-   /* Incoming waits are always resolved on the CPU before emission.  The
-    * SYNC-A3 in-stream GPU wait path was removed: its wait cells stalled on
-    * the G715 with a fatal exception 0x88 (2026-10-07 TestD3D logs). */
+   for (uint32_t w = 0; w < vk_submit->wait_count; w++) {
+      const struct vk_sync_wait *wait = &vk_submit->waits[w];
+      uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT];
+      void *owner;
 
-   if (vk_submit->wait_count) {
-      result = vk_sync_wait_many(&dev->vk, vk_submit->wait_count,
-                                 vk_submit->waits, VK_SYNC_WAIT_COMPLETE,
-                                 UINT64_MAX);
+      if (!kbase_gpu_waits_disabled() && wait->wait_value == 0 &&
+          panvk_kbase_sync_peek(wait->sync, &owner, targets) &&
+          (owner == NULL || owner == queue)) {
+         for (uint32_t i = 0; owner && i < PANVK_SUBQUEUE_COUNT; i++) {
+            if (targets[i] <= kbase_subqueue_seqno_cell(queue, i)->seqno)
+               continue;
+            for (uint32_t j = 0; j < PANVK_SUBQUEUE_COUNT; j++)
+               queue->kbase_gpu_waits[j][i] =
+                  MAX2(queue->kbase_gpu_waits[j][i], targets[i]);
+         }
+         continue;
+      }
+
+      result = vk_sync_wait(&dev->vk, wait->sync, wait->wait_value,
+                            VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
       if (result != VK_SUCCESS)
          return result;
    }
+
+   reset_trace_bufs(queue);
 
    /* Flush pending synchronization requests before submitting the job, to
     * make sure things are GPU-visible. */
    pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
 
    uint32_t touched = 0;
+   /* Every CPU write of this batch is published by the ring clean and
+    * pan_kmod_flush_bo_map_syncs() above, and ring entries of one subqueue
+    * execute in order, so only the first job per subqueue needs the
+    * clean+invalidate. */
+   uint32_t flushed = 0;
    for (uint32_t i = 0; i < submit->qsubmit_count; i++) {
       const struct drm_panthor_queue_submit *qsubmit = &submit->qsubmits[i];
 
@@ -3353,11 +3079,17 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
       result = kbase_subqueue_emit_job(queue, qsubmit->queue_index,
                                        qsubmit->stream_addr,
                                        qsubmit->stream_size,
-                                       submit->kbase_stream_cpus[i],
                                        qsubmit->latest_flush,
-                                       submit->phys_dev->kmod.dev->props.gpu_id);
+                                       submit->phys_dev->kmod.dev->props.gpu_id,
+                                       queue->kbase_gpu_waits[qsubmit->queue_index],
+                                       !(flushed & BITFIELD_BIT(qsubmit->queue_index)));
       if (result != VK_SUCCESS)
          return vk_queue_set_lost(&queue->vk, "kbase: ring emission failed");
+
+      flushed |= BITFIELD_BIT(qsubmit->queue_index);
+
+      memset(queue->kbase_gpu_waits[qsubmit->queue_index], 0,
+             sizeof(queue->kbase_gpu_waits[0]));
 
       touched |= BITFIELD_BIT(qsubmit->queue_index);
    }
@@ -3396,69 +3128,41 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
        (queue->kbase_tiler_submit_count >=
            kbase_tiler_heap_renew_interval() ||
         (renew_work && queue->kbase_tiler_work_count >= renew_work))) {
-      /* Heap rotation with per-generation descriptors: every generation
-       * writes its own TILER_HEAP desc slot and re-arms the subqueue
-       * contexts to it, so a renewal never rewrites memory an in-flight
-       * VERTEX_TILER job still walks -- jobs load the desc address from
-       * the context at emit time and keep the loaded value for their
-       * lifetime.  That removes the shared-single-slot hazard behind the
-       * 2026-09-29 kernel panics by construction, so no drain is needed.
-       * Retired generations are destroyed by
-       * kbase_try_destroy_retired_heaps(), which only ever runs its
-       * reclaim at graphics-silence points -- mid-submit it is a cheap
-       * no-op while tiler work is in flight, and fence waits on the
-       * waiting thread take over the actual reclaim.  A renewal that
-       * cannot retire its generation cleanly (all desc slots or all
-       * retirement slots busy) is skipped and retried on a later submit;
-       * the kernel's grow-on-fault path absorbs the extra heap pressure
-       * meanwhile.  A streak of KBASE_RENEW_SKIP_DRAIN_THRESHOLD skips
-       * falls back to the drain path below: an indefinitely skipped
-       * generation grows until the kernel's OOM grow fails and it
-       * terminates the CSG (the 2026-10-07 panic trigger), which a rare
-       * one-off drain must never be allowed to reach.
-       * PANVK_KBASE_HEAP_DRAIN=1 restores the old
-       * drain-per-renewal semantics for on-device diagnosis. */
-      kbase_try_destroy_retired_heaps(queue);
+      /* No graphics drain: in-flight entries keep the retired heap and its
+       * descriptor slot (see kbase_subqueue_emit_job()).  Draining here
+       * serialized the CPU and GPU on nearly every NFS Most Wanted frame. */
+      result = kbase_renew_tiler_heap(queue);
 
-      if (kbase_tiler_heap_drain_mode()) {
-         result = kbase_wait_graphics_targets(
-            queue, submit->kbase_target_seqnos, UINT64_MAX);
+      /* Backpressure: the heap does not recycle chunks between renewals, so
+       * if the retired heap stays busy for 4x the renewal budget, drain the
+       * graphics subqueues once and renew, to bound the current heap. */
+      const uint32_t interval = kbase_tiler_heap_renew_interval();
+      if (result == VK_INCOMPLETE &&
+          ((interval && queue->kbase_tiler_submit_count >= 4ull * interval) ||
+           (renew_work && queue->kbase_tiler_work_count / 4 >= renew_work))) {
+         /* Only wait until the retired heap can be destroyed (the first
+          * entries emitted after its retirement completed), not for the
+          * whole backlog: a full drain stalled the submit thread 35-55 ms. */
+         uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
+         targets[PANVK_SUBQUEUE_VERTEX_TILER] = MIN2(
+            queue->kbase_retired_heaps[0].vt_jobs + 1,
+            queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs);
+         targets[PANVK_SUBQUEUE_FRAGMENT] = MIN2(
+            queue->kbase_retired_heaps[0].frag_jobs + 1,
+            queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs);
+         result = kbase_wait_sync_targets(queue, targets, UINT64_MAX);
          if (result != VK_SUCCESS)
             return result;
+         result = kbase_renew_tiler_heap(queue);
+      }
 
-         bool rotated = false;
-         result = kbase_renew_tiler_heap(queue, &rotated);
-         if (result != VK_SUCCESS)
-            return vk_queue_set_lost(&queue->vk,
-                                     "kbase: tiler heap renewal failed");
-         kbase_try_destroy_retired_heaps(queue);
+      if (result < 0)
+         return vk_queue_set_lost(&queue->vk,
+                                  "kbase: tiler heap renewal failed");
+
+      if (result == VK_SUCCESS) {
          queue->kbase_tiler_submit_count = 0;
          queue->kbase_tiler_work_count = 0;
-      } else {
-         bool rotated = false;
-         /* Skip backstop: a persistent skip streak means the live generation
-          * keeps growing while reclaim starves, and an unbounded generation
-          * ends in the kernel's unhandled tiler-heap OOM termination (the
-          * panic trigger).  Drain once -- which empties the retirement ring
-          * -- so the rotation after it always lands. */
-         if (queue->kbase_renew_skip_count >= KBASE_RENEW_SKIP_DRAIN_THRESHOLD) {
-            mesa_logd("kbase: %u consecutive tiler heap renewal skips, draining once",
-                      queue->kbase_renew_skip_count);
-            result = kbase_wait_graphics_targets(
-               queue, submit->kbase_target_seqnos, UINT64_MAX);
-            if (result != VK_SUCCESS)
-               return result;
-
-            kbase_try_destroy_retired_heaps(queue);
-         }
-         result = kbase_renew_tiler_heap(queue, &rotated);
-         if (result != VK_SUCCESS)
-            return vk_queue_set_lost(&queue->vk,
-                                     "kbase: tiler heap renewal failed");
-         if (rotated) {
-            queue->kbase_tiler_submit_count = 0;
-            queue->kbase_tiler_work_count = 0;
-         }
       }
    }
 
@@ -3469,13 +3173,17 @@ static void
 panvk_queue_submit_process_signals_kbase(struct panvk_queue_submit *submit,
                                          const struct vk_queue_submit *vk_submit)
 {
+   uint64_t addrs[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
+
+   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
+      addrs[i] = kbase_subqueue_seqno_dev_addr(submit->queue, i);
+
    for (uint32_t i = 0; i < vk_submit->signal_count; i++) {
       const struct vk_sync_signal *signal = &vk_submit->signals[i];
       assert(signal->signal_value == 0);
       panvk_kbase_sync_set_pending(signal->sync, submit->queue,
                                    kbase_wait_sync_targets,
-                                   kbase_export_sync_targets,
-                                   submit->kbase_target_seqnos);
+                                   submit->kbase_target_seqnos, addrs);
    }
 }
 #endif /* HAVE_PAN_KMOD_KBASE */
@@ -3487,23 +3195,7 @@ panvk_queue_submit_ioctl(struct panvk_queue_submit *submit)
    struct panvk_gpu_queue *queue = submit->queue;
    int ret;
 
-   if (PANVK_DEBUG(TRACE)) {
-      /* If we're tracing, we need to reset the desc ringbufs and the CS
-       * tracebuf. */
-      for (uint32_t i = 0; i < ARRAY_SIZE(queue->subqueues); i++) {
-         panvk_priv_mem_rmw(queue->subqueues[i].context, 0,
-                            struct panvk_cs_subqueue_context, ctx) {
-            if (ctx->render.desc_ringbuf.ptr) {
-               ctx->render.desc_ringbuf.ptr =
-                  queue->render_desc_ringbuf.addr.dev;
-               ctx->render.desc_ringbuf.pos = 0;
-            }
-
-            if (ctx->debug.tracebuf.cs)
-               ctx->debug.tracebuf.cs = queue->subqueues[i].tracebuf.addr.dev;
-         }
-      }
-   }
+   reset_trace_bufs(queue);
 
    /* Flush pending synchronization requests before submitting the job, to
     * make sure things are GPU-visible. */
@@ -3629,8 +3321,8 @@ panvk_queue_submit_process_debug(const struct panvk_queue_submit *submit,
       }
    }
 
-   // if (PANVK_DEBUG(DUMP))
-   //    pandecode_dump_mappings(decode_ctx);
+   if (PANVK_DEBUG(DUMP))
+      pandecode_dump_mappings(decode_ctx);
 
    if (PANVK_DEBUG(TRACE))
       pandecode_next_frame(decode_ctx);
@@ -3657,9 +3349,7 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
    }
 
    panvk_queue_submit_init(&submit, vk_queue);
-   result = panvk_queue_submit_init_storage(&submit, vk_submit, &stack_storage);
-   if (result != VK_SUCCESS)
-      goto out;
+   panvk_queue_submit_init_storage(&submit, vk_submit, &stack_storage);
    panvk_queue_submit_init_utrace(&submit, vk_submit);
    panvk_queue_submit_init_req_resource(&submit);
    panvk_queue_submit_init_waits(&submit, vk_submit);
@@ -3732,8 +3422,6 @@ panvk_per_arch(create_gpu_queue)(struct panvk_device *dev,
 
 #ifdef HAVE_PAN_KMOD_KBASE
    const bool uses_kbase = gpu_queue_uses_kbase(dev);
-   if (uses_kbase)
-      simple_mtx_init(&queue->kbase_retired_heaps_lock, mtx_plain);
 #else
    const bool uses_kbase = false;
 #endif
@@ -3810,10 +3498,6 @@ err_destroy_syncobj:
       drmSyncobjDestroy(dev->drm_fd, queue->syncobj_handle);
 
 err_finish_queue:
-#ifdef HAVE_PAN_KMOD_KBASE
-   if (uses_kbase)
-      simple_mtx_destroy(&queue->kbase_retired_heaps_lock);
-#endif
    vk_queue_finish(&queue->vk);
 
 err_free_queue:
@@ -3846,10 +3530,6 @@ panvk_per_arch(destroy_gpu_queue)(struct vk_queue *vk_queue)
       cleanup_tiler(queue);
       drmSyncobjDestroy(dev->drm_fd, queue->syncobj_handle);
    }
-#ifdef HAVE_PAN_KMOD_KBASE
-   if (gpu_queue_uses_kbase(dev))
-      simple_mtx_destroy(&queue->kbase_retired_heaps_lock);
-#endif
    vk_queue_finish(&queue->vk);
    vk_free(&dev->vk.alloc, queue);
 }
@@ -3870,14 +3550,6 @@ panvk_per_arch(gpu_queue_check_status)(struct vk_queue *vk_queue)
     * every Vulkan status query. */
    if (gpu_queue_uses_kbase(dev)) {
       if (kbase_kmod_csf_has_error(dev->kmod.dev)) {
-         /* DIAG-ONLY (panvk.15-diag): cover the window where the fatal
-          * notification latches while no completion wait is running. */
-         if (!queue->kbase_fatal_dumped) {
-            queue->kbase_fatal_dumped = true;
-            mesa_loge("kbase: FATAL dump (status query)");
-            kbase_dump_fatal_state(queue);
-         }
-
          u_printf_with_ctx(stdout, &dev->printf.ctx);
          return vk_queue_set_lost(&queue->vk,
                                   "kbase: CSF queue-group error");

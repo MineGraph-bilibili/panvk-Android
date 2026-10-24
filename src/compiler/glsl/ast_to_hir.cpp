@@ -363,7 +363,6 @@ apply_implicit_conversion(const glsl_type *to, ir_rvalue * &from,
    }
 }
 
-
 static const struct glsl_type *
 arithmetic_result_type(ir_rvalue * &value_a, ir_rvalue * &value_b,
                        bool multiply,
@@ -1174,6 +1173,7 @@ do_comparison(linear_ctx *linalloc, int operation, ir_rvalue *op0, ir_rvalue *op
    case GLSL_TYPE_UINT:
    case GLSL_TYPE_INT:
    case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
    case GLSL_TYPE_DOUBLE:
    case GLSL_TYPE_UINT64:
    case GLSL_TYPE_INT64:
@@ -1623,6 +1623,10 @@ ast_expression::do_hir(ir_exec_list *instructions,
       } else if ((glsl_contains_opaque(op[0]->type) ||
                   glsl_contains_opaque(op[1]->type))) {
          _mesa_glsl_error(&loc, state, "opaque type comparisons forbidden");
+         error_emitted = true;
+      } else if (glsl_type_is_yuv_csc_standard_ext(op[0]->type) ||
+          glsl_type_is_yuv_csc_standard_ext(op[1]->type)) {
+         _mesa_glsl_error(&loc, state, "yuvCscStandardEXT comparisons forbidden");
          error_emitted = true;
       }
 
@@ -2197,6 +2201,14 @@ ast_expression::do_hir(ir_exec_list *instructions,
       result = new(linalloc) ir_constant(this->primary_expression.int64_constant);
       break;
 
+   case ast_csc_standard: {
+      ir_constant_data data = { { 0 } };
+      data.i[0] = this->primary_expression.csc_standard;
+      result = new(linalloc) ir_constant(&glsl_type_builtin_yuvCscStandardEXT,
+                                         &data);
+      break;
+   }
+
    case ast_sequence: {
       /* It should not be possible to generate a sequence in the AST without
        * any expressions in it.
@@ -2326,6 +2338,7 @@ ast_expression::has_sequence_subexpression() const
    case ast_double_constant:
    case ast_int64_constant:
    case ast_uint64_constant:
+   case ast_csc_standard:
       return false;
 
    case ast_aggregate:
@@ -2630,6 +2643,13 @@ get_type_name_for_precision_qualifier(const glsl_type *type)
             assert(glsl_type_is_sampler(type));
             static const char *const names[4] = {
               "samplerExternalOES", NULL, NULL, NULL
+            };
+            return names[type_idx];
+         }
+         case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y: {
+            assert(glsl_type_is_sampler(type));
+            static const char *const names[4] = {
+              "__samplerExternal2DY2YEXT", NULL, NULL, NULL
             };
             return names[type_idx];
          }
@@ -4227,6 +4247,9 @@ apply_type_qualifier_to_variable(const struct ast_type_qualifier *qual,
 
    if (qual->flags.q.patch)
       var->data.patch = 1;
+
+   if (qual->flags.q.yuv)
+      var->data.yuv = 1;
 
    if (qual->flags.q.attribute && state->stage != MESA_SHADER_VERTEX) {
       var->type = &glsl_type_builtin_error;
@@ -9464,10 +9487,13 @@ detect_conflicting_assignments(struct _mesa_glsl_parse_state *state,
 {
    bool gl_FragColor_assigned = false;
    bool gl_FragData_assigned = false;
+   bool gl_FragDepth_assigned = false;
    bool gl_FragSecondaryColor_assigned = false;
    bool gl_FragSecondaryData_assigned = false;
    bool user_defined_fs_output_assigned = false;
    ir_variable *user_defined_fs_output = NULL;
+   bool yuv_layout_used = false;
+   int color_outputs = 0;
 
    /* It would be nice to have proper location information. */
    YYLTYPE loc;
@@ -9478,6 +9504,9 @@ detect_conflicting_assignments(struct _mesa_glsl_parse_state *state,
 
       if (!var || !var->data.assigned)
          continue;
+
+      if (var->data.yuv)
+         yuv_layout_used = true;
 
       if (strcmp(var->name, "gl_FragColor") == 0) {
          gl_FragColor_assigned = true;
@@ -9494,11 +9523,14 @@ detect_conflicting_assignments(struct _mesa_glsl_parse_state *state,
          gl_FragSecondaryColor_assigned = true;
         else if (strcmp(var->name, "gl_SecondaryFragDataEXT") == 0)
          gl_FragSecondaryData_assigned = true;
+      else if (strcmp(var->name, "gl_FragDepth") == 0)
+         gl_FragDepth_assigned = true;
       else if (!is_gl_identifier(var->name)) {
          if (state->stage == MESA_SHADER_FRAGMENT &&
              var->data.mode == ir_var_shader_out) {
             user_defined_fs_output_assigned = true;
             user_defined_fs_output = var;
+            color_outputs++;
          }
       }
    }
@@ -9548,6 +9580,28 @@ detect_conflicting_assignments(struct _mesa_glsl_parse_state *state,
       _mesa_glsl_error(&loc, state,
                        "Dual source blending requires EXT_blend_func_extended");
    }
+
+   if (yuv_layout_used) {
+      /**
+       * From the GL_EXT_YUV_target spec:
+       *
+       *    "Additionally if the shader qualifies fragment shader output with
+       *     the new yuv qualifier and write depth or multiple color output,
+       *     it would cause compilation failure."
+       *
+       * However, since the extension requires GLSL ES 3.00, we don't need to
+       * consider interactions with gl_FragColor and gl_FragData.
+       */
+
+      if (gl_FragDepth_assigned) {
+         _mesa_glsl_error(&loc, state, "fragment shader uses yuv-layout and "
+                          "`gl_FragDepth'");
+      } else if (color_outputs > 1) {
+         _mesa_glsl_error(&loc, state, "fragment shader uses yuv-layout and "
+                          "multiple color-outputs");
+      }
+   }
+
 }
 
 static void

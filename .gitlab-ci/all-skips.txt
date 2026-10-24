@@ -12,10 +12,6 @@ dEQP-VK.api.driver_properties.conformance_version
 # Exclude this test which might fail when a new extension is implemented.
 dEQP-VK.info.device_extensions
 
-# Times out on all supported drivers
-# https://gitlab.khronos.org/Tracker/vk-gl-cts/-/issues/6728
-dEQP-VK.synchronization2.internally_synchronized_queues.direct_wsi_wsi
-
 # These are tremendously slow (pushing toward a minute), and aren't
 # reliable to be run in parallel with other tests due to CPU-side timing.
 dEQP-GLES[0-9]*.functional.flush_finish.*
@@ -49,3 +45,10 @@ spec@!opengl 1.1@read-front
 # Also, individually, it was disabled in most of the tests as it is
 # either too slow or results in an OOM
 spec@!opengl 1.1@streaming-texture-leak
+
+# OpenCL-CTS SPIR exits cleanly after reporting that cl_khr_spir is unsupported,
+# but deqp-runner cannot parse that message as a skip
+^SPIR$
+
+# Skip CPU tests (ie. CL_FILTER_LINEAR) that are only required to pass on CPU:
+^CL_DEVICE_TYPE_CPU,.*$

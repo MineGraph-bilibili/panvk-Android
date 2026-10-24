@@ -65,6 +65,7 @@ struct st_external_sampler_key
    GLuint bt709;
    GLuint bt2020;
    GLuint yuv_full_range;
+   GLuint external_y2y;
 };
 
 static inline struct st_external_sampler_key
@@ -75,14 +76,17 @@ st_get_external_sampler_key(struct st_context *st, struct gl_program *prog)
 
    memset(&key, 0, sizeof(key));
 
+   /* Set Y2Y samplers from the stored bitfield */
+   key.external_y2y = prog->Y2YSamplersUsed;
+
    while (unlikely(mask)) {
       unsigned unit = u_bit_scan(&mask);
       struct gl_texture_object *stObj =
             st_get_texture_object(st->ctx, prog, unit);
       enum pipe_format format = st_get_view_format(stObj);
 
-      /* if resource format matches then YUV wasn't lowered */
-      if (format == stObj->pt->format)
+      /* if no extra YUV plane views are needed, there's nothing to lower */
+      if (!stObj->needs_yuv_plane_views)
          continue;
 
       switch (format) {

@@ -80,6 +80,10 @@ struct gmem_key {
    uint8_t nr_cbufs;
    uint8_t cbuf_cpp[MAX_RENDER_TARGETS];
    uint8_t zsbuf_cpp[2];
+   /* Extra bin-width alignment for multiplanar YUV.
+    * UV plane stride must be 64-byte aligned. */
+   uint16_t tile_align_w;
+   bool has_yuv_uv_plane;
 };
 
 static uint32_t
@@ -161,8 +165,10 @@ layout_gmem(struct gmem_key *key, uint32_t nbins_x, uint32_t nbins_y,
    if ((nbins_x == 0) || (nbins_y == 0))
       return false;
 
+   uint32_t align_w = MAX2(key->tile_align_w, screen->info->tile_align_w);
+
    uint32_t bin_w, bin_h;
-   bin_w = div_align(key->width, nbins_x, screen->info->tile_align_w);
+   bin_w = div_align(key->width, nbins_x, align_w);
    bin_h = div_align(key->height, nbins_y, screen->info->tile_align_h);
 
    if (bin_w > screen->info->tile_max_w)
@@ -182,8 +188,12 @@ layout_gmem(struct gmem_key *key, uint32_t nbins_x, uint32_t nbins_y,
 
    for (i = 0; i < MAX_RENDER_TARGETS; i++) {
       if (key->cbuf_cpp[i]) {
+         uint32_t rows = bin_h;
+         /* UV plane is 4:2:0 subsampled, so it only needs half the rows. */
+         if (key->has_yuv_uv_plane && i == 1)
+            rows /= 2;
          gmem->cbuf_base[i] = util_align_npot(total, gmem_align);
-         total = gmem->cbuf_base[i] + key->cbuf_cpp[i] * bin_w * bin_h;
+         total = gmem->cbuf_base[i] + key->cbuf_cpp[i] * bin_w * rows;
       }
    }
 
@@ -207,6 +217,7 @@ calc_nbins(struct gmem_key *key, struct fd_gmem_stateobj *gmem)
    uint32_t nbins_x = 1, nbins_y = 1;
    uint32_t max_width = screen->info->tile_max_w;
    uint32_t max_height = screen->info->tile_max_h;
+   uint32_t align_w = MAX2(key->tile_align_w, screen->info->tile_align_w);
 
    if (FD_DBG(MSGS)) {
       debug_printf("binning input: cbuf cpp:");
@@ -219,7 +230,7 @@ calc_nbins(struct gmem_key *key, struct fd_gmem_stateobj *gmem)
    /* first, find a bin size that satisfies the maximum width/
     * height restrictions:
     */
-   while (div_align(key->width, nbins_x, screen->info->tile_align_w) >
+   while (div_align(key->width, nbins_x, align_w) >
           max_width) {
       nbins_x++;
    }
@@ -450,6 +461,28 @@ __fd_gmem_destroy(struct fd_gmem_stateobj *gmem)
    ralloc_free(gmem);
 }
 
+/* Calculate LCM of tile alignment and UV stride alignment for YUV formats.
+ * UV plane stride must be 64-byte aligned; bin_w must be multiple of both
+ * tile_align_w (GMEM tiling) and 64/cpp (UV stride requirement). */
+static uint32_t
+fd_yuv_tile_align_w(struct fd_screen *screen, unsigned cpp)
+{
+   uint32_t pitch_align_px = DIV_ROUND_UP(64, MAX2(cpp, 1));
+   uint32_t a = screen->info->tile_align_w;
+   uint32_t b = pitch_align_px;
+
+   /* gcd */
+   uint32_t x = a, y = b;
+   while (y) {
+      uint32_t t = y;
+      y = x % y;
+      x = t;
+   }
+
+   /* lcm(a, b) = a / gcd(a, b) * b */
+   return (a / x) * b;
+}
+
 static struct gmem_key *
 gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
 {
@@ -493,11 +526,27 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
    key->nr_cbufs = pfb->nr_cbufs;
    for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
       if (pfb->cbufs[i].texture)
-         key->cbuf_cpp[i] = util_format_get_blocksize(pfb->cbufs[i].format);
+         /* Divide blocksize by block_width to get true per-pixel cost.
+          * For YUYV (block_width=2), this prevents GMEM overallocation. */
+         key->cbuf_cpp[i] = util_format_get_blocksize(pfb->cbufs[i].format) /
+                            util_format_get_blockwidth(pfb->cbufs[i].format);
       else
          key->cbuf_cpp[i] = 4;
       /* if MSAA, color buffers are super-sampled in GMEM: */
       key->cbuf_cpp[i] *= pfb->samples;
+
+      /* NV12 needs a second GMEM region for the chroma plane, RB treats it
+       * as a separate render target.  Only when it's the sole cbuf, else
+       * cbuf_cpp[i + 1] would clobber another MRT.  YUYV needs no extra
+       * GMEM.
+       */
+      if (pfb->cbufs[i].texture &&
+          fd_format_is_planar_yuv(pfb->cbufs[i].format) &&
+          i == 0 && pfb->nr_cbufs == 1) {
+         key->cbuf_cpp[i + 1] = key->cbuf_cpp[i];
+         key->has_yuv_uv_plane = true;
+         key->tile_align_w = fd_yuv_tile_align_w(screen, key->cbuf_cpp[i]);
+      }
    }
 
    /* NOTE: on a6xx, the max-scissor-rect is handled in fd6_gmem, and

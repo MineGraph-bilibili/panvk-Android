@@ -49,6 +49,130 @@ ConvertPipeProfileToSpecProfile( pipe_video_profile profile )
    }
 }
 
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncH264VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH264VProfile_ConstrainedBase:
+      case eAVEncH264VProfile_Base:
+      case eAVEncH264VProfile_Main:
+      case eAVEncH264VProfile_Extended:
+      case eAVEncH264VProfile_ConstrainedHigh:
+      case eAVEncH264VProfile_High:
+         return PIPE_FORMAT_NV12;
+      case eAVEncH264VProfile_High10:
+         return PIPE_FORMAT_P010;
+      case eAVEncH264VProfile_422:
+         return PIPE_FORMAT_YUYV;
+      case eAVEncH264VProfile_444:
+         return PIPE_FORMAT_AYUV;
+      default:
+         UNREACHABLE( "Unsupported H.264 profile" );
+         return PIPE_FORMAT_NONE;
+   }
+}
+
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncH265VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH265VProfile_Main_420_8:
+         return PIPE_FORMAT_NV12;
+      case eAVEncH265VProfile_Main_420_10:
+         return PIPE_FORMAT_P010;
+      case eAVEncH265VProfile_Main_422_8:
+         return PIPE_FORMAT_YUYV;
+      case eAVEncH265VProfile_Main_422_10:
+         return PIPE_FORMAT_Y210;
+      case eAVEncH265VProfile_Main_444_8:
+         return PIPE_FORMAT_AYUV;
+      case eAVEncH265VProfile_Main_444_10:
+         return PIPE_FORMAT_Y410;
+      default:
+         UNREACHABLE( "Unsupported H.265 profile" );
+         return PIPE_FORMAT_NONE;
+   }
+}
+
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncH264VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH264VProfile_ConstrainedBase:
+      case eAVEncH264VProfile_Base:
+      case eAVEncH264VProfile_Main:
+      case eAVEncH264VProfile_Extended:
+      case eAVEncH264VProfile_ConstrainedHigh:
+      case eAVEncH264VProfile_High:
+         return MFVideoFormat_NV12;
+      case eAVEncH264VProfile_High10:
+         return MFVideoFormat_P010;
+      case eAVEncH264VProfile_422:
+         return MFVideoFormat_YUY2;
+      case eAVEncH264VProfile_444:
+         return MFVideoFormat_AYUV;
+      default:
+         UNREACHABLE( "Unsupported H.264 profile" );
+         return GUID_NULL;
+   }
+}
+
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncH265VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH265VProfile_Main_420_8:
+         return MFVideoFormat_NV12;
+      case eAVEncH265VProfile_Main_420_10:
+         return MFVideoFormat_P010;
+      case eAVEncH265VProfile_Main_422_8:
+         return MFVideoFormat_YUY2;
+      case eAVEncH265VProfile_Main_422_10:
+         return MFVideoFormat_Y210;
+      case eAVEncH265VProfile_Main_444_8:
+         return MFVideoFormat_AYUV;
+      case eAVEncH265VProfile_Main_444_10:
+         return MFVideoFormat_Y410;
+      default:
+         UNREACHABLE( "Unsupported H.265 profile" );
+         return GUID_NULL;
+   }
+}
+
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncAV1VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncAV1VProfile_Main_420_8:
+         return PIPE_FORMAT_NV12;
+      case eAVEncAV1VProfile_Main_420_10:
+         return PIPE_FORMAT_P010;
+      default:
+         UNREACHABLE( "Unsupported H.265 profile" );
+         return PIPE_FORMAT_NONE;
+   }
+}
+
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncAV1VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncAV1VProfile_Main_420_8:
+         return MFVideoFormat_NV12;
+      case eAVEncAV1VProfile_Main_420_10:
+         return MFVideoFormat_P010;
+      default:
+         UNREACHABLE( "Unsupported AV1 profile" );
+         return GUID_NULL;
+   }
+}
+
 // utility to convert from AVEncVProfile to pipe_video_profile
 enum pipe_video_profile
 ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, UINT32 profile, D3D12_VIDEO_ENCODER_CODEC codec )
@@ -114,6 +238,9 @@ ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, UINT32 profi
             case eAVEncAV1VProfile_Main_420_8:
                pipeProfile = PIPE_VIDEO_PROFILE_AV1_MAIN;
                break;
+            case eAVEncAV1VProfile_Main_420_10:
+               pipeProfile = PIPE_VIDEO_PROFILE_AV1_MAIN;
+               break;
          }
          break;
    }
@@ -141,63 +268,6 @@ ConvertPictureTypeToAVEncH264PictureType( enum pipe_h2645_enc_picture_type picTy
       case PIPE_H2645_ENC_PICTURE_TYPE_I:
       default:
          return eAVEncH264PictureType_IDR;
-   }
-}
-
-// utility to convert from eAVEncH264PictureType to pipe_h2645_enc_picture_type
-enum pipe_video_profile
-ConvertAVEncH265VProfileToPipeVideoProfile( struct vl_screen *vlScreen, eAVEncH265VProfile profile )
-{
-   enum pipe_video_profile pipeProfile;
-
-   switch( profile )
-   {
-      case eAVEncH265VProfile_Main_420_8:
-      case eAVEncH265VProfile_MainIntra_420_8:
-         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN;
-         break;
-      case eAVEncH265VProfile_Main_420_10:
-      case eAVEncH265VProfile_MainIntra_420_10:
-         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_10;
-         break;
-      case eAVEncH265VProfile_Main_444_8:
-         pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_444;
-      default:
-         pipeProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
-         break;
-   }
-
-   if( !vlScreen->pscreen->get_video_param( vlScreen->pscreen, pipeProfile, PIPE_VIDEO_ENTRYPOINT_ENCODE, PIPE_VIDEO_CAP_SUPPORTED ) )
-   {
-      return PIPE_VIDEO_PROFILE_UNKNOWN;
-   }
-
-   return pipeProfile;
-}
-
-// utility to convert from eAVEncH265VProfile to pipe_video_chroma_format
-enum pipe_video_chroma_format
-ConvertAVEncH265VProfileToPipeVideoChromaFormat( eAVEncH265VProfile profile )
-{
-   switch( profile )
-   {
-      case eAVEncH265VProfile_Main_422_10:
-      case eAVEncH265VProfile_Main_422_12:
-      case eAVEncH265VProfile_MainIntra_422_10:
-      case eAVEncH265VProfile_MainIntra_422_12:
-         return PIPE_VIDEO_CHROMA_FORMAT_422;
-         break;
-      case eAVEncH265VProfile_Main_444_8:
-      case eAVEncH265VProfile_Main_444_12:
-      case eAVEncH265VProfile_Main_444_10:
-      case eAVEncH265VProfile_MainIntra_444_8:
-      case eAVEncH265VProfile_MainIntra_444_10:
-      case eAVEncH265VProfile_MainIntra_444_12:
-         return PIPE_VIDEO_CHROMA_FORMAT_444;
-         break;
-      default:
-         return PIPE_VIDEO_CHROMA_FORMAT_420;
-         break;
    }
 }
 
@@ -267,75 +337,6 @@ GetChromaFormatIdc( enum pipe_format pipeFormat )
    }
 }
 
-// utility to convert from pipe_video_profile to pipe_format
-enum pipe_format
-ConvertProfileToFormat( enum pipe_video_profile profile )
-{
-   switch( profile )
-   {
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_EXTENDED:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN:
-      case PIPE_VIDEO_PROFILE_AV1_MAIN:
-      case PIPE_VIDEO_PROFILE_VP9_PROFILE0:
-         return PIPE_FORMAT_NV12;
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH10:
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_10:
-      case PIPE_VIDEO_PROFILE_VP9_PROFILE2:
-         return PIPE_FORMAT_P010;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_422:
-         return PIPE_FORMAT_YUYV;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN10_422:
-         return PIPE_FORMAT_Y210;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
-         return PIPE_FORMAT_AYUV;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN10_444:
-         return PIPE_FORMAT_Y410;
-      default:
-      {
-         UNREACHABLE( "Unsupported pipe video profile" );
-      }
-      break;
-   }
-}
-
-// utility to convert from pipe_video_profile to MFVideoFormat subtype
-GUID
-ConvertProfileToSubtype( enum pipe_video_profile profile )
-{
-   switch( profile )
-   {
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_EXTENDED:
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN:
-      case PIPE_VIDEO_PROFILE_AV1_MAIN:
-         return MFVideoFormat_NV12;
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH10:
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_10:
-         return MFVideoFormat_P010;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_422:
-         return MFVideoFormat_YUY2;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN10_422:
-         return MFVideoFormat_Y210;
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444:
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
-         return MFVideoFormat_AYUV;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN10_444:
-         return MFVideoFormat_Y410;
-      default:
-      {
-         UNREACHABLE( "Unsupported pipe video profile" );
-      }
-      break;
-   }
-}
-
 // utility to convert from errno to HRESULT
 HRESULT
 ConvertErrnoRetToHR( int ret )
@@ -353,36 +354,3 @@ ConvertErrnoRetToHR( int ret )
    }
 }
 
-// utility to convert from pipe_h2645_enc_picture_type to string description
-const char *
-ConvertPipeH2645FrameTypeToString( pipe_h2645_enc_picture_type picType )
-{
-   switch( picType )
-   {
-      case PIPE_H2645_ENC_PICTURE_TYPE_P:
-      {
-         return "H264_P_FRAME";
-      }
-      break;
-      case PIPE_H2645_ENC_PICTURE_TYPE_B:
-      {
-         return "H264_B_FRAME";
-      }
-      break;
-      case PIPE_H2645_ENC_PICTURE_TYPE_I:
-      {
-         return "H264_I_FRAME";
-      }
-      break;
-      case PIPE_H2645_ENC_PICTURE_TYPE_IDR:
-      {
-         return "H264_IDR_FRAME";
-      }
-      break;
-      default:
-      {
-         UNREACHABLE( "Unsupported pipe_h2645_enc_picture_type" );
-      }
-      break;
-   }
-}

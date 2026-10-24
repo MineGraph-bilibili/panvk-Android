@@ -1459,14 +1459,19 @@ static void
 clone_copies(struct copy_prop_var_state *state, struct copies *clones,
              struct copies *copies)
 {
-   /* Simply clone the entire hash table. This is much faster than trying to
-    * rebuild it and is needed to avoid slow compilation of very large shaders.
-    * If needed we will clone the data later if it is ever looked up.
+   /* Keep the backing storage when a copies structure is reused for a later
+    * control-flow node.  Deep shaders otherwise repeatedly allocate and free
+    * similarly-sized hash tables while walking sibling nodes.
     */
-   assert(clones->ht.table == NULL);
-   _mesa_hash_table_copy(&clones->ht, &copies->ht, state->mem_ctx);
+   if (clones->ht.table == NULL) {
+      _mesa_hash_table_init(&clones->ht, state->mem_ctx,
+                            _mesa_hash_pointer, _mesa_key_pointer_equal);
+   }
 
-   util_dynarray_clone(&clones->arr, state->mem_ctx, &copies->arr);
+   _mesa_hash_table_clone_into(&clones->ht, &copies->ht);
+
+   util_dynarray_clear(&clones->arr);
+   util_dynarray_append_dynarray(&clones->arr, &copies->arr);
 }
 
 /* Returns an existing struct for reuse or creates a new on if they are
@@ -1494,8 +1499,6 @@ static void
 clear_copies_structure(struct copy_prop_var_state *state,
                        struct copies *copies)
 {
-   _mesa_hash_table_fini(&copies->ht, NULL);
-
    list_add(&copies->node, &state->unused_copy_structs_list);
 }
 

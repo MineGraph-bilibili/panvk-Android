@@ -29,6 +29,14 @@ void mtl_update_fence(void *encoder, mtl_fence *fence,
 void mtl_wait_for_fence(void *encoder, mtl_fence *fence,
                         enum mtl_stages before_stages);
 
+void mtl_encoder_set_label(void *encoder, const char *label);
+
+void mtl_encoder_insert_debug_signpost(void *encoder, const char *label);
+
+void mtl_encoder_push_debug_group(void *encoder, const char *label);
+
+void mtl_encoder_pop_debug_group(void *encoder);
+
 /* MTLComputeEncoder */
 mtl_compute_encoder *
 mtl_new_compute_command_encoder(mtl_command_buffer *cmd_buffer);
@@ -98,6 +106,9 @@ void mtl_set_depth_bias(mtl_render_encoder *encoder, float depth_bias,
 void mtl_set_depth_clip_mode(mtl_render_encoder *encoder,
                              enum mtl_depth_clip_mode mode);
 
+void mtl_set_depth_test_bounds(mtl_render_encoder *encoder, float min,
+                               float max);
+
 void mtl_set_vertex_amplification_count(mtl_render_encoder *encoder,
                                         uint32_t *layer_ids, uint32_t id_count);
 
@@ -142,6 +153,6 @@ void mtl_render_set_depth_store_action(mtl_render_encoder *encoder,
                                        enum mtl_store_action action);
 
 void mtl_render_set_stencil_store_action(mtl_render_encoder *encoder,
-                                       enum mtl_store_action action);
+                                         enum mtl_store_action action);
 
 #endif /* MTL_ENCODER_H */

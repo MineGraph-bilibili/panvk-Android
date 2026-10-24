@@ -10,6 +10,7 @@
 #include "ac_gpu_info.h"
 #include "util/compiler.h"
 #include "util/u_math.h"
+#include "sid.h"
 
 #include <gelf.h>
 #include <libelf.h>
@@ -292,6 +293,19 @@ bool ac_rtld_read_config(const struct ac_compiler_info *compiler_info,
       struct ac_shader_config c = {0};
       ac_parse_llvm_binary_config(config_data, config_nbytes, binary->wave_size, compiler_info, &c);
 
+      if (!binary->options.exact_float_mode) {
+         /* Enable 64-bit and 16-bit denormals, because there is no performance
+          * cost.
+          *
+          * Don't enable denormals for 32-bit floats, because:
+          * - denormals disable output modifiers
+          * - denormals break v_mad_f32
+          * - GFX6 & GFX7 would be very slow
+          */
+         c.float_mode &= ~V_00B028_FP_32_DENORMS;
+         c.float_mode |= V_00B028_FP_16_64_DENORMS;
+      }
+
       config->num_sgprs = MAX2(config->num_sgprs, c.num_sgprs);
       config->num_vgprs = MAX2(config->num_vgprs, c.num_vgprs);
       config->spilled_sgprs = MAX2(config->spilled_sgprs, c.spilled_sgprs);
@@ -307,6 +321,10 @@ bool ac_rtld_read_config(const struct ac_compiler_info *compiler_info,
       assert(config->spi_ps_input_ena == 0 && config->spi_ps_input_addr == 0);
       config->spi_ps_input_ena = c.spi_ps_input_ena;
       config->spi_ps_input_addr = c.spi_ps_input_addr;
+
+      config->mem_ordered |= c.mem_ordered;
+
+      config->lds_size = MAX2(config->lds_size, c.lds_size);
 
       /* TODO: Should we combine these somehow? It's currently only
        * used for radeonsi's compute, where multiple parts aren't used. */

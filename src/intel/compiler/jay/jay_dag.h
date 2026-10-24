@@ -8,6 +8,11 @@
 
 #include "util/u_dynarray.h"
 
+struct jay_edge {
+   uint32_t node:31;
+   bool strong  :1;
+};
+
 struct jay_dag {
    struct util_dynarray edges;
    uint32_t *adjacency;
@@ -45,8 +50,8 @@ jay_dag_transpose(struct jay_dag *out, const struct jay_dag *in)
 
    /* Determine the number of edges for each node after transpose */
    uint32_t *count = calloc(in->node_count, sizeof(uint32_t));
-   util_dynarray_foreach(&in->edges, uint32_t, edge) {
-      count[*edge]++;
+   util_dynarray_foreach(&in->edges, struct jay_edge, edge) {
+      count[edge->node]++;
    }
 
    /* Prefix sum to get the layout of adjacency[] */
@@ -61,11 +66,16 @@ jay_dag_transpose(struct jay_dag *out, const struct jay_dag *in)
       uint32_t first_adj = i > 0 ? in->adjacency[i - 1] : 0;
 
       for (unsigned j = first_adj; j < in->adjacency[i]; ++j) {
-         uint32_t *node = util_dynarray_element(&in->edges, uint32_t, j);
-         assert(*node && count[*node] > 0 && "exact calculations");
-         count[*node]--;
-         uint32_t idx = out->adjacency[(*node) - 1] + count[*node];
-         *util_dynarray_element(&out->edges, uint32_t, idx) = i;
+         struct jay_edge *node =
+            util_dynarray_element(&in->edges, struct jay_edge, j);
+         assert(node && count[node->node] > 0 && "exact calculations");
+         count[node->node]--;
+         uint32_t idx = out->adjacency[node->node - 1] + count[node->node];
+         *util_dynarray_element(&out->edges, struct jay_edge, idx) =
+            (struct jay_edge) {
+               .node = i,
+               .strong = node->strong,
+            };
       }
    }
 }
@@ -83,19 +93,24 @@ jay_dag_iterator_init(struct jay_dag_iterator *it, const struct jay_dag *dag)
 }
 
 static inline void
-jay_dag_add_edge(struct jay_dag *dag, uint32_t child)
+jay_dag_add_edge(struct jay_dag *dag, uint32_t child, bool strong)
 {
    if (child && child != dag->node) {
       assert(child < dag->node_count);
 
       /* We have to prune degenerate or duplicate edges */
       for (uint32_t i = (dag->node > 0 ? dag->adjacency[dag->node - 1] : 0);
-           i < util_dynarray_num_elements(&dag->edges, uint32_t); ++i) {
-         if (*util_dynarray_element(&dag->edges, uint32_t, i) == child)
+           i < util_dynarray_num_elements(&dag->edges, struct jay_edge); ++i) {
+         struct jay_edge *other =
+            util_dynarray_element(&dag->edges, struct jay_edge, i);
+         if (other->node == child) {
+            other->strong |= strong;
             return;
+         }
       }
 
-      util_dynarray_append(&dag->edges, child);
+      struct jay_edge edge = { .node = child, .strong = strong };
+      util_dynarray_append(&dag->edges, edge);
    }
 }
 
@@ -105,7 +120,7 @@ jay_dag_next_node(struct jay_dag *dag)
    assert(dag->node < dag->node_count);
 
    dag->adjacency[dag->node++] =
-      util_dynarray_num_elements(&dag->edges, uint32_t);
+      util_dynarray_num_elements(&dag->edges, struct jay_edge);
 }
 
 static inline void
@@ -115,8 +130,9 @@ jay_dag_iterate(struct jay_dag_iterator *it, uint32_t first, uint32_t last)
    uint32_t first_adj = first > 0 ? it->dag->adjacency[first - 1] : 0;
 
    for (unsigned i = first_adj; i < it->dag->adjacency[last]; ++i) {
-      uint32_t *node = util_dynarray_element(&it->dag->edges, uint32_t, i);
-      it->parent_counts[*node]++;
+      struct jay_edge *edge =
+         util_dynarray_element(&it->dag->edges, struct jay_edge, i);
+      it->parent_counts[edge->node]++;
    }
 
    for (uint32_t i = last; i >= first; --i) {
@@ -137,10 +153,11 @@ jay_dag_take_head(struct jay_dag_iterator *it, uint32_t head)
    uint32_t first = head > 0 ? it->dag->adjacency[head - 1] : 0;
 
    for (unsigned i = first; i < it->dag->adjacency[head]; ++i) {
-      uint32_t *node = util_dynarray_element(&it->dag->edges, uint32_t, i);
+      uint32_t node =
+         util_dynarray_element(&it->dag->edges, struct jay_edge, i)->node;
 
-      if ((--it->parent_counts[*node]) == 0) {
-         util_dynarray_append(&it->heads, *node);
+      if ((--it->parent_counts[node]) == 0) {
+         util_dynarray_append(&it->heads, node);
       }
    }
 }
@@ -159,14 +176,16 @@ jay_dag_print(struct jay_dag *dag)
    for (unsigned i = 0; i < dag->node_count; ++i) {
       uint32_t first = i > 0 ? dag->adjacency[i - 1] : 0;
       for (unsigned j = first; j < dag->adjacency[i]; ++j) {
-         uint32_t *it = util_dynarray_element(&dag->edges, uint32_t, j);
-         printf("%u->%u\n", i, *it);
+         struct jay_edge *it =
+            util_dynarray_element(&dag->edges, struct jay_edge, j);
+         printf("%u->%u%s\n", i, it->node, it->strong ? "" : " (weak)");
       }
    }
 }
 
 #define jay_dag_foreach_edge(dag, head, it)                                    \
-   for (uint32_t *it = ((uint32_t *) (dag)->edges.data) +                      \
-                       ((head) > 0 ? (dag)->adjacency[(head) - 1] : 0);        \
-        it < ((uint32_t *) (dag)->edges.data) + ((dag)->adjacency[(head)]);    \
+   for (struct jay_edge *it = ((struct jay_edge *) (dag)->edges.data) +        \
+                              ((head) > 0 ? (dag)->adjacency[(head) - 1] : 0); \
+        it <                                                                   \
+        ((struct jay_edge *) (dag)->edges.data) + ((dag)->adjacency[(head)]);  \
         ++it)

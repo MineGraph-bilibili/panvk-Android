@@ -204,6 +204,8 @@ enum ast_operators {
    ast_int64_constant,
    ast_uint64_constant,
 
+   ast_csc_standard,
+
    ast_sequence,
    ast_aggregate
 
@@ -266,6 +268,7 @@ public:
       double double_constant;
       uint64_t uint64_constant;
       int64_t int64_constant;
+      enum yuv_csc_standard csc_standard;
    } primary_expression;
 
 
@@ -687,6 +690,9 @@ struct ast_type_qualifier {
          unsigned task_payload:1;
          unsigned per_primitive:1;
          unsigned max_primitives:1;
+
+         /** GL_EXT_YUV_target */
+         unsigned yuv:1;
       }
       /** \brief Set of flags, accessed by name. */
       q;

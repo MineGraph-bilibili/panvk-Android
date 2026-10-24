@@ -85,6 +85,7 @@ struct r600_bytecode_tex {
 	unsigned			src_sel_y;
 	unsigned			src_sel_z;
 	unsigned			src_sel_w;
+	bool				alt_const;
 	/* indexed samplers/resources only on evergreen/cayman */
 	unsigned			sampler_index_mode;
 	unsigned			resource_index_mode;
@@ -111,6 +112,7 @@ struct r600_bytecode_vtx {
 	unsigned			offset;
 	unsigned			endian;
 	unsigned			buffer_index_mode;
+	bool				alt_const;
 
 	// READ_SCRATCH fields
 	unsigned			uncached;

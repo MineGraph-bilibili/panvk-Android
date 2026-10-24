@@ -485,6 +485,14 @@ impl PipeScreen {
         }
     }
 
+    pub fn is_convert_timestamp_supported(&self) -> bool {
+        self.screen().convert_timestamp.is_some()
+    }
+
+    pub fn convert_timestamp(&self, raw_timestamp: u64) -> u64 {
+        unsafe { self.screen().convert_timestamp.unwrap()(self.pipe(), raw_timestamp) }
+    }
+
     pub fn is_res_handle_supported(&self) -> bool {
         self.screen().resource_from_handle.is_some() && self.screen().resource_get_handle.is_some()
     }

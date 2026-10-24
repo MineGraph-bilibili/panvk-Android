@@ -11,6 +11,8 @@
 extern "C" {
 #endif
 
+uint32_t kraid_get_compiler_flags(void);
+
 const nir_shader_compiler_options *
 kraid_get_nir_shader_compiler_options(uint8_t arch, bool merge_wg);
 

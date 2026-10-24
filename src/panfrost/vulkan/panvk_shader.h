@@ -11,7 +11,6 @@
 #endif
 
 #include "compiler/pan_compiler.h"
-#include "poly/nir/poly_nir.h"
 
 #include "pan_desc.h"
 #include "pan_earlyzs.h"
@@ -20,12 +19,18 @@
 #include "panvk_descriptor_set.h"
 #include "panvk_macros.h"
 #include "panvk_mempool.h"
+#if PAN_ARCH >= 9
+#include "panvk_gpu_prerast.h"
+#endif
 
 #include "vk_pipeline_layout.h"
 
 #include "vk_shader.h"
 
 extern const struct vk_device_shader_ops panvk_per_arch(device_shader_ops);
+
+struct panvk_device;
+VkResult panvk_per_arch(create_depth_bounds_fs)(struct panvk_device *dev);
 
 #define MAX_RTS 8
 #define MAX_VS_ATTRIBS 16
@@ -109,36 +114,15 @@ struct panvk_common_sysvals_inner {
 
    /* Address of the printf buffer */
    aligned_u64 printf_buffer_address;
+
+   /* Address of the shader constant data buffer */
+   aligned_u64 constant_data;
 } __attribute__((aligned(FAU_WORD_SIZE)));
 
 struct panvk_common_sysvals {
    uint32_t _pad[4];
    struct panvk_common_sysvals_inner common;
 } __attribute__((aligned(FAU_WORD_SIZE)));
-
-/*
- * libpoly parameter buffers.
- *
- * Keep this block at the same offset in graphics and compute sysvals.
- * It intentionally lives outside panvk_common_sysvals_inner because
- * prepare_push_uniforms() synthesizes the common block instead of copying
- * it from command-buffer state.
- */
-struct panvk_poly_sysvals {
-   aligned_u64 vertex_param_buffer;
-   aligned_u64 tess_param_buffer;
-
-   /* Software-GS parameter block. Runtime population is intentionally
-    * deferred until the compiler/offline contract is closed. */
-   aligned_u64 geometry_param_buffer;
-
-   /* Dynamic rasterization convention consumed by software GS. */
-   uint32_t provoking_last;
-   uint32_t _pad_geometry;
-} __attribute__((aligned(FAU_WORD_SIZE)));
-
-static_assert((sizeof(struct panvk_poly_sysvals) % FAU_WORD_SIZE) == 0,
-              "struct panvk_poly_sysvals must be 8-byte aligned");
 
 static_assert((offsetof(struct panvk_common_sysvals, common) %
                FAU_WORD_SIZE) == 0,
@@ -166,14 +150,18 @@ struct panvk_graphics_sysvals {
    /* This must be at the same offset for both compute and graphics */
    struct panvk_common_sysvals_inner common;
 
-   /* libpoly draw/tessellation parameter buffers */
-   struct panvk_poly_sysvals poly;
-
    struct {
       struct {
          float x, y, z;
       } scale, offset;
    } viewport;
+
+   /* Depth bounds test, read by the FS lowering in panvk_vX_shader.c. */
+   struct {
+      float bounds[2];
+      uint32_t enable;
+      uint32_t samples;
+   } ds;
 
    struct {
 #if PAN_ARCH < 9
@@ -182,15 +170,14 @@ struct panvk_graphics_sysvals {
       int32_t first_vertex;
       int32_t base_instance;
       uint32_t noperspective_varyings;
-      uint32_t draw_id;
-   } vs;
+    } vs;
 
-   struct {
-      aligned_u64 base[MAX_XFB_BUFFERS];
-      aligned_u64 offset_ptr[MAX_XFB_BUFFERS];
-      uint32_t num_vertices;
-      uint32_t _pad;
-   } xfb;
+#if PAN_ARCH >= 9
+   aligned_u64 gpu_prerast_params;
+   aligned_u64 gpu_prerast_records;
+   aligned_u64 gpu_prerast_tess;
+   aligned_u64 gpu_prerast_viewports;
+#endif
 
    struct {
       aligned_u64 blend_descs[MAX_RTS];
@@ -198,12 +185,19 @@ struct panvk_graphics_sysvals {
 
    struct panvk_input_attachment_info iam[INPUT_ATTACHMENT_MAP_SIZE];
 
-#if PAN_ARCH < 9
-   /* gl_Layer on Bifrost is a bit of hack. We have to issue one draw per
-    * layer, and filter primitives at the VS level.
+#if PAN_ARCH <= 9
+   /* gl_Layer on Bifrost and v9 JM is a bit of hack. We have to issue one
+    * draw per layer, and filter primitives at the VS level.
     */
    int32_t layer_id;
+#endif
 
+#if PAN_ARCH == 9
+   /* gl_DrawID: v9 JM unrolls multi-draws into one job per draw. */
+   int32_t draw_id;
+#endif
+
+#if PAN_ARCH < 9
    struct {
       aligned_u64 sets[PANVK_DESC_TABLE_GFX_COUNT];
    } desc;
@@ -233,9 +227,6 @@ struct panvk_compute_sysvals {
    /* This must be at the same offset for both compute and graphics */
    struct panvk_common_sysvals_inner common;
 
-   /* libpoly draw/tessellation parameter buffers */
-   struct panvk_poly_sysvals poly;
-
    struct {
       uint32_t x, y, z;
    } num_work_groups;
@@ -253,10 +244,6 @@ struct panvk_compute_sysvals {
 static_assert(offsetof(struct panvk_compute_sysvals, common) ==
                  offsetof(struct panvk_common_sysvals, common),
               "Common sysvals must be at the same offset everywhere");
-
-static_assert(offsetof(struct panvk_graphics_sysvals, poly) ==
-                 offsetof(struct panvk_compute_sysvals, poly),
-              "Poly sysvals must be at the same offset for graphics and compute");
 static_assert((sizeof(struct panvk_compute_sysvals) % FAU_WORD_SIZE) == 0,
               "struct panvk_compute_sysvals must be 8-byte aligned");
 #if PAN_ARCH < 9
@@ -426,7 +413,6 @@ struct panvk_shader_desc_info {
 
 struct panvk_shader_variant {
    struct pan_shader_info info;
-   uint16_t xfb_stride[MAX_XFB_BUFFERS];
 
    union {
       struct {
@@ -435,26 +421,35 @@ struct panvk_shader_variant {
 
       struct {
          struct pan_earlyzs_lut earlyzs_lut;
-
-         /* Location-indexed mask consumed by software GS flat/provoking
-          * vertex lowering. This is driver metadata, not backend metadata. */
-         uint64_t flat_outputs;
-
          uint32_t input_attachment_read;
          uint32_t tile_image_color_read;
          bool tile_image_z_read;
          bool tile_image_s_read;
+         bool depth_bounds;
+         /* The app FS wrote SampleMask itself (before the depth bounds lowering). */
+         bool depth_bounds_app_mask;
+         /* device->depth_bounds_fs: only needed while the test is on. */
+         bool depth_bounds_only;
       } fs;
    };
-
-   struct panvk_shader_desc_info desc_info;
-
 
    struct panvk_shader_fau_info fau;
 
    const void *bin_ptr;
    uint32_t bin_size;
    bool own_bin;
+
+   /* The shader samples textures or accesses images (see the lazy
+    * vertex/tiler wait in panvk_vX_cmd_buffer.c). */
+   bool reads_images;
+   /* The shader may write or atomically modify buffer or image memory. */
+   bool writes_memory;
+
+#if PAN_ARCH < 9
+   const void *data_ptr;
+   uint32_t data_size;
+   struct panvk_priv_mem data_mem;
+#endif
 
    struct panvk_priv_mem code_mem;
 
@@ -484,65 +479,37 @@ enum panvk_vs_variant {
    /* Hardware vertex shader, when next stage is fragment */
    PANVK_VS_VARIANT_HW,
 
-   /* Vertex shader dispatched as compute for transform feedback. */
-   PANVK_VS_VARIANT_XFB,
+#if PAN_ARCH >= 9
+   PANVK_VS_VARIANT_GPU_LOWERED,
+   PANVK_VS_VARIANT_GPU_PASSTHROUGH,
+   PANVK_VS_VARIANT_GPU_POLYGON,
+#endif
 
    PANVK_VS_VARIANTS,
 };
 
+#if PAN_ARCH >= 9
 enum panvk_gs_variant {
-   /* Hardware vertex shader which rasterizes generated vertices. */
-   PANVK_GS_VARIANT_RAST,
-
-   /* Main software geometry program, physically executed as compute. */
-   PANVK_GS_VARIANT_MAIN,
-
-   /* Optional count program, physically executed as compute. */
-   PANVK_GS_VARIANT_COUNT,
-
-   /* Optional pre-GS program, physically executed as compute. */
-   PANVK_GS_VARIANT_PRE,
-
+   PANVK_GS_VARIANT_PASSTHROUGH,
+   PANVK_GS_VARIANT_KERNEL,
    PANVK_GS_VARIANTS,
 };
-
-/*
- * Original Vulkan tessellation metadata retained before libpoly lowers
- * TCS to compute and TES to a hardware vertex shader.
- *
- * Keep this in panvk_shader rather than pan_shader_info: these values are
- * consumed by the PanVK/libpoly runtime, not by the Panfrost backend.
- */
-struct panvk_tess_info {
-   /* Original VS outputs before VS->COMPUTE libpoly lowering. */
-   uint64_t vs_outputs;
-
-   uint64_t tcs_per_vertex_outputs;
-
-   uint32_t tcs_output_patch_size;
-   uint32_t tcs_nr_patch_outputs;
-   uint32_t tcs_output_stride;
-
-   uint8_t mode;
-   uint8_t spacing;
-   uint8_t points;
-   uint8_t ccw;
-};
-
-/* Compile-time libpoly geometry metadata. Runtime consumption is handled by
- * the physical execution path; keeping the POD object at API-shader level makes cache serialization
- * explicit while descriptor ownership remains per physical variant. */
-struct panvk_gs_info {
-   struct poly_gs_info poly;
-
-   /* Original API GS had memory side effects before libpoly split. */
-   bool sidefx;
-};
+#endif
 
 struct panvk_shader {
    struct vk_shader vk;
-   struct panvk_tess_info tess;
-   struct panvk_gs_info gs;
+
+   struct panvk_shader_desc_info desc_info;
+
+#if PAN_ARCH >= 9
+   struct panvk_gpu_prerast_shader gpu_prerast;
+#endif
+
+#if PAN_ARCH == 9
+   /* The shader writes gl_Layer. Without it a layered draw only renders
+    * layer 0, so v9 JM does not replicate the draw. */
+   bool writes_layer;
+#endif
 
    struct panvk_shader_variant variants[];
 };
@@ -550,26 +517,25 @@ struct panvk_shader {
 static inline unsigned
 panvk_shader_num_variants(mesa_shader_stage stage)
 {
-   switch (stage) {
-   case MESA_SHADER_VERTEX:
+   if (stage == MESA_SHADER_VERTEX)
       return PANVK_VS_VARIANTS;
-   case MESA_SHADER_GEOMETRY:
+#if PAN_ARCH >= 9
+   if (stage == MESA_SHADER_GEOMETRY)
       return PANVK_GS_VARIANTS;
-   default:
-      return 1;
-   }
+   if (stage == MESA_SHADER_TESS_EVAL)
+      return PANVK_VS_VARIANTS;
+#endif
+
+   return 1;
 }
 
 static const char *panvk_vs_shader_variant_name[] = {
    [PANVK_VS_VARIANT_HW] = NULL,
-   [PANVK_VS_VARIANT_XFB] = "xfb",
-};
-
-static const char *panvk_gs_shader_variant_name[] = {
-   [PANVK_GS_VARIANT_RAST] = "Rasterization",
-   [PANVK_GS_VARIANT_MAIN] = "Main",
-   [PANVK_GS_VARIANT_COUNT] = "Count",
-   [PANVK_GS_VARIANT_PRE] = "Pre-GS",
+#if PAN_ARCH >= 9
+   [PANVK_VS_VARIANT_GPU_LOWERED] = "GPU_LOWERED",
+   [PANVK_VS_VARIANT_GPU_PASSTHROUGH] = "GPU_PASSTHROUGH",
+   [PANVK_VS_VARIANT_GPU_POLYGON] = "GPU_POLYGON",
+#endif
 };
 
 static const char *
@@ -579,15 +545,16 @@ panvk_shader_variant_name(const struct panvk_shader *shader,
    unsigned i = variant - shader->variants;
    assert(i < panvk_shader_num_variants(shader->vk.stage));
 
-   if (shader->vk.stage == MESA_SHADER_VERTEX) {
+   if (shader->vk.stage == MESA_SHADER_VERTEX ||
+       shader->vk.stage == MESA_SHADER_TESS_EVAL) {
       assert(i < ARRAY_SIZE(panvk_vs_shader_variant_name));
       return panvk_vs_shader_variant_name[i];
    }
 
-   if (shader->vk.stage == MESA_SHADER_GEOMETRY) {
-      assert(i < ARRAY_SIZE(panvk_gs_shader_variant_name));
-      return panvk_gs_shader_variant_name[i];
-   }
+#if PAN_ARCH >= 9
+   if (shader->vk.stage == MESA_SHADER_GEOMETRY)
+      return i == PANVK_GS_VARIANT_KERNEL ? "GS_KERNEL" : "GS_PASSTHROUGH";
+#endif
 
    assert(panvk_shader_num_variants(shader->vk.stage) == 1);
 
@@ -613,24 +580,11 @@ panvk_shader_hw_variant(const struct panvk_shader *shader)
    return &shader->variants[0];
 }
 
-static const struct panvk_shader_variant *
-panvk_shader_xfb_variant(const struct panvk_shader *shader)
-{
-   if (!shader)
-      return NULL;
-
-   return &shader->variants[PANVK_VS_VARIANT_XFB];
-}
-
 static inline const struct panvk_shader_variant *
-panvk_shader_gs_variant(const struct panvk_shader *shader,
-                        enum panvk_gs_variant variant)
+panvk_shader_gpu_prerast_variant(const struct panvk_shader *shader,
+                                 enum panvk_vs_variant variant)
 {
-   if (!shader)
-      return NULL;
-
-   assert(shader->vk.stage == MESA_SHADER_GEOMETRY);
-   assert(variant < PANVK_GS_VARIANTS);
+   assert(shader && variant < PANVK_VS_VARIANTS);
    return &shader->variants[variant];
 }
 

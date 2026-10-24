@@ -148,6 +148,10 @@ fd6_screen_is_format_supported(struct pipe_screen *pscreen,
       retval |= PIPE_BIND_BLENDABLE;
    }
 
+   if (usage & PIPE_BIND_LINEAR) {
+      retval |= PIPE_BIND_LINEAR;
+   }
+
    if (retval != usage) {
       DBG("not supported: format=%s, target=%d, sample_count=%d, "
           "usage=%x, retval=%x",

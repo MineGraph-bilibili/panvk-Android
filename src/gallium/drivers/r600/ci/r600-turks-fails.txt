@@ -18,8 +18,6 @@ KHR-GLES31.core.layout_binding.image2D_layout_binding_imageLoad_ComputeShader,Fa
 KHR-GLES31.core.shader_atomic_counters.advanced-usage-many-draw-calls2,Fail
 KHR-GLES31.core.shader_atomic_counters.advanced-usage-multi-stage,Fail
 
-KHR-GLES31.core.shader_storage_buffer_object.advanced-readWrite-case1-cs,Fail
-
 # r600_shader.c:10547: fc_pushlevel: Assertion `ctx->bc->fc_sp < ARRAY_SIZE(ctx->bc->fc_stack)' failed.
 # Yeah, that's some deep flow control there.  Previously pipe_shader_caps.max_control_flow_depth would
 # do GLSL lower_if_to_cond_assign (which is incorrect for instructions with side effects) after 32

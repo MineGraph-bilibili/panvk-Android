@@ -24,11 +24,14 @@
 #include "util/bitset.h"
 
 #include "genxml/gen_macros.h"
+#include "pan_buffer.h"
+#include "pan_desc.h"
 
 #include "panvk_descriptor_set_layout.h"
 #include "panvk_device.h"
 #include "panvk_entrypoints.h"
 #include "panvk_image.h"
+#include "panvk_image_view.h"
 #include "panvk_macros.h"
 #include "panvk_sampler.h"
 
@@ -411,5 +414,123 @@ panvk_per_arch(GetDescriptorSetLayoutSupport)(
       /* Maximum descriptor count for any other descriptor type */
       var_desc_count->maxVariableDescriptorCount =
          (PANVK_MAX_DESCS_PER_SET - non_variable_count) / variable_stride;
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(GetDescriptorSetLayoutSizeEXT)(
+   VkDevice _device,
+   VkDescriptorSetLayout _layout,
+   VkDeviceSize *pLayoutSizeInBytes)
+{
+   VK_FROM_HANDLE(panvk_descriptor_set_layout, layout, _layout);
+   *pLayoutSizeInBytes = layout ? ((VkDeviceSize)layout->desc_count * 32) : 0;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(GetDescriptorSetLayoutBindingOffsetEXT)(
+   VkDevice _device,
+   VkDescriptorSetLayout _layout,
+   uint32_t binding,
+   VkDeviceSize *pOffset)
+{
+   VK_FROM_HANDLE(panvk_descriptor_set_layout, layout, _layout);
+   if (layout && binding < layout->binding_count)
+      *pOffset = (VkDeviceSize)layout->bindings[binding].desc_idx * 32;
+   else
+      *pOffset = 0;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(GetDescriptorEXT)(
+   VkDevice _device,
+   const VkDescriptorGetInfoEXT *pDescriptorInfo,
+   size_t dataSize,
+   void *pDescriptor)
+{
+   if (!pDescriptor || dataSize < 32)
+      return;
+   memset(pDescriptor, 0, dataSize);
+
+   switch (pDescriptorInfo->type) {
+   case VK_DESCRIPTOR_TYPE_SAMPLER:
+      if (pDescriptorInfo->data.pSampler) {
+         VK_FROM_HANDLE(panvk_sampler, sampler, *pDescriptorInfo->data.pSampler);
+         if (sampler)
+            memcpy(pDescriptor, &sampler->descs[0], MIN2(dataSize, sizeof(sampler->descs[0])));
+      }
+      break;
+   case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+   case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+      if (pDescriptorInfo->data.pSampledImage) {
+         VK_FROM_HANDLE(panvk_image_view, view, pDescriptorInfo->data.pSampledImage->imageView);
+         if (view)
+            memcpy(pDescriptor, &view->descs.tex[0], MIN2(dataSize, sizeof(view->descs.tex[0])));
+      }
+      break;
+   case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+      if (pDescriptorInfo->data.pStorageImage) {
+         VK_FROM_HANDLE(panvk_image_view, view, pDescriptorInfo->data.pStorageImage->imageView);
+         if (view) {
+#if PAN_ARCH >= 9
+            memcpy(pDescriptor, &view->descs.storage_tex[0], MIN2(dataSize, sizeof(view->descs.storage_tex[0])));
+#else
+            memcpy(pDescriptor, &view->descs.img_attrib_buf[0], MIN2(dataSize, sizeof(view->descs.img_attrib_buf[0])));
+#endif
+         }
+      }
+      break;
+   case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+      if (pDescriptorInfo->data.pCombinedImageSampler) {
+         VK_FROM_HANDLE(panvk_image_view, view, pDescriptorInfo->data.pCombinedImageSampler->imageView);
+         VK_FROM_HANDLE(panvk_sampler, sampler, pDescriptorInfo->data.pCombinedImageSampler->sampler);
+         if (view && dataSize >= 32)
+            memcpy(pDescriptor, &view->descs.tex[0], 32);
+         if (sampler && dataSize >= 64)
+            memcpy((char *)pDescriptor + 32, &sampler->descs[0], 32);
+      }
+      break;
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+      if (pDescriptorInfo->data.pUniformBuffer) {
+         const VkDescriptorAddressInfoEXT *addr_info = pDescriptorInfo->data.pUniformBuffer;
+         const bool is_ssbo = pDescriptorInfo->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+#if PAN_ARCH >= 9
+         struct mali_buffer_packed desc;
+         pan_pack(&desc, BUFFER, cfg) {
+            cfg.address = addr_info->address;
+            cfg.size = (addr_info->range == VK_WHOLE_SIZE || addr_info->range > UINT32_MAX) ?
+                       UINT32_MAX : align(addr_info->range, is_ssbo ? 4 : 16);
+         }
+         memcpy(pDescriptor, &desc, MIN2(dataSize, sizeof(desc)));
+#else
+         memcpy(pDescriptor, &addr_info->address, sizeof(addr_info->address));
+#endif
+      }
+      break;
+   case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+      if (pDescriptorInfo->data.pUniformTexelBuffer) {
+         const VkDescriptorAddressInfoEXT *addr_info = pDescriptorInfo->data.pUniformTexelBuffer;
+#if PAN_ARCH >= 9
+         /* Same structured buffer (stride + format conversion) a
+          * VkBufferView gets, not a plain buffer. */
+         const enum pipe_format pfmt = vk_format_to_pipe_format(addr_info->format);
+         const unsigned blk = MAX2(util_format_get_blocksize(pfmt), 1);
+         const struct pan_buffer_view bview = {
+            .format = pfmt,
+            .width_el = addr_info->range == VK_WHOLE_SIZE ? 0 : addr_info->range / blk,
+            .base = addr_info->address,
+         };
+         struct mali_buffer_packed desc;
+         GENX(pan_buffer_texture_emit)(&bview, &desc);
+         memcpy(pDescriptor, &desc, MIN2(dataSize, sizeof(desc)));
+#else
+         memcpy(pDescriptor, &addr_info->address, sizeof(addr_info->address));
+#endif
+      }
+      break;
+   default:
+      break;
    }
 }

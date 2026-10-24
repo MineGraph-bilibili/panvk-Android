@@ -20,6 +20,9 @@ void ac_parse_llvm_binary_config(const char *data, size_t nbytes, unsigned wave_
                                  const struct ac_compiler_info *compiler_info,
                                  struct ac_shader_config *conf)
 {
+   unsigned lds_granularity = compiler_info->gfx_level >= GFX7 ? 512 : 256;
+   unsigned ps_lds_granularity = compiler_info->gfx_level >= GFX11 ? 1024 : lds_granularity;
+
    for (size_t i = 0; i < nbytes; i += 8) {
       unsigned reg = util_le32_to_cpu(*(uint32_t *)(data + i));
       unsigned value = util_le32_to_cpu(*(uint32_t *)(data + i + 4));
@@ -35,11 +38,19 @@ void ac_parse_llvm_binary_config(const char *data, size_t nbytes, unsigned wave_
                                 (wave_size == 32 ? 2 : 1));
 
          conf->num_sgprs = MAX2(conf->num_sgprs, (G_00B028_SGPRS(value) + 1) * 8);
-         /* TODO: LLVM doesn't set FLOAT_MODE for non-compute shaders */
+         /* TODO: LLVM doesn't set FLOAT_MODE or MEM_ORDERED for non-compute shaders,
+          * and sets MEM_ORDERED on GFX12+.
+          */
+         bool has_mem_ordered =
+            compiler_info->gfx_level >= GFX10 && compiler_info->gfx_level < GFX12;
          conf->float_mode = G_00B028_FLOAT_MODE(value);
+         conf->mem_ordered = (reg != R_00B848_COMPUTE_PGM_RSRC1 ||
+                              G_00B848_MEM_ORDERED(value)) &&
+                             has_mem_ordered;
          conf->rsrc1 = value;
          break;
       case R_00B02C_SPI_SHADER_PGM_RSRC2_PS:
+         conf->lds_size = MAX2(conf->lds_size, G_00B02C_EXTRA_LDS_SIZE(value) * ps_lds_granularity);
          /* TODO: LLVM doesn't set SHARED_VGPR_CNT for all shader types */
          conf->num_shared_vgprs = G_00B02C_SHARED_VGPR_CNT(value);
          conf->rsrc2 = value;
@@ -57,6 +68,7 @@ void ac_parse_llvm_binary_config(const char *data, size_t nbytes, unsigned wave_
          conf->rsrc2 = value;
          break;
       case R_00B84C_COMPUTE_PGM_RSRC2:
+         conf->lds_size = MAX2(conf->lds_size, G_00B84C_LDS_SIZE(value) * lds_granularity);
          conf->rsrc2 = value;
          break;
       case R_00B8A0_COMPUTE_PGM_RSRC3:
@@ -100,17 +112,6 @@ void ac_parse_llvm_binary_config(const char *data, size_t nbytes, unsigned wave_
 
    if (!conf->spi_ps_input_addr)
       conf->spi_ps_input_addr = conf->spi_ps_input_ena;
-
-   /* Enable 64-bit and 16-bit denormals, because there is no performance
-    * cost.
-    *
-    * Don't enable denormals for 32-bit floats, because:
-    * - denormals disable output modifiers
-    * - denormals break v_mad_f32
-    * - GFX6 & GFX7 would be very slow
-    */
-   conf->float_mode &= ~V_00B028_FP_32_DENORMS;
-   conf->float_mode |= V_00B028_FP_16_64_DENORMS;
 }
 
 unsigned ac_align_shader_binary_for_prefetch(enum amd_gfx_level gfx_level,

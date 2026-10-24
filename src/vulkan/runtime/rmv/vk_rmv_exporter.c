@@ -30,6 +30,7 @@
 
 #include "util/format/u_format.h"
 #include "util/u_process.h"
+#include "util/u_string.h"
 #include "vk_format.h"
 
 static int
@@ -684,8 +685,9 @@ rmt_fill_chunk_system_info(struct rmt_file_chunk_system_info *chunk)
       str = strstr(line, "vendor_id");
       if (str) {
          char *ptr = (char *)chunk->vendor_id;
-         char *v = strtok(str, ":");
-         v = strtok(NULL, ":");
+         char *saveptr;
+         char *v = strtok_r(str, ":", &saveptr);
+         v = strtok_r(NULL, ":", &saveptr);
          strncpy(ptr, v + 1, sizeof(chunk->vendor_id) - 1);
          ptr[sizeof(chunk->vendor_id) - 1] = '\0';
       }
@@ -694,8 +696,9 @@ rmt_fill_chunk_system_info(struct rmt_file_chunk_system_info *chunk)
       str = strstr(line, "model name");
       if (str) {
          char *ptr = (char *)chunk->processor_brand;
-         char *v = strtok(str, ":");
-         v = strtok(NULL, ":");
+         char *saveptr;
+         char *v = strtok_r(str, ":", &saveptr);
+         v = strtok_r(NULL, ":", &saveptr);
          strncpy(ptr, v + 1, sizeof(chunk->processor_brand) - 1);
          ptr[sizeof(chunk->processor_brand) - 1] = '\0';
       }
@@ -1708,7 +1711,7 @@ vk_dump_rmv_capture(struct vk_memory_trace_data *data)
    FILE *f;
 
    time_t t = time(NULL);
-   now = *localtime(&t);
+   os_localtime(&t, &now);
 
    snprintf(filename, sizeof(filename), "/tmp/%s_%04d.%02d.%02d_%02d.%02d.%02d.rmv",
             util_get_process_name(), 1900 + now.tm_year, now.tm_mon + 1, now.tm_mday, now.tm_hour,

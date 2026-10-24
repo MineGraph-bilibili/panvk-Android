@@ -117,6 +117,16 @@ radv_image_has_dcc(const struct radv_image *image)
 }
 
 /**
+ * Return whether the image has display DCC for scanout surfaces.
+ */
+static inline bool
+radv_image_has_display_dcc(const struct radv_image *image)
+{
+   return image->planes[0].surface.display_dcc_offset &&
+          image->planes[0].surface.display_dcc_offset != image->planes[0].surface.meta_offset;
+}
+
+/**
  * Return whether the image is TC-compatible CMASK.
  */
 static inline bool
@@ -451,8 +461,7 @@ enum radv_fmask_compression radv_layout_fmask_compression(const struct radv_devi
                                                           const struct radv_image *image, VkImageLayout layout,
                                                           unsigned queue_mask);
 
-unsigned radv_image_queue_family_mask(const struct radv_image *image, enum radv_queue_family family,
-                                      enum radv_queue_family queue_family);
+unsigned radv_image_queue_family_mask(const struct radv_image *image, enum radv_queue_family qf);
 
 bool radv_image_is_renderable(const struct radv_image *image);
 

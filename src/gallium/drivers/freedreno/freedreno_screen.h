@@ -125,6 +125,12 @@ struct fd_screen {
    struct fd_pipe *pipe;
 
    uint32_t (*layout_resource)(struct fd_resource *rsc, enum fd_layout_type type);
+   /* Stitch UV-plane layout offsets into a 2-plane YUV resource.
+    * Called after both Y and UV planes have been laid out.  Returns the
+    * combined BO size that covers both planes.
+    */
+   uint32_t (*layout_multiplanar_resource)(struct fd_resource *y_rsc,
+                                           struct fd_resource *uv_rsc);
    unsigned (*tile_mode)(const struct pipe_resource *prsc);
    bool (*layout_resource_for_handle)(struct fd_resource *rsc,
                                       struct winsys_handle *handle);

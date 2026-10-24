@@ -277,6 +277,7 @@ clear_with_quad(struct gl_context *ctx, unsigned clear_buffers)
 
    cso_set_stream_outputs(cso, 0, NULL, NULL, 0);
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    st->clear.raster.multisample = st->state.fb_num_samples > 1;
    cso_set_rasterizer(cso, &st->clear.raster);

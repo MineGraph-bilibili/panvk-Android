@@ -38,6 +38,7 @@
         - src/amd/ci/$GPU_VERSION-vkd3d-fails.txt
         - src/amd/ci/$GPU_VERSION-vkd3d-flakes.txt
         - src/amd/ci/$GPU_VERSION-vkd3d-skips.txt
+        - src/amd/ci/radv-validate-cache.sh
         - src/amd/common/**/*
         - src/amd/common/nir/**/*
         - src/amd/compiler/**/*
@@ -230,10 +231,6 @@
     HWCI_KERNEL_MODULES: amdgpu
     KERNEL_IMAGE_TYPE: ""
     RUNNER_TAG: mesa-ci-x86-64-lava-asus-CM1400CXA-dalboz
-    # Force fixed 6.6 kernel, amdgpu doesn't revcover from GPU resets on 6.13
-    # https://gitlab.freedesktop.org/drm/amd/-/issues/3861
-    # https://gitlab.freedesktop.org/mesa/mesa/-/issues/12676
-    KERNEL_TAG: "v6.6.21-mesa-1978"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/lenovo-TPad-C13-Yoga-zork
 .lava-lenovo-TPad-C13-Yoga-zork:x86_64:
@@ -247,10 +244,6 @@
     HWCI_KERNEL_MODULES: amdgpu
     KERNEL_IMAGE_TYPE: ""
     RUNNER_TAG: mesa-ci-x86-64-lava-lenovo-TPad-C13-Yoga-zork
-    # Force fixed 6.6 kernel, amdgpu doesn't revcover from GPU resets on 6.13
-    # https://gitlab.freedesktop.org/drm/amd/-/issues/3861
-    # https://gitlab.freedesktop.org/mesa/mesa/-/issues/12676
-    KERNEL_TAG: "v6.6.21-mesa-1978"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/hp-x360-14a-cb0001xx-zork
 .lava-hp-x360-14a-cb0001xx-zork:x86_64:
@@ -264,10 +257,6 @@
     HWCI_KERNEL_MODULES: amdgpu
     KERNEL_IMAGE_TYPE: ""
     RUNNER_TAG: mesa-ci-x86-64-lava-hp-x360-14a-cb0001xx-zork
-    # Force fixed 6.6 kernel, amdgpu doesn't revcover from GPU resets on 6.13
-    # https://gitlab.freedesktop.org/drm/amd/-/issues/3861
-    # https://gitlab.freedesktop.org/mesa/mesa/-/issues/12676
-    KERNEL_TAG: "v6.6.21-mesa-1978"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/dell-latitude-3445-7520c-skyrim
 .lava-dell-latitude-3445-7520c-skyrim:x86_64:
@@ -298,8 +287,16 @@
     RUNNER_TAG: mesa-ci-x86-64-lava-acer-cp514-3wh-r0qs-guybrush
     VK_DRIVER: radeon
     LAVA_FIRMWARE: amdgpu
-    # Force fixed 6.6 kernel
-    KERNEL_TAG: "v6.6.21-mesa-1978"
+
+
+############### Common
+.amdgpu.ko-common:
+  variables:
+    # Increase the timeout for GFX/COMPUTE to 10s to avoid spurious GPU hangs.
+    AMDGPU_COMMON_CMDLINE: 'amdgpu.lockup_timeout=10000,10000,0,0'
+
+    # Make sure to use the same kernel across all the amdgpu.ko jobs
+    KERNEL_TAG: "v6.17-mesa-47cd"
 
 
 ############### LAVA
@@ -311,6 +308,7 @@
 
 .radeonsi-stoney-test:x86_64:
   extends:
+    - .amdgpu.ko-common
     - .stoney-test:x86_64
     - .lava-acer-R721T-grunt:x86_64
     - .radeonsi-collabora-rules
@@ -319,36 +317,44 @@
     DRIVER_NAME: radeonsi
     PIGLIT_PLATFORM: mixed_glx_egl
     ACO_DEBUG: validateir,validatera
+    LAVA_CMDLINE: "${AMDGPU_COMMON_CMDLINE}"
 
 .radv-stoney-test:x86_64:
   extends:
+    - .amdgpu.ko-common
     - .stoney-test:x86_64
     - .lava-hp-14-db0003na-grunt:x86_64
     - .radv-collabora-rules
   variables:
     DRIVER_NAME: radv
     GPU_VERSION: radv-stoney
+    LAVA_CMDLINE: "${AMDGPU_COMMON_CMDLINE}"
 
 .radeonsi-raven-test:x86_64:
   extends:
+    - .amdgpu.ko-common
     - .radeonsi-collabora-rules
   variables:
     GPU_VERSION: radeonsi-raven
     DRIVER_NAME: radeonsi
     LAVA_FIRMWARE: amdgpu-lava
     ACO_DEBUG: validateir,validatera
+    LAVA_CMDLINE: "${AMDGPU_COMMON_CMDLINE}"
 
 .radv-raven-test:x86_64:
   extends:
+    - .amdgpu.ko-common
     - .radv-collabora-rules
   variables:
     DRIVER_NAME: radv
     GPU_VERSION: radv-raven
     VK_DRIVER: radeon
     LAVA_FIRMWARE: amdgpu-lava
+    LAVA_CMDLINE: "${AMDGPU_COMMON_CMDLINE}"
 
 .amd-raven-test:x86_64:
   extends:
+    - .amdgpu.ko-common
     - .radeonsi+radv-rules
   variables:
     DRIVER_NAME: radeonsi
@@ -356,23 +362,36 @@
     VK_DRIVER: radeon
     LAVA_FIRMWARE: amdgpu-lava
     ACO_DEBUG: validateir,validatera
+    LAVA_CMDLINE: "${AMDGPU_COMMON_CMDLINE}"
 
 .radv-cezanne-test:x86_64:
   extends:
+    - .amdgpu.ko-common
     - .lava-acer-cp514-3wh-r0qs-guybrush:x86_64
   variables:
     DRIVER_NAME: radv
     GPU_VERSION: radv-cezanne
+    LAVA_CMDLINE: "${AMDGPU_COMMON_CMDLINE}"
 
 ############### CI-tron
 .ci-tron-test-amdgpu:
+  extends:
+    - .amdgpu.ko-common
   variables:
     CI_TRON_PATTERN__JOB_WARN__REGEX: 'ring .* timeout'
-    CI_TRON_KERNEL__URL: "https://fs.mupuf.org/radv/linux-6.17.3_w_buddy_fixes/linux-x86_64"
-    CI_TRON_INITRAMFS__DEPMOD__URL: "https://fs.mupuf.org/radv/linux-6.17.3_w_buddy_fixes/linux-x86_64.depmod.cpio.xz"
-    CI_TRON_INITRAMFS__GPU__URL: "https://fs.mupuf.org/radv/linux-6.17.3_w_buddy_fixes/linux-x86_64.gpu_amdgpu.cpio"
-    CI_TRON_INITRAMFS__GPU__FORMAT__0__ARCHIVE__KEEP__0__PATH: "(lib/(modules|firmware/amdgpu)/.*)"
+
+    # Kernel and modules
+    CI_TRON_KERNEL__URL: "$KERNEL_IMAGE_BASE/x86_64/bzImage"
+    CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__MODULES__URL: '$KERNEL_IMAGE_BASE/x86_64/modules.tar'
+    CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__MODULES__FORMAT__0__ARCHIVE__EXTENSION: 'cpio'
+    CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__MODULES__FORMAT__0__ARCHIVE__KEEP__0__PATH: '.*'
+
+    # Firmware
+    CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__FW__URL: 'https://${S3_BASE_PATH}/${FIRMWARE_REPO}/amdgpu-${FIRMWARE_TAG}.tar'
+    CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__FW__FORMAT__0__ARCHIVE__EXTENSION: 'cpio'
+    CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__FW__FORMAT__0__ARCHIVE__KEEP__0__PATH: '.*'
     CI_TRON_KERNEL_CMDLINE__LOAD_MODULES: 'modules_load=amdgpu'
+    CI_TRON_KERNEL_CMDLINE__AMDGPU_COMMON: "${AMDGPU_COMMON_CMDLINE}"
   tags:
     - farm:$RUNNER_FARM_LOCATION
     - $CI_TRON_DUT_SETUP_TAGS

@@ -29,6 +29,7 @@
 #include "util/u_math.h"
 #include "util/u_inlines.h"
 #include "lp_texture.h"
+#include "lp_texture_handle.h"
 
 static bool
 binding_has_immutable_samplers(const VkDescriptorSetLayoutBinding *binding)
@@ -326,7 +327,7 @@ get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_
 
    simple_mtx_lock(&device->queue.lock);
 
-   struct lp_texture_handle *handle = (void *)(uintptr_t)ctx->create_texture_handle(ctx, view, NULL);
+   struct lp_texture_handle *handle = llvmpipe_create_texture_handle(device->pscreen, view, NULL);
    util_dynarray_append(&device->bda_texture_handles, handle);
 
    simple_mtx_unlock(&device->queue.lock);
@@ -350,7 +351,7 @@ get_image_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_t 
 
    simple_mtx_lock(&device->queue.lock);
 
-   struct lp_texture_handle *handle = (void *)(uintptr_t)ctx->create_image_handle(ctx, &view);
+   struct lp_texture_handle *handle = llvmpipe_create_image_handle(device->pscreen, &view);
    util_dynarray_append(&device->bda_image_handles, handle);
 
    simple_mtx_unlock(&device->queue.lock);

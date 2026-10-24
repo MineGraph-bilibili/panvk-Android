@@ -477,6 +477,18 @@ isl_get_render_compression_format(enum isl_format format)
    case ISL_FORMAT_R8_SNORM:
    case ISL_FORMAT_R8_SINT:
       return 0x19;
+
+   /* These formats are not in the Enumeration_RenderCompressionFormat section
+    * in Bspec 53726. So, we align our mappings with the Xe2+ version of this
+    * function.
+    */
+   case ISL_FORMAT_L8A8_UNORM_SRGB:
+      return 0xA;  /* R8G8_UNORM */
+   case ISL_FORMAT_L8_UNORM_SRGB:
+      return 0x18; /* R8_UNORM */
+   case ISL_FORMAT_R9G9B9E5_SHAREDEXP:
+      return 0xD;  /* R11G11B10_FLOAT */
+
    default:
       UNREACHABLE("Unsupported render compression format!");
       return 0;

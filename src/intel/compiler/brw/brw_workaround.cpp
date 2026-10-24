@@ -87,8 +87,9 @@ brw_workaround_emit_dummy_mov_mulmac(brw_shader &s)
 
       /* Issue 2 */
       else if ((!IS_MUL_CLASS(prev_inst) && !IS_MACL_CLASS(prev_inst)) &&
-               (IS_MACL_CLASS(inst) && IS_FLAT(inst, 1)) &&
-               (prev_inst->sources && phys_nr(s.devinfo, inst->src[1]) ==
+               (prev_inst->sources > 1 &&
+                IS_MACL_CLASS(inst) && IS_FLAT(inst, 1)) &&
+               (phys_nr(s.devinfo, inst->src[1]) ==
                 phys_nr(s.devinfo, prev_inst->src[1]))) {
          emit_mov = true;
       }
@@ -199,6 +200,7 @@ brw_workaround_memory_fence_before_eot(brw_shader &s)
       dummy_fence->mlen = reg_unit(s.devinfo);
       dummy_fence->ex_mlen = 0;
       dummy_fence->sfid = GEN_SFID_UGM;
+      assert(!s.key->use_efficient_64bit);
       dummy_fence->size_written = REG_SIZE * reg_unit(s.devinfo);
       dummy_fence->desc = lsc_fence_msg_desc(s.devinfo, LSC_FENCE_TILE,
                                              LSC_FLUSH_TYPE_NONE_6, false) |

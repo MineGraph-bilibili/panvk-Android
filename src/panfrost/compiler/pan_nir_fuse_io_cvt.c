@@ -50,7 +50,8 @@ reinsert_mp_cvt(nir_builder *b, nir_instr *instr, nir_def *def)
 }
 
 static bool
-op_supports_cvt_fusion(nir_intrinsic_instr *instr, uint64_t gpu_id)
+op_supports_cvt_fusion(nir_shader *s, nir_intrinsic_instr *instr,
+                       uint64_t gpu_id, bool *is_vary)
 {
    /* We might also convert LD_CVT but I haven't seen any case where it's
     * useful, maybe enable it when we have a case to check it on.
@@ -62,12 +63,22 @@ op_supports_cvt_fusion(nir_intrinsic_instr *instr, uint64_t gpu_id)
           * just change the interpolation semantics at highp.  mediump on the
           * other hand lets us juggle between 32 and 16 bits freely.
           */
+         *is_vary = true;
          return nir_intrinsic_io_semantics(instr).medium_precision;
       case nir_intrinsic_load_var_flat_pan:
+         *is_vary = true;
          return true;
       case nir_intrinsic_load_var_buf_flat_pan:
          /* TODO: v14 can even fuse flat buf conversions */
          return false;
+      /* Same Panfrost vs PanVK */
+      case nir_intrinsic_load_attr_pan:
+         *is_vary = false;
+         /* Be wary of the descriptor type, we cannot convert an int to a float
+          * with different width, so a LD_ATTR.i32 + f2f16 cannot be fused.
+          */
+         nir_alu_type dst_type = nir_intrinsic_dest_type(instr);
+         return nir_alu_type_get_base_type(dst_type) == nir_type_float;
       default:
          return false;
    }
@@ -82,7 +93,8 @@ static bool
 fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr,
               const struct fuse_ctx *ctx)
 {
-   if (!op_supports_cvt_fusion(intr, ctx->gpu_id))
+   bool is_varying;
+   if (!op_supports_cvt_fusion(b->shader, intr, ctx->gpu_id, &is_varying))
       return false;
 
    unsigned orig_bit_size = intr->def.bit_size;
@@ -105,11 +117,11 @@ fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr,
       nir_alu_type base_type = nir_get_glsl_base_type_for_nir_type(dest_type);
       nir_intrinsic_set_dest_type(intr, nir_type_float | converted_bit_size);
 
-      if (base_type != nir_type_float) {
+      if (base_type != nir_type_float && is_varying) {
          const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
 
          /* Right now we have int descriptors, but the loaded value is always
-          * used as a flot, no harm in just "promoting" it to float.  The cast
+          * used as a float, no harm in just "promoting" it to float.  The cast
           * is to discard the const modifier, this is safe.
           */
          struct pan_varying_slot *slot = (struct pan_varying_slot *)

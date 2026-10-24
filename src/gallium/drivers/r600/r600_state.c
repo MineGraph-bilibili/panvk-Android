@@ -2492,9 +2492,14 @@ void r600_update_ps_state(struct pipe_context *ctx, struct r600_pipe_shader *sha
 		if (varying_slot == VARYING_SLOT_COL0)
 			tmp |= S_028644_DEFAULT_VAL(3);
 
+		/* INTERP_MODE_NONE is used for default color interpolation too; only
+		 * treat color inputs as flatshade-dependent to match old TGSI_COLOR.
+		 */
 		if (varying_slot == VARYING_SLOT_POS ||
-			rshader->input[i].interpolate == TGSI_INTERPOLATE_CONSTANT ||
-			(rshader->input[i].interpolate == TGSI_INTERPOLATE_COLOR && flatshade))
+			rshader->input[i].interpolate == INTERP_MODE_FLAT ||
+			(rshader->input[i].interpolate == INTERP_MODE_NONE && flatshade &&
+			 ((varying_slot >= VARYING_SLOT_COL0 && varying_slot <= VARYING_SLOT_COL1) ||
+			  (varying_slot >= VARYING_SLOT_BFC0 && varying_slot <= VARYING_SLOT_BFC1))))
 			tmp |= S_028644_FLAT_SHADE(1);
 
 		if (varying_slot == VARYING_SLOT_PNTC ||
@@ -2503,13 +2508,13 @@ void r600_update_ps_state(struct pipe_context *ctx, struct r600_pipe_shader *sha
 			tmp |= S_028644_PT_SPRITE_TEX(1);
 		}
 
-		if (rshader->input[i].interpolate_location == TGSI_INTERPOLATE_LOC_CENTROID)
+		if (rshader->input[i].interpolate_location == R600_INTERP_LOC_CENTROID)
 			tmp |= S_028644_SEL_CENTROID(1);
 
-		if (rshader->input[i].interpolate_location == TGSI_INTERPOLATE_LOC_SAMPLE)
+		if (rshader->input[i].interpolate_location == R600_INTERP_LOC_SAMPLE)
 			tmp |= S_028644_SEL_SAMPLE(1);
 
-		if (rshader->input[i].interpolate == TGSI_INTERPOLATE_LINEAR) {
+		if (rshader->input[i].interpolate == INTERP_MODE_NOPERSPECTIVE) {
 			need_linear = 1;
 			tmp |= S_028644_SEL_LINEAR(1);
 		}
@@ -2564,10 +2569,10 @@ void r600_update_ps_state(struct pipe_context *ctx, struct r600_pipe_shader *sha
 	spi_input_z = 0;
 	if (pos_index != -1) {
 		spi_ps_in_control_0 |= (S_0286CC_POSITION_ENA(1) |
-					S_0286CC_POSITION_CENTROID(rshader->input[pos_index].interpolate_location == TGSI_INTERPOLATE_LOC_CENTROID) |
+					S_0286CC_POSITION_CENTROID(rshader->input[pos_index].interpolate_location == R600_INTERP_LOC_CENTROID) |
 					S_0286CC_POSITION_ADDR(rshader->input[pos_index].gpr) |
 					S_0286CC_BARYC_SAMPLE_CNTL(1)) |
-					S_0286CC_POSITION_SAMPLE(rshader->input[pos_index].interpolate_location == TGSI_INTERPOLATE_LOC_SAMPLE);
+					S_0286CC_POSITION_SAMPLE(rshader->input[pos_index].interpolate_location == R600_INTERP_LOC_SAMPLE);
 		spi_input_z |= S_0286D8_PROVIDE_Z_TO_SPI(1);
 	}
 

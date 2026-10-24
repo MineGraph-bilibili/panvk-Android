@@ -1017,6 +1017,7 @@ associate_uniform_storage(struct gl_context *ctx,
          case GLSL_TYPE_COOPERATIVE_MATRIX:
          case GLSL_TYPE_FLOAT_E4M3FN:
          case GLSL_TYPE_FLOAT_E5M2:
+         case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
             assert(!"Should not get here.");
             break;
          }

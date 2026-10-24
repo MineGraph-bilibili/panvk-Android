@@ -75,7 +75,7 @@ anv_nir_update_resource_intel_block(nir_shader *shader)
 }
 
 struct lower_resource_state {
-   enum anv_descriptor_set_layout_type desc_type;
+   enum anv_shader_binding_mode binding_mode;
    const struct anv_physical_device *device;
 };
 
@@ -105,7 +105,7 @@ lower_resource_intel(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 
    /* Ignore binding table accesses & embedded samplers */
    if (is_embedded_sampler) {
-      assert(state->desc_type == ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_BUFFER);
+      assert(state->binding_mode == ANV_SHADER_BINDING_MODE_BUFFER);
       return false;
    }
 
@@ -117,37 +117,41 @@ lower_resource_intel(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    nir_def *set_offset = intrin->src[0].ssa;
    nir_def *binding_offset = intrin->src[1].ssa;
 
-   /* When using indirect descriptor, the surface handles are loaded from the
-    * descriptor buffer and do not need any offset.
-    */
-   if (state->desc_type == ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_DIRECT ||
-       state->desc_type == ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_BUFFER) {
-      if (!intel_has_extended_bindless(&state->device->info)) {
-         /* We're trying to reduce the number of instructions in the shaders
-          * to compute surface handles. The assumption is that we're using
-          * more surface handles than sampler handles (UBO, SSBO, images,
-          * etc...) so it's worth optimizing that case.
-          *
-          * Surface handles in the extended descriptor message have to be
-          * shifted left by 6 prior to ex_bso (bits 31:12 in extended
-          * descriptor, match bits 25:6 of the surface handle). We have to
-          * combine 2 parts in the shader to build the final surface handle,
-          * base offset of the descriptor set (in the push constant, located
-          * in resource_intel::src[0]) and the relative descriptor offset
-          * (resource_intel::src[1]).
-          *
-          * For convenience, up to here, resource_intel::src[1] is in bytes.
-          * We now have to shift it left by 6 to match the shifted left by 6
-          * done for the push constant value provided in
-          * resource_intel::src[0]. That way the shader can just do a single
-          * ADD and get the surface handle.
-          */
-         if (!is_sampler)
-            binding_offset = nir_ishl_imm(b, binding_offset, 6);
-      }
+   if (!state->device->uses_efficient_64bit) {
+      /* When using indirect descriptor, the surface handles are loaded from the
+       * descriptor buffer and do not need any offset.
+       */
+      if (state->binding_mode == ANV_SHADER_BINDING_MODE_LEGACY ||
+          state->binding_mode == ANV_SHADER_BINDING_MODE_BUFFER) {
+         if (!intel_has_extended_bindless(&state->device->info)) {
+            /* We're trying to reduce the number of instructions in the shaders
+             * to compute surface handles. The assumption is that we're using
+             * more surface handles than sampler handles (UBO, SSBO, images,
+             * etc...) so it's worth optimizing that case.
+             *
+             * Surface handles in the extended descriptor message have to be
+             * shifted left by 6 prior to ex_bso (bits 31:12 in extended
+             * descriptor, match bits 25:6 of the surface handle). We have to
+             * combine 2 parts in the shader to build the final surface handle,
+             * base offset of the descriptor set (in the push constant, located
+             * in resource_intel::src[0]) and the relative descriptor offset
+             * (resource_intel::src[1]).
+             *
+             * For convenience, up to here, resource_intel::src[1] is in bytes.
+             * We now have to shift it left by 6 to match the shifted left by 6
+             * done for the push constant value provided in
+             * resource_intel::src[0]. That way the shader can just do a single
+             * ADD and get the surface handle.
+             */
+            if (!is_sampler) {
+               set_offset = nir_ishl_imm(b, set_offset, 6);
+               binding_offset = nir_ishl_imm(b, binding_offset, 6);
+            }
+         }
 
-      nir_src_rewrite(&intrin->src[1],
-                      nir_iadd(b, set_offset, binding_offset));
+         nir_src_rewrite(&intrin->src[1],
+                         nir_iadd(b, set_offset, binding_offset));
+      }
    }
 
    /* Now unused values : set offset, array index */
@@ -160,10 +164,10 @@ lower_resource_intel(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 bool
 anv_nir_lower_resource_intel(nir_shader *shader,
                              const struct anv_physical_device *device,
-                             enum anv_descriptor_set_layout_type desc_type)
+                             enum anv_shader_binding_mode binding_mode)
 {
    struct lower_resource_state state = {
-      .desc_type = desc_type,
+      .binding_mode = binding_mode,
       .device = device,
    };
    return nir_shader_intrinsics_pass(shader, lower_resource_intel,

@@ -101,14 +101,16 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       def = nir_global_atomic(b, intr->def.bit_size,
                               calc_address(b, intr, opts),
                               intr->src[2].ssa,
-                              .atomic_op = nir_intrinsic_atomic_op(intr));
+                              .atomic_op = nir_intrinsic_atomic_op(intr),
+                              .access = nir_intrinsic_access(intr));
       break;
 
    case nir_intrinsic_ssbo_atomic_swap:
       def = nir_global_atomic_swap(b, intr->def.bit_size,
                                    calc_address(b, intr, opts),
                                    intr->src[2].ssa, intr->src[3].ssa,
-                                   .atomic_op = nir_intrinsic_atomic_op(intr));
+                                   .atomic_op = nir_intrinsic_atomic_op(intr),
+                                   .access = nir_intrinsic_access(intr));
       break;
 
    default:

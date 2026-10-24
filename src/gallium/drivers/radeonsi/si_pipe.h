@@ -168,6 +168,7 @@ enum
    DBG_USERQ_NO_SHADOW_REGS,
    DBG_NO_FAST_DISPLAY_LIST,
    DBG_NO_DMA_SHADERS,
+   DBG_IB_CACHES_FLUSH,
 
    /* 3D engine options: */
    DBG_NO_NGG,
@@ -196,10 +197,16 @@ enum
    DBG_FORCE_FAST_CLEAR,
 
    DBG_EXTRA_METADATA,
+   DBG_USERQ_JOB_LOG,
 
    DBG_TMZ,
    DBG_SQTT,
    DBG_EXPORT_MODIFIER,
+
+   /* Meta options disabling more and more performance optimizations. */
+   DBG_SAFE,
+   DBG_SAFER,
+   DBG_SAFEST,
 
    DBG_COUNT
 };
@@ -1513,17 +1520,13 @@ void si_cp_copy_data(struct si_context *sctx, struct radeon_cmdbuf *cs, unsigned
 MESAPROC bool si_init_cp_reg_shadowing(struct si_context *sctx) TAILBT;
 
 /* si_cp_utils.c */
-void si_cp_release_mem_pws(struct si_context *sctx, struct radeon_cmdbuf *cs,
-                           unsigned event_type, unsigned gcr_cntl);
-void si_cp_acquire_mem_pws(struct si_context *sctx, struct radeon_cmdbuf *cs,
-                           unsigned event_type, unsigned stage_sel, unsigned gcr_cntl,
-                           unsigned distance, unsigned sqtt_flush_flags);
 void si_cp_release_acquire_mem_pws(struct si_context *sctx, struct radeon_cmdbuf *cs,
                                    unsigned event_type, unsigned gcr_cntl, unsigned stage_sel,
                                    unsigned sqtt_flush_flags);
-void si_cp_acquire_mem(struct si_context *sctx, struct radeon_cmdbuf *cs, unsigned gcr_cntl,
-                       unsigned engine);
-void si_cp_pfp_sync_me(struct radeon_cmdbuf *cs);
+void si_cp_acquire_mem(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
+                       enum amd_ip_type ip_type, unsigned gcr_cntl,
+                       unsigned engine, unsigned *context_roll,
+                       enum ac_rgp_flush_bits *rgp_flush_bits);
 
 /* si_debug.c */
 void si_save_cs(struct radeon_winsys *ws, struct radeon_cmdbuf *cs, struct radeon_saved_cs *saved,
@@ -1543,13 +1546,13 @@ MESAPROC void si_gather_context_rolls(struct si_context *sctx) TAILV;
 MESAPROC void si_log_compute_state(struct si_context *sctx, struct u_log_context *log) TAILV;
 
 /* si_fence.c */
+uint64_t si_get_eop_bug_va(struct si_context *ctx, struct si_resource *buf,
+                           unsigned query_type);
 void si_cp_release_mem(struct si_context *ctx, struct radeon_cmdbuf *cs, unsigned event,
                        unsigned event_flags, unsigned dst_sel, unsigned int_sel, unsigned data_sel,
                        struct si_resource *buf, uint64_t va, uint32_t new_fence,
                        unsigned query_type);
 unsigned si_cp_write_fence_dwords(struct si_screen *screen);
-void si_cp_wait_mem(struct si_context *ctx, struct radeon_cmdbuf *cs, uint64_t va, uint32_t ref,
-                    uint32_t mask, unsigned flags);
 void si_init_fence_functions(struct si_context *ctx);
 void si_init_screen_fence_functions(struct si_screen *screen);
 struct pipe_fence_handle *si_create_fence(struct pipe_context *ctx,
@@ -2079,11 +2082,15 @@ si_update_ngg_cull_face_state(struct si_context *sctx)
    struct si_state_rasterizer *rs = sctx->queued.named.rasterizer;
 
    if (sctx->viewport0_y_inverted) {
-      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_FRONT, rs->ngg_cull_back);
-      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_BACK, rs->ngg_cull_front);
+      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_NEGATIVE_DETERMINANT,
+                rs->ngg_cull_face_positive_determinant);
+      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_POSITIVE_DETERMINANT,
+                rs->ngg_cull_face_negative_determinant);
    } else {
-      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_FRONT, rs->ngg_cull_front);
-      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_BACK, rs->ngg_cull_back);
+      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_NEGATIVE_DETERMINANT,
+                rs->ngg_cull_face_negative_determinant);
+      SET_FIELD(sctx->current_gs_state, GS_STATE_CULL_FACE_POSITIVE_DETERMINANT,
+                rs->ngg_cull_face_positive_determinant);
    }
 }
 
@@ -2107,7 +2114,7 @@ si_set_rasterized_prim(struct si_context *sctx, enum mesa_prim rast_prim,
          sctx->gs_out_prim = V_028A6C_LINESTRIP;
       } else if (is_rect) {
          /* Don't change the clip discard distance for rectangles. */
-         sctx->gs_out_prim = V_028A6C_RECTLIST;
+         sctx->gs_out_prim = sctx->gfx_level >= GFX11 ? V_030998_RECT_2D : V_028A6C_RECTLIST;
       } else {
          si_set_clip_discard_distance(sctx, 0);
          sctx->gs_out_prim = V_028A6C_TRISTRIP;

@@ -325,7 +325,7 @@ emit_indirect_generate_draw(struct iris_batch *batch,
 
 #if GFX_VER >= 30
       ps.RegistersPerThread =
-         brw_register_blocks(devinfo, fs_prog_data->base.grf_used);
+         intel_register_blocks(devinfo, fs_prog_data->base.grf_used);
 #endif
 
 #else
@@ -363,6 +363,10 @@ emit_indirect_generate_draw(struct iris_batch *batch,
       psx.PixelShaderComputesStencil = fs_data->computed_stencil;
 #endif
       psx.PixelShaderHasUAV = GFX_VER == 8;
+
+#if INTEL_WA_16030144090_GFX_VER
+      assert(!fs_data->is_per_sample);
+#endif
    }
 
    iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {

@@ -5,6 +5,7 @@
  */
 
 #include "aco_builder.h"
+#include "aco_interface.h"
 #include "aco_ir.h"
 
 #include "common/amdgfxregs.h"
@@ -36,14 +37,14 @@ struct asm_context {
    std::vector<branch_info> branches;
    std::map<unsigned, constaddr_info> constaddrs;
    std::map<unsigned, constaddr_info> resumeaddrs;
-   std::vector<struct aco_symbol>* symbols;
+   std::vector<struct aco_symbol>& symbols;
    uint32_t loop_preheader = -1u;
    uint32_t loop_latch = -1u;
    uint32_t loop_exit = -1u;
    const int16_t* opcode;
    // TODO: keep track of branch instructions referring blocks
    // and, when emitting the block, correct the offset in instr
-   asm_context(Program* program_, std::vector<struct aco_symbol>* symbols_)
+   asm_context(Program* program_, std::vector<struct aco_symbol>& symbols_)
        : program(program_), gfx_level(program->gfx_level), symbols(symbols_)
    {
       if (gfx_level <= GFX7)
@@ -1258,12 +1259,11 @@ emit_instruction(asm_context& ctx, std::vector<uint32_t>& out, Instruction* inst
       instr->operands[1] = Operand::literal32(instr->operands[1].constantValue());
    } else if (instr->opcode == aco_opcode::p_load_symbol) {
       assert(instr->operands[0].isConstant());
-      assert(ctx.symbols);
 
       struct aco_symbol info;
       info.id = (enum aco_symbol_id)instr->operands[0].constantValue();
       info.offset = out.size() + 1;
-      ctx.symbols->push_back(info);
+      ctx.symbols.push_back(info);
 
       instr->opcode = aco_opcode::s_mov_b32;
       /* in case it's an inline constant, make it a literal */
@@ -1481,15 +1481,17 @@ fix_exports(asm_context& ctx, std::vector<uint32_t>& out, Program* program)
       }
    }
 
-   /* GFX10+ FS may not export anything if no discard is used. */
-   bool may_skip_export = program->stage.hw == AC_HW_PIXEL_SHADER && program->gfx_level >= GFX10;
+   /* GFX10+ FS may not export anything if no discard is used.
+    * NGG should export nothing if gs_alloc_req declares 0 primitives.
+    */
+   bool may_skip_export = (program->stage.hw == AC_HW_PIXEL_SHADER ||
+                           program->stage.hw == AC_HW_NEXT_GEN_GEOMETRY_SHADER) &&
+                          program->gfx_level >= GFX10;
 
    if (!exported && !may_skip_export) {
       /* Abort in order to avoid a GPU hang. */
-      bool is_vertex_or_ngg = (program->stage.hw == AC_HW_VERTEX_SHADER ||
-                               program->stage.hw == AC_HW_NEXT_GEN_GEOMETRY_SHADER);
-      aco_err(program,
-              "Missing export in %s shader:", is_vertex_or_ngg ? "vertex or NGG" : "fragment");
+      aco_err(program, "Missing export in %s shader:",
+              program->stage.hw == AC_HW_VERTEX_SHADER ? "vertex" : "fragment");
       aco_print_program(program, stderr);
       abort();
    }
@@ -1530,11 +1532,9 @@ insert_code(asm_context& ctx, std::vector<uint32_t>& out, unsigned insert_before
          info.add_literal += insert_count;
    }
 
-   if (ctx.symbols) {
-      for (auto& symbol : *ctx.symbols) {
-         if (symbol.offset >= insert_before)
-            symbol.offset += insert_count;
-      }
+   for (auto& symbol : ctx.symbols) {
+      if (symbol.offset >= insert_before)
+         symbol.offset += insert_count;
    }
 }
 
@@ -1711,12 +1711,10 @@ fix_constaddrs(asm_context& ctx, std::vector<uint32_t>& out)
       constaddr_info& info = constaddr.second;
       out[info.add_literal] += (out.size() - info.getpc_end) * 4u;
 
-      if (ctx.symbols) {
-         struct aco_symbol sym;
-         sym.id = aco_symbol_const_data_addr;
-         sym.offset = info.add_literal;
-         ctx.symbols->push_back(sym);
-      }
+      struct aco_symbol sym;
+      sym.id = aco_symbol_const_data_addr;
+      sym.offset = info.add_literal;
+      ctx.symbols.push_back(sym);
    }
    for (auto& addr : ctx.resumeaddrs) {
       constaddr_info& info = addr.second;
@@ -1855,9 +1853,9 @@ emit_loop_latch(asm_context& ctx, std::vector<uint32_t>& code, Block& block)
    }
 }
 
-unsigned
-emit_program(Program* program, std::vector<uint32_t>& code, std::vector<struct aco_symbol>* symbols,
-             bool append_endpgm)
+void
+emit_program(Program* program, std::vector<uint32_t>& code, std::vector<struct aco_symbol>& symbols,
+             bool append_endpgm, aco_callback_params* params)
 {
    asm_context ctx(program, symbols);
 
@@ -1886,13 +1884,15 @@ emit_program(Program* program, std::vector<uint32_t>& code, std::vector<struct a
 
    fix_branches(ctx, code);
 
-   unsigned exec_size = code.size() * sizeof(uint32_t);
+   params->exec_size = code.size() * sizeof(uint32_t);
 
    /* Add end-of-code markers for the UMR disassembler. */
    if (append_endpgm)
       code.resize(code.size() + 5, 0xbf9f0000u);
 
    fix_constaddrs(ctx, code);
+
+   uint32_t constants_start = code.size();
 
    while (program->constant_data.size() % 4u)
       program->constant_data.push_back(0);
@@ -1905,7 +1905,12 @@ emit_program(Program* program, std::vector<uint32_t>& code, std::vector<struct a
             program->dev.scratch_alloc_granule);
    program->config->wgp_mode = program->wgp_mode;
 
-   return exec_size;
+   params->code = code.data();
+   params->code_dw = code.size();
+   params->constants = (uint8_t*)(code.data() + constants_start);
+   params->constants_size = program->constant_data.size();
+   params->symbols = symbols.data();
+   params->num_symbols = symbols.size();
 }
 
 } // namespace aco

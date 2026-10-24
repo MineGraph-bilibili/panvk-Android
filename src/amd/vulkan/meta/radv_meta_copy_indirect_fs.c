@@ -234,7 +234,7 @@ radv_gfx_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
          dst_image, pCopyMemoryToImageIndirectInfo->dstImageLayout, imageSubresource);
 
       if (!radv_is_buffer_format_supported(img_bsurf.format, NULL)) {
-         const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf, cmd_buffer->qf);
+         const uint32_t queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf);
          const VkFormat raw_format = vk_format_for_size(vk_format_get_blocksize(img_bsurf.format));
 
          if (!radv_dcc_formats_compatible(pdev->info.gfx_level, img_bsurf.format, raw_format, NULL) &&
@@ -291,7 +291,7 @@ radv_gfx_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
                .pNext = &iview_usage_info,
                .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                .image = radv_image_to_handle(dst_image),
-               .viewType = radv_meta_get_view_type(dst_image),
+               .viewType = radv_meta_get_view_type(dst_image, true),
                .format = format,
                .subresourceRange =
                   {

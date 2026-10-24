@@ -7,10 +7,16 @@
 #include "brw_eu.h"
 #include "brw_nir.h"
 
+struct state {
+   bool efficient_64bit;
+};
+
 static bool
 lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 {
-   unsigned max_bits = 0;
+   struct state *state = data;
+   uint32_t max_bits = UINT32_MAX;
+   enum lsc_addr_surface_type binding_type;
 
    switch (intrin->intrinsic) {
    case nir_intrinsic_load_ssbo_intel:
@@ -23,16 +29,24 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
          nir_def_is_intrinsic(binding->ssa) &&
          nir_def_as_intrinsic(binding->ssa)->intrinsic ==
          nir_intrinsic_resource_intel;
-      bool ss_binding = false;
       bool bti_is_const;
       if (has_resource) {
          nir_intrinsic_instr *resource =
             nir_def_as_intrinsic(binding->ssa);
-         ss_binding = (nir_intrinsic_resource_access_intel(resource) &
-                       nir_resource_intel_bindless) != 0;
          bti_is_const = nir_src_is_const(resource->src[1]);
+         binding_type =
+            (nir_intrinsic_resource_access_intel(resource) &
+             nir_resource_intel_bindless) != 0 ? LSC_ADDR_SURFTYPE_BSS :
+            (nir_intrinsic_resource_access_intel(resource) &
+             nir_resource_intel_internal) != 0 ? LSC_ADDR_SURFTYPE_SS :
+            LSC_ADDR_SURFTYPE_BTI;
       } else {
-         bti_is_const = nir_src_is_const(*nir_get_io_index_src(intrin));
+         if (state->efficient_64bit) {
+            binding_type = LSC_ADDR_SURFTYPE_BSS;
+         } else {
+            bti_is_const = nir_src_is_const(*nir_get_io_index_src(intrin));
+            binding_type = LSC_ADDR_SURFTYPE_BTI;
+         }
       }
       /* The BTI index and the base offset got into the extended descriptor
        * (see BSpec 63997 for the format).
@@ -54,18 +68,18 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
        * So put set max bits to 0 in that case and set the base offset to 0
        * since it's unusable.
        */
-      max_bits = ss_binding ? LSC_ADDRESS_OFFSET_SS_BITS :
-         bti_is_const ? LSC_ADDRESS_OFFSET_BTI_BITS : 0;
+      if (binding_type == LSC_ADDR_SURFTYPE_BTI && !bti_is_const)
+         max_bits = 0;
       break;
    }
    case nir_intrinsic_load_global_intel:
    case nir_intrinsic_store_global_intel:
    case nir_intrinsic_load_global_constant_uniform_block_intel:
-      max_bits = LSC_ADDRESS_OFFSET_FLAT_BITS;
+      binding_type = LSC_ADDR_SURFTYPE_FLAT;
       break;
    default:
       if (nir_is_shared_access(intrin)) {
-         max_bits = LSC_ADDRESS_OFFSET_FLAT_BITS;
+         binding_type = LSC_ADDR_SURFTYPE_FLAT;
          break;
       }
 
@@ -76,6 +90,8 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 
    if (nir_intrinsic_base(intrin) == 0)
       return false;
+
+   max_bits = MIN2(brw_max_immediate_offset_bits(binding_type, state->efficient_64bit), max_bits);
 
    b->cursor = nir_before_instr(&intrin->instr);
 
@@ -94,13 +110,27 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    const int32_t max = u_intN_max(max_bits);
 
    const int32_t base = nir_intrinsic_base(intrin);
-   if ((base % 4) == 0 && base >= min && base <= max)
+
+   /* Xe3P+ : BSpec 71885/72045: Global Offset
+    *    "Specified the signed global offset (in number of data size
+    *     elements) applied to all addresses in the message"
+    *
+    * We often convert 8/16bits to D8U32/D16U32, so don't go down lower than 4
+    * bytes.
+    *
+    * TODO: better predict what types are going to be used?
+    */
+   const unsigned alignment =
+      !state->efficient_64bit ? 4 :
+      brw_nir_intrinsic_data_element_size(intrin);
+
+   if ((base % alignment) == 0 && base >= min && base <= max)
       return false;
 
    int32_t addition = (base / (max + 1)) * (max + 1);
    int32_t new_base = base - addition;
 
-   int32_t unaligned = new_base % 4;
+   int32_t unaligned = new_base % alignment;
    addition += unaligned;
    new_base -= unaligned;
 
@@ -115,8 +145,11 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 }
 
 bool
-brw_nir_lower_immediate_offsets(nir_shader *shader)
+brw_nir_lower_immediate_offsets(nir_shader *shader, bool efficient_64bit)
 {
+   struct state state = {
+      .efficient_64bit = efficient_64bit,
+   };
    return nir_shader_intrinsics_pass(shader, lower_immediate_offsets,
-                                     nir_metadata_control_flow, NULL);
+                                     nir_metadata_control_flow, &state);
 }

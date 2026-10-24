@@ -93,7 +93,8 @@ __gen_unpack_float(const uint8_t *restrict cl, uint32_t start, uint32_t end)
    assert(start % 8 == 0);
    assert(end - start == 31);
 
-   struct PACKED { float f; } *f = (void *)(cl + (start / 8));
+   typedef struct PACKED { float f; } unpack_float_t;
+   unpack_float_t *f = (unpack_float_t *)(void *)(cl + (start / 8));
 
    return f->f;
 }

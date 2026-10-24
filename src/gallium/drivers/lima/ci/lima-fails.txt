@@ -235,11 +235,6 @@ spec@glsl-1.10@execution@built-in-functions@fs-log-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-mix-float-float-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-mod-float-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-float-float,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-int-int,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-ivec2-ivec2,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-ivec3-ivec3,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-ivec4-int,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-ivec4-ivec4,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-mat3-mat3,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-mat4-mat4,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-assign-div-vec3-vec3,Fail
@@ -249,13 +244,6 @@ spec@glsl-1.10@execution@built-in-functions@fs-op-div-float-mat2,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-div-float-mat3,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-div-float-mat4,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-div-float-vec3,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-div-int-int,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-div-int-ivec2,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-div-int-ivec4,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-div-ivec2-ivec2,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-div-ivec3-ivec3,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-div-ivec4-int,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-op-div-ivec4-ivec4,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-div-mat3-mat3,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-div-mat4-mat4,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-op-div-vec3-vec3,Fail
@@ -265,12 +253,6 @@ spec@glsl-1.10@execution@built-in-functions@fs-radians-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-sin-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-smoothstep-float-float-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-tan-float,Fail
-spec@glsl-1.10@execution@built-in-functions@vs-op-assign-div-ivec2-ivec2,Fail
-spec@glsl-1.10@execution@built-in-functions@vs-op-assign-div-ivec3-ivec3,Fail
-spec@glsl-1.10@execution@built-in-functions@vs-op-assign-div-ivec4-ivec4,Fail
-spec@glsl-1.10@execution@built-in-functions@vs-op-div-ivec2-ivec2,Fail
-spec@glsl-1.10@execution@built-in-functions@vs-op-div-ivec3-ivec3,Fail
-spec@glsl-1.10@execution@built-in-functions@vs-op-div-ivec4-ivec4,Fail
 spec@glsl-1.10@execution@clipping@clip-plane-transformation clipvert_pos,Fail
 spec@glsl-1.10@execution@clipping@clip-plane-transformation fixed,Fail
 spec@glsl-1.10@execution@clipping@clip-plane-transformation pos_clipvert,Fail

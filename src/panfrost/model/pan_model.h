@@ -93,10 +93,6 @@ struct pan_model {
 
 const struct pan_model *pan_get_model(uint64_t gpu_id, uint32_t gpu_variant);
 
-/* Conservative fallback for GPUs missing from the model table; NULL if the
- * architecture itself is unknown. */
-const struct pan_model *pan_get_fallback_model(uint64_t gpu_id);
-
 /* Returns the architecture version given a GPU ID, either from a table for
  * old-style Midgard versions or directly for new-style Bifrost/Valhall
  * versions */

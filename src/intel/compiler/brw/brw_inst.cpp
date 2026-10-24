@@ -176,6 +176,9 @@ brw_transform_inst(brw_shader &s, brw_inst *inst, enum opcode new_opcode,
          new_src[i] = inst->src[i];
       inst->src = new_src;
    }
+   /* Initialize newer srcs */
+   for (unsigned i = inst->sources; i < new_num_sources; i++)
+      inst->src[i] = brw_reg();
 
    if (new_kind != kind)
       memset(((char *)inst) + sizeof(brw_inst), 0, new_inst_size - sizeof(brw_inst));
@@ -195,6 +198,7 @@ brw_inst_kind_for_opcode(enum opcode opcode)
    case BRW_OPCODE_SENDS:
    case BRW_OPCODE_SENDC:
    case BRW_OPCODE_SENDSC:
+   case BRW_OPCODE_SENDG:
    case SHADER_OPCODE_SEND:
    case SHADER_OPCODE_SEND_GATHER:
    case SHADER_OPCODE_BARRIER:
@@ -260,6 +264,9 @@ bool
 brw_inst::is_control_source(unsigned arg) const
 {
    switch (opcode) {
+   case FS_OPCODE_FB_WRITE_LOGICAL:
+      return arg == FB_WRITE_LOGICAL_SRC_BINDING;
+
    case FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD:
       return arg == 0;
 
@@ -507,7 +514,8 @@ brw_inst::components_read(unsigned i) const
 
    case FS_OPCODE_FB_WRITE_LOGICAL:
       /* First/second FB write color. */
-      if (i < 2)
+      if (i == FB_WRITE_LOGICAL_SRC_COLOR0 ||
+          i == FB_WRITE_LOGICAL_SRC_COLOR1)
          return as_fb_write()->components;
       else
          return 1;
@@ -837,6 +845,7 @@ brw_inst::is_math() const
            opcode == SHADER_OPCODE_LOG2 ||
            opcode == SHADER_OPCODE_SIN ||
            opcode == SHADER_OPCODE_COS ||
+           opcode == SHADER_OPCODE_TANH ||
            opcode == SHADER_OPCODE_INT_QUOTIENT ||
            opcode == SHADER_OPCODE_INT_REMAINDER ||
            opcode == SHADER_OPCODE_POW);
@@ -942,6 +951,7 @@ brw_inst::can_do_saturate() const
    case BRW_OPCODE_SHL:
    case BRW_OPCODE_SHR:
    case SHADER_OPCODE_COS:
+   case SHADER_OPCODE_TANH:
    case SHADER_OPCODE_EXP2:
    case SHADER_OPCODE_LOG2:
    case SHADER_OPCODE_POW:

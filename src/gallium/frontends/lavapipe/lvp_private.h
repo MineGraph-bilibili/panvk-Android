@@ -232,8 +232,6 @@ struct lvp_device {
    uint32_t group_handle_alloc;
 
    struct vk_meta_device meta;
-   radix_sort_vk_t *radix_sort;
-   simple_mtx_t radix_sort_lock;
    struct vk_acceleration_structure_build_args accel_struct_args;
 };
 
@@ -832,7 +830,7 @@ VkResult
 lvp_image_init(struct lvp_device *device, struct lvp_image *image,
                const VkImageCreateInfo *pCreateInfo);
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 VkResult
 lvp_import_ahb_memory(struct lvp_device *device,
                       const VkMemoryAllocateInfo *alloc_info,

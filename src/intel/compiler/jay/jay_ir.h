@@ -74,7 +74,7 @@ jay_normalize_uflag(enum jay_file x)
 #define JAY_SENTINEL (0xffffffffu)
 
 /* Maximum number of words in an jay_def */
-#define JAY_MAX_DEF_LENGTH (128)
+#define JAY_MAX_DEF_LENGTH (256)
 
 /* Maximum number of sources/destinations other than for phis */
 #define JAY_MAX_SRCS                 (16)
@@ -82,7 +82,8 @@ jay_normalize_uflag(enum jay_file x)
 #define JAY_MAX_OPERANDS             (JAY_MAX_SRCS + JAY_MAX_DESTS)
 #define JAY_MAX_FLAGS                (8)
 #define JAY_MAX_SAMPLER_MESSAGE_SIZE (11)
-#define JAY_NUM_PHYS_GRF             (128)
+#define JAY_MAX_PHYS_GRF             (256)
+#define JAY_MAX_ACCUMS               (4)
 #define JAY_NUM_UGPR                 (1024)
 #define JAY_REG_BITS                 (17)
 
@@ -516,20 +517,6 @@ jay_type_is_any_float(enum jay_type t)
    return jay_base_type(t) == JAY_TYPE_F || jay_base_type(t) == JAY_TYPE_BF;
 }
 
-enum jay_predication : uint8_t {
-   /** No predication. */
-   JAY_NOT_PREDICATED = 0,
-
-   /**
-    * Predicated with no default value. Used post-RA and for instructions that
-    * do not write a destination.
-    */
-   JAY_PREDICATED = 1,
-
-   /** Predicated with 1 default value. Used pre-RA. */
-   JAY_PREDICATED_DEFAULT = 2,
-};
-
 /**
  * Representation of a shader instruction in the Jay IR.
  */
@@ -544,6 +531,12 @@ typedef struct jay_inst {
 
    /** Number of sources */
    uint8_t num_srcs;
+
+   /**
+    * Number of sources used for predication. 0 means unpredicated, 1 means
+    * predicated with no default values, 2/3 indicates default values.
+    */
+   uint8_t predication:2;
 
    /**
     * Indicates a uniform instruction executing on behalf of all active lanes.
@@ -571,7 +564,7 @@ typedef struct jay_inst {
     */
    bool zero_inactive:1;
 
-   bool saturate      :1;
+   bool saturate:1;
 
    /**
     * In a SIMD split instruction, whether the regdist dependency is replicated
@@ -582,9 +575,8 @@ typedef struct jay_inst {
     */
    bool replicate_dep:1;
    bool decrement_dep:1;
-   uint8_t padding   :1;
+   uint8_t padding   :7;
 
-   enum jay_predication predication;
    gen_condition conditional_mod;
 
    jay_def cond_flag; /**< conditional flag */
@@ -631,24 +623,11 @@ jay_has_src_mods(jay_inst *I, unsigned s)
    return jay_opcode_infos[I->op].src_mods & BITFIELD_BIT(s);
 }
 
-static inline bool
-jay_inst_has_default(jay_inst *I)
-{
-   return I->predication >= JAY_PREDICATED_DEFAULT;
-}
-
 static inline jay_def *
 jay_inst_get_predicate(jay_inst *I)
 {
    assert(I->predication);
    return &I->src[I->num_srcs - I->predication];
-}
-
-static inline jay_def *
-jay_inst_get_default(jay_inst *I)
-{
-   assert(jay_inst_has_default(I));
-   return &I->src[I->num_srcs - 1];
 }
 
 /* Must be included late since it depends on jay_inst but the rest of this file
@@ -694,8 +673,8 @@ jay_src_type(const jay_inst *I, unsigned s)
    /* TODO: Do we want to allow zero-extension generally? */
    if (I->op == JAY_OPCODE_AND_U32_U16)
       return JAY_TYPE_U16;
-   else if (I->op == JAY_OPCODE_AND_S32_SN && s == 1)
-      return jay_type(JAY_TYPE_S, jay_and_s32_sN_n(I));
+   else if (I->op == JAY_OPCODE_AND_SN_S32 && s == 0)
+      return jay_type(JAY_TYPE_S, jay_and_sN_s32_n(I));
 
    /* Mixed-signedness integer dot product opcode */
    if (I->op == JAY_OPCODE_DP4A_SU && s == 2)
@@ -707,14 +686,14 @@ jay_src_type(const jay_inst *I, unsigned s)
       return JAY_TYPE_U32;
 
    /* TODO: *maybe* find a less janky way of handling mixed bfloat op type
-    * restrictions? this *might* be the "least bad" option 
+    * restrictions? this *might* be the "least bad" option
     */
    if (I->type == JAY_TYPE_BF16) {
       /* Bspec 56640: src2 of 3-src instructions cannot be bfloat */
       if (jay_num_isa_srcs(I) == 3 && s == 2)
          return JAY_TYPE_F32;
       /* Bspec 56640: src1 of 2-src instructions involving multiplier
-       * cannot be bfloat 
+       * cannot be bfloat
        */
       if (jay_num_isa_srcs(I) == 2 && s == 1)
          return JAY_TYPE_F32;
@@ -722,6 +701,12 @@ jay_src_type(const jay_inst *I, unsigned s)
 
    /* Other instructions inherit the destination type. */
    return I->type;
+}
+
+static inline enum jay_type
+jay_operand_type(const jay_inst *I, signed idx)
+{
+   return idx < 0 ? I->type : jay_src_type(I, idx);
 }
 
 enum PACKED jay_stride {
@@ -744,7 +729,7 @@ enum jay_stride jay_src_stride_minmax(jay_inst *I, unsigned s, bool do_max);
 #define jay_foreach_ra_file(file)                                              \
    for (enum jay_file file = 0; file < JAY_NUM_RA_FILES; ++file)
 
-#define JAY_PARTITION_BLOCKS (6)
+#define JAY_PARTITION_BLOCKS (7)
 
 enum jay_block_type {
    JAY_BLOCK_NORMAL,
@@ -826,6 +811,11 @@ typedef struct jay_shader {
    bool helpers_tracked;
 
    /**
+    * Efficient 64bit mode (Gfx35+)
+    */
+   bool use_efficient_64bit;
+
+   /**
     * Ralloc linear context. Since we don't typically free as we go,
     * most allocations should go through this context for efficiency.
     */
@@ -835,10 +825,10 @@ typedef struct jay_shader {
    unsigned dispatch_width;
 
    /**
-    * Number of GPR/UGPRs used across all functions in the shader. This is the
+    * Number of registers used across all functions in the shader. This is the
     * limit that must be allocated for the shader.
     */
-   unsigned num_regs[JAY_NUM_RA_FILES];
+   unsigned num_regs[JAY_NUM_SSA_FILES];
 
    /**
     * Register file partition chosen for the whole shader.
@@ -846,7 +836,7 @@ typedef struct jay_shader {
    struct jay_partition partition;
 
    /** Current compilation phase (for printing & validation) */
-   bool post_ra;
+   bool post_ra, post_acc;
 } jay_shader;
 
 static inline jay_shader *
@@ -885,7 +875,7 @@ jay_ugpr_per_gpr(jay_shader *s)
 static inline unsigned
 jay_phys_flag_per_virt(jay_shader *s)
 {
-   return jay_grf_per_gpr(s);
+   return s->dispatch_width == 32 ? 2 : 1;
 }
 
 /*
@@ -902,9 +892,12 @@ jay_is_send_like(const jay_inst *I)
 }
 
 static inline bool
-jay_inst_is_unordered(const jay_inst *I)
+jay_inst_is_unordered(const struct intel_device_info *devinfo,
+                      const jay_inst *I)
 {
-   return I->op == JAY_OPCODE_SEND || I->op == JAY_OPCODE_DPAS;
+   return I->op == JAY_OPCODE_SEND ||
+          I->op == JAY_OPCODE_DPAS ||
+          (devinfo->ver < 20 && I->op == JAY_OPCODE_MATH);
 }
 
 /*
@@ -948,7 +941,7 @@ jay_src_alignment(jay_shader *shader, const jay_inst *I, unsigned s)
    }
 
    /* Undocumented HW restriction: All operands to an operation involving
-    * bfloats must be GRF-aligned. 
+    * bfloats must be GRF-aligned.
     */
    if (jay_src_type(I, s) == JAY_TYPE_BF16 || I->type == JAY_TYPE_BF16) {
       return jay_ugpr_per_grf(shader);
@@ -1027,6 +1020,11 @@ unsigned jay_simd_split(const jay_shader *s, const jay_inst *I);
 static inline unsigned
 jay_simd_width_logical(const jay_shader *s, const jay_inst *I)
 {
+   /* Handle uniform SENDs with SIMD > 1 (e.g. for txf combining) */
+   if (I->op == JAY_OPCODE_SEND && jay_send_explicit_simd_width(I) > 0) {
+      return jay_send_explicit_simd_width(I);
+   }
+
    bool simd1 = I->uniform && !I->broadcast_flag;
    unsigned base = simd1 ? 1 : s->dispatch_width;
 
@@ -1069,7 +1067,6 @@ jay_macro_length(const jay_inst *I)
    case JAY_OPCODE_MUL_32:
    case JAY_OPCODE_SHUFFLE:
    case JAY_OPCODE_VECTOR_EXTRACT:
-   case JAY_OPCODE_LOOP_ONCE:
       return 2;
 
    case JAY_OPCODE_SLICE_REPACK:
@@ -1078,17 +1075,6 @@ jay_macro_length(const jay_inst *I)
    default:
       return 1;
    }
-}
-
-static inline bool
-jay_is_no_mask(const jay_inst *I)
-{
-   return I->uniform ||
-          I->op == JAY_OPCODE_DESWIZZLE_EVEN ||
-          I->op == JAY_OPCODE_DESWIZZLE_ODD ||
-          I->op == JAY_OPCODE_OFFSET_PACKED_PIXEL_COORDS ||
-          I->op == JAY_OPCODE_DPAS ||
-          I->op == JAY_OPCODE_SLICE_REPACK;
 }
 
 /**
@@ -1139,14 +1125,22 @@ jay_shader_get_entrypoint(jay_shader *s)
 }
 
 static inline unsigned
-jay_num_regs(jay_shader *shader, enum jay_file file)
+jay_num_flags(jay_shader *shader)
 {
-   assert(file < JAY_NUM_SSA_FILES);
+   if (shader->devinfo->ver < 20) {
+      /* Even in SIMD8 mode, only 4 flags are usable */
+      return shader->dispatch_width == 32 ? 2 : 4;
+   } else {
+      return shader->dispatch_width == 32 ? 4 : 8;
+   }
+}
 
-   if (file < JAY_NUM_RA_FILES)
-      return shader->num_regs[file];
-   else
-      return 1 /* TODO: We don't have address or accumulator RA yet */;
+static inline unsigned
+jay_num_accums(jay_shader *shader)
+{
+   /* TODO: Adjust for older platforms */
+   unsigned total_grf = 4;
+   return total_grf / jay_grf_per_gpr(shader);
 }
 
 static inline enum jay_stride
@@ -1154,6 +1148,16 @@ jay_def_stride(const jay_shader *shader, jay_def x)
 {
    assert(x.file == GPR);
    return jay_lookup_block(&shader->partition, x.reg, GPR).stride;
+}
+
+static inline enum jay_type
+jay_flag_type(jay_function *func)
+{
+   /* Flags can only be addressed as UW or UD as ARF sources, so we use 16-bit
+    * values for flags even in SIMD8 - going smaller is pointless and opens us
+    * up to GEN's many wonderful byte regioning restrictions.
+    */
+   return jay_type(JAY_TYPE_U, MAX2(func->shader->dispatch_width, 16));
 }
 
 /* Represents an allocated register number with file in the top 3 bits. */
@@ -1164,6 +1168,21 @@ struct jay_temp_regs {
    jay_reg gpr, gpr2, ugpr;
 };
 
+/** Optimized dynamic array for storing predecessors/successors */
+struct jay_cfg_edge {
+   struct util_dynarray arr;
+   void *_storage[2];
+};
+
+/** Indices of jay_block::cfg_edges */
+enum jay_cfg_edge_type {
+   JAY_LOGICAL_PREDS  = 0x00,
+   JAY_PHYSICAL_PREDS = JAY_LOGICAL_PREDS | JAY_UNIFORM,
+   JAY_LOGICAL_SUCCS  = 0x02,
+   JAY_PHYSICAL_SUCCS = JAY_LOGICAL_SUCCS | JAY_UNIFORM,
+   JAY_CFG_EDGE_MAX,
+};
+
 /**
  * A basic block representation
  */
@@ -1172,8 +1191,7 @@ typedef struct jay_block {
    struct list_head instructions;
 
    /** Control flow graph */
-   struct jay_block *logical_succs[2], *physical_succs[2];
-   struct util_dynarray logical_preds, physical_preds;
+   struct jay_cfg_edge cfg_edges[JAY_CFG_EDGE_MAX];
 
    /** Index of the block in source order */
    unsigned index;
@@ -1182,8 +1200,8 @@ typedef struct jay_block {
    struct u_sparse_bitset live_in;
    struct u_sparse_bitset live_out;
 
-   BITSET_DECLARE(postra_gpr_live_in, JAY_NUM_PHYS_GRF);
-   BITSET_DECLARE(postra_gpr_live_out, JAY_NUM_PHYS_GRF);
+   BITSET_DECLARE(postra_gpr_live_in, JAY_MAX_PHYS_GRF);
+   BITSET_DECLARE(postra_gpr_live_out, JAY_MAX_PHYS_GRF);
 
    /* Last-use bit for each non-null index in each source in each instruction in
     * the block, source order, left-to-right.
@@ -1213,21 +1231,32 @@ typedef struct jay_block {
    /** True if all non-exited lanes execute this block together */
    bool uniform;
 
-   /** Pretty printing based on original structured control flow */
-   uint8_t indent;
-
    /* Register demand metadata calculated for scheduling use */
    unsigned demand_max[JAY_NUM_SSA_FILES];
    unsigned demand_out[JAY_NUM_SSA_FILES];
 } jay_block;
 
+static void
+_jay_block_destructor(void *_block)
+{
+   jay_block *block = (jay_block *) _block;
+   for (unsigned i = 0; i < JAY_CFG_EDGE_MAX; ++i) {
+      util_dynarray_fini(&block->cfg_edges[i].arr);
+   }
+}
+
 static inline jay_block *
 jay_new_block(jay_function *f)
 {
    jay_block *block = rzalloc(f, jay_block);
+   ralloc_set_destructor(block, &_jay_block_destructor);
 
-   util_dynarray_init(&block->logical_preds, block);
-   util_dynarray_init(&block->physical_preds, block);
+   for (unsigned i = 0; i < JAY_CFG_EDGE_MAX; ++i) {
+      util_dynarray_init_from_stack(&block->cfg_edges[i].arr,
+                                    block->cfg_edges[i]._storage,
+                                    sizeof(block->cfg_edges[i]._storage));
+   }
+
    list_inithead(&block->instructions);
 
    block->index = f->num_blocks++;
@@ -1255,13 +1284,13 @@ jay_block_ending_jump(jay_block *block)
 static inline struct util_dynarray *
 jay_predecessors(jay_block *blk, enum jay_file file)
 {
-   return file & JAY_UNIFORM ? &blk->physical_preds : &blk->logical_preds;
+   return &blk->cfg_edges[JAY_LOGICAL_PREDS | (file & JAY_UNIFORM)].arr;
 }
 
-static inline jay_block **
+static inline struct util_dynarray *
 jay_successors(jay_block *blk, enum jay_file file)
 {
-   return file & JAY_UNIFORM ? blk->physical_succs : blk->logical_succs;
+   return &blk->cfg_edges[JAY_LOGICAL_SUCCS | (file & JAY_UNIFORM)].arr;
 }
 
 static inline unsigned
@@ -1271,12 +1300,9 @@ jay_num_predecessors(jay_block *blk, enum jay_file file)
 }
 
 static inline unsigned
-jay_num_successors(jay_block *block, enum jay_file file)
+jay_num_successors(jay_block *blk, enum jay_file file)
 {
-   static_assert(ARRAY_SIZE(block->logical_succs) == 2);
-   static_assert(ARRAY_SIZE(block->physical_succs) == 2);
-
-   return !!jay_successors(block, file)[0] + !!jay_successors(block, file)[1];
+   return util_dynarray_num_elements(jay_successors(blk, file), jay_block *);
 }
 
 static inline jay_block *
@@ -1293,10 +1319,10 @@ jay_first_predecessor(jay_block *block, enum jay_file file)
 
 #define jay_worklist_push_head(w, block) u_worklist_push_head(w, block, index)
 #define jay_worklist_push_tail(w, block) u_worklist_push_tail(w, block, index)
-#define jay_worklist_peek_head(w)        u_worklist_peek_head(w, jay_block, index)
-#define jay_worklist_pop_head(w)         u_worklist_pop_head(w, jay_block, index)
-#define jay_worklist_peek_tail(w)        u_worklist_peek_tail(w, jay_block, index)
-#define jay_worklist_pop_tail(w)         u_worklist_pop_tail(w, jay_block, index)
+#define jay_worklist_peek_head(w) u_worklist_peek_head(w, jay_block, index)
+#define jay_worklist_pop_head(w)  u_worklist_pop_head(w, jay_block, index)
+#define jay_worklist_peek_tail(w) u_worklist_peek_tail(w, jay_block, index)
+#define jay_worklist_pop_tail(w)  u_worklist_pop_tail(w, jay_block, index)
 
 /* Iterators */
 
@@ -1363,20 +1389,8 @@ jay_first_predecessor(jay_block *block, enum jay_file file)
    jay_foreach_function(s, func)                                               \
       jay_foreach_inst_in_func_safe(func, v_block, inst)
 
-/*
- * Get the next successor, using the fact that there are at most 2 successors
- * and NULL successors cannot precede non-NULL successors.
- */
-static inline jay_block *
-jay_next_successor(jay_block *parent, enum jay_file file, jay_block *it)
-{
-   jay_block **succs = jay_successors(parent, file);
-   return succs[0] == it ? succs[1] : NULL;
-}
-
 #define jay_foreach_successor(blk, v, file)                                    \
-   for (jay_block *v = jay_successors(blk, file)[0]; v != NULL;                \
-        v = jay_next_successor(blk, file, v))
+   util_dynarray_foreach(jay_successors(blk, file), jay_block *, v)
 
 #define jay_foreach_predecessor(blk, v, file)                                  \
    util_dynarray_foreach(jay_predecessors(blk, file), jay_block *, v)
@@ -1446,9 +1460,7 @@ static inline jay_block *
 jay_first_block(jay_function *f)
 {
    assert(!list_is_empty(&f->blocks));
-   jay_block *first_block = list_first_entry(&f->blocks, jay_block, link);
-   assert(first_block->index == 0);
-   return first_block;
+   return list_first_entry(&f->blocks, jay_block, link);
 }
 
 static inline jay_inst *
@@ -1458,6 +1470,16 @@ jay_first_inst(jay_block *block)
       return NULL;
    else
       return list_first_entry(&block->instructions, jay_inst, link);
+}
+
+static inline jay_block *
+jay_first_successor(jay_block *block, enum jay_file file)
+{
+   if (!jay_num_successors(block, file))
+      return NULL;
+   else
+      return *util_dynarray_element(jay_successors(block, file),
+                                    jay_block *, 0);
 }
 
 static inline jay_block *
@@ -1493,32 +1515,36 @@ jay_next_block(jay_block *block)
    return list_first_entry(&(block->link), jay_block, link);
 }
 
+static inline bool
+jay_cfg_has_edge(jay_block *pred, jay_block *succ, enum jay_file file)
+{
+   jay_foreach_successor(pred, existing_succ, file) {
+      if (succ == *existing_succ) {
+         return true;
+      }
+   }
+
+   return false;
+}
+
 static inline void
 jay_block_add_successor(jay_block *block, jay_block *succ, enum jay_file file)
 {
    /* Prune duplicate successors so the caller doesn't need to worry */
-   jay_block **succs = jay_successors(block, file);
-   if (succs[0] == succ || succs[1] == succ) {
+   if (jay_cfg_has_edge(block, succ, file)) {
       return;
    }
 
-   unsigned i = succs[0] ? 1 : 0;
-   assert(succ && succs[i] == NULL && "at most 2 successors");
+   assert(((file & JAY_UNIFORM) || jay_num_successors(block, file) < 2) &&
+          "at most 2 logical successors");
 
-   succs[i] = succ;
+   util_dynarray_append(jay_successors(block, file), succ);
    util_dynarray_append(jay_predecessors(succ, file), block);
 
    /* All logical CFG edges are also physical CFG edges */
    if (file == GPR) {
       jay_block_add_successor(block, succ, UGPR);
    }
-}
-
-static inline bool
-jay_cfg_has_edge(jay_block *pred, jay_block *succ, enum jay_file file)
-{
-   return jay_successors(pred, file)[0] == succ ||
-          jay_successors(pred, file)[1] == succ;
 }
 
 static inline unsigned

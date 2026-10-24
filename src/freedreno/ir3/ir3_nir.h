@@ -214,6 +214,20 @@ nir_io_offset ir3_nir_get_global_offset(nir_builder *b,
                                         struct ir3_compiler *compiler,
                                         nir_def *offset, unsigned offset_shift);
 
+/* Returns true if an intrinsic reading memory can be safely moved into the
+ * preamble. It's assumed the intrinsic is already reorderable. Either it must
+ * be always executed, or it must be safe to execute even if the original shader
+ * never executed it (i.e. it must be speculatable).
+ */
+static inline bool
+ir3_nir_is_prefetchable(nir_intrinsic_instr *intr)
+{
+   return intr->instr.block->cf_node.parent->type == nir_cf_node_function ||
+      (nir_intrinsic_access(intr) & ACCESS_CAN_SPECULATE);
+}
+
+bool ir3_nir_is_preamble_speculatable(nir_shader *s);
+
 ENDC;
 
 #endif /* IR3_NIR_H_ */

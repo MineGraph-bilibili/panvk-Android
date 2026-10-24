@@ -116,25 +116,37 @@ st_update_sample_state(struct st_context *st)
    unsigned sample_mask = 0xffffffff;
    unsigned sample_count = st->state.fb_num_samples;
 
+   float coverage = 1.0f;
+   bool coverage_invert = false;
+
    if (_mesa_is_multisample_enabled(st->ctx) && sample_count > 1) {
       /* unlike in gallium/d3d10 the mask is only active if msaa is enabled */
       if (st->ctx->Multisample.SampleCoverage) {
-         unsigned nr_bits = (unsigned)
-            (st->ctx->Multisample.SampleCoverageValue * (float) sample_count);
-         /* there's lot of ways how to do this. We just use first few bits,
-          * since we have no knowledge of sample positions here. When
-          * app-supplied mask though is used too might need to be smarter.
-          * Also, there's an interface restriction here in theory it is
-          * encouraged this mask not be the same at each pixel.
+         coverage = st->ctx->Multisample.SampleCoverageValue;
+         coverage_invert = st->ctx->Multisample.SampleCoverageInvert;
+
+         /* Hardware taking a coverage fraction gets the value untouched.
+          * Everyone else gets it folded into the mask, which quantizes it
+          * to the sample count.
           */
-         sample_mask = (1 << nr_bits) - 1;
-         if (st->ctx->Multisample.SampleCoverageInvert)
-            sample_mask = ~sample_mask;
+         if (!st->pipe->set_sample_coverage) {
+            unsigned nr_bits = (unsigned) (coverage * (float) sample_count);
+            /* there's lot of ways how to do this. We just use first few bits,
+             * since we have no knowledge of sample positions here. When
+             * app-supplied mask though is used too might need to be smarter.
+             * Also, there's an interface restriction here in theory it is
+             * encouraged this mask not be the same at each pixel.
+             */
+            sample_mask = (1 << nr_bits) - 1;
+            if (coverage_invert)
+               sample_mask = ~sample_mask;
+         }
       }
       if (st->ctx->Multisample.SampleMask)
          sample_mask &= st->ctx->Multisample.SampleMaskValue;
    }
 
+   cso_set_sample_coverage(st->cso_context, coverage, coverage_invert);
    cso_set_sample_mask(st->cso_context, sample_mask);
 
    update_sample_locations(st);

@@ -17,10 +17,6 @@
 /* TODO: Move slice.h into a proper common place. */
 #include "../mda/slice.h"
 
-#define EXECUTOR_GRF_COUNT 128
-#define EXECUTOR_RESERVED_GRF_START 124
-#define EXECUTOR_RESERVED_GRF_END 128
-
 typedef struct {
    uint32_t size;
    uint32_t handle;
@@ -122,6 +118,7 @@ typedef struct {
    void *tmp_ctx;
 
    slice original_src;
+   uint32_t hw_regs;
    uint32_t hw_threads;
    uint32_t thread_groups;
    uint32_t simd;

@@ -248,8 +248,8 @@ scan_cf_list_for_invoc0(struct exec_list *cf_list,
             nir_op op = nir_scalar_alu_op(cond);
 
             if (op == nir_op_ieq) {
-               nir_scalar src[] = { nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 0)),
-                                    nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 1)) };
+               nir_scalar src[] = { nir_scalar_chase_alu_src(cond, 0),
+                                    nir_scalar_chase_alu_src(cond, 1) };
                for (unsigned i = 0; i < 2; i++) {
                   if (nir_scalar_is_const(src[i]) && nir_scalar_is_intrinsic(src[!i]) &&
                       nir_scalar_as_uint(src[i]) == 0 &&
@@ -258,8 +258,8 @@ scan_cf_list_for_invoc0(struct exec_list *cf_list,
                   }
                }
             } else if (op == nir_op_ilt || op == nir_op_ult) {
-               nir_scalar src0 = nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 0));
-               nir_scalar src1 = nir_scalar_chase_movs(nir_scalar_chase_alu_src(cond, 1));
+               nir_scalar src0 = nir_scalar_chase_alu_src(cond, 0);
+               nir_scalar src1 = nir_scalar_chase_alu_src(cond, 1);
                if (nir_scalar_is_const(src1) && nir_scalar_is_intrinsic(src0) &&
                    nir_scalar_as_uint(src1) == 1 &&
                    nir_scalar_intrinsic_op(src0) == nir_intrinsic_load_invocation_id) {

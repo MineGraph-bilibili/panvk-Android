@@ -41,7 +41,9 @@ struct ac_sqtt {
    void *bo;
    uint64_t buffer_va;
    void *ptr;
+   /* Per-SE, aligned size */
    uint32_t buffer_size;
+   bool capture_cancelled;
    int start_frame;
    char *trigger_file;
    bool instruction_timing_enabled;
@@ -528,9 +530,9 @@ struct rgp_sqtt_marker_pipeline_bind {
       struct {
          uint32_t identifier : 4;
          uint32_t ext_dwords : 3;
-         uint32_t bind_point : 1;
+         uint32_t bind_point : 2;
          uint32_t cb_id : 20;
-         uint32_t reserved : 4;
+         uint32_t reserved : 3;
       };
       uint32_t dword01;
    };

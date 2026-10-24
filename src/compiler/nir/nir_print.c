@@ -1293,6 +1293,7 @@ static const char *sampler_dim_name[] = {
    [GLSL_SAMPLER_DIM_RECT] = "Rect",
    [GLSL_SAMPLER_DIM_BUF] = "Buf",
    [GLSL_SAMPLER_DIM_EXTERNAL] = "External",
+   [GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y] = "External-2D-Y2Y",
    [GLSL_SAMPLER_DIM_MS] = "2D-MSAA",
    [GLSL_SAMPLER_DIM_SUBPASS] = "Subpass",
    [GLSL_SAMPLER_DIM_SUBPASS_MS] = "Subpass-MSAA",
@@ -1334,15 +1335,23 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
    if (num_srcs)
       fprintf(fp, ")");
 
+   unsigned num_printed_indices = 0;
+
    for (unsigned i = 0; i < info->num_indices; i++) {
       unsigned idx = info->indices[i];
 
-      /* Skip "general" to denoise since it is the unremarkable default case */
+      /* Skip some unremarkable default cases. */
       if (idx == NIR_INTRINSIC_PREAMBLE_CLASS &&
           nir_intrinsic_preamble_class(instr) == nir_preamble_class_general)
          continue;
+      if (idx == NIR_INTRINSIC_ARG_NUM_LSB_ZERO &&
+          nir_intrinsic_arg_num_lsb_zero(instr) == 0)
+         continue;
+      if (idx == NIR_INTRINSIC_ARG_UPPER_BOUND_U32_AMD &&
+          nir_intrinsic_arg_upper_bound_u32_amd(instr) == 0)
+         continue;
 
-      if (i == 0)
+      if (num_printed_indices++ == 0)
          fprintf(fp, " (");
       else
          fprintf(fp, ", ");
@@ -1553,7 +1562,7 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
          case nir_intrinsic_load_per_vertex_input:
          case nir_intrinsic_load_input_vertex:
          case nir_intrinsic_load_coefficients_agx:
-         case nir_intrinsic_load_attribute_pan:
+         case nir_intrinsic_load_attr_pan:
          case nir_intrinsic_load_fs_coeffs_pco:
             mode = nir_var_shader_in;
             break;
@@ -1868,7 +1877,7 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
       }
       }
    }
-   if (info->num_indices)
+   if (num_printed_indices)
       fprintf(fp, ")");
 
    if (!state->shader)
@@ -2187,8 +2196,16 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
       fprintf(fp, ", texture non-uniform");
    }
 
+   if (instr->texture_2_non_uniform) {
+      fprintf(fp, ", texture 2 non-uniform");
+   }
+
    if (instr->sampler_non_uniform) {
       fprintf(fp, ", sampler non-uniform");
+   }
+
+   if (instr->sampler_2_non_uniform) {
+      fprintf(fp, ", sampler 2 non-uniform");
    }
 
    if (instr->is_sparse) {

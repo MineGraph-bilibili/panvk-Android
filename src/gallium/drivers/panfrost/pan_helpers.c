@@ -87,7 +87,7 @@ panfrost_get_index_buffer(struct panfrost_batch *batch,
 
    if (!info->has_user_indices) {
       /* Only resources can be directly mapped */
-      panfrost_batch_read_rsrc(batch, rsrc, MESA_SHADER_VERTEX);
+      panfrost_batch_read_rsrc(batch, rsrc);
       return rsrc->plane.base + offset;
    } else {
       /* Otherwise, we need to upload to transient memory */
@@ -261,13 +261,12 @@ panfrost_set_batch_masks_zs(struct panfrost_batch *batch)
 
 void
 panfrost_track_image_access(struct panfrost_batch *batch,
-                            mesa_shader_stage stage,
                             struct pipe_image_view *image)
 {
    struct panfrost_resource *rsrc = pan_resource(image->resource);
 
    if (image->shader_access & PIPE_IMAGE_ACCESS_WRITE) {
-      panfrost_batch_write_rsrc(batch, rsrc, stage);
+      panfrost_batch_write_rsrc(batch, rsrc);
 
       bool is_buffer = rsrc->base.target == PIPE_BUFFER;
       unsigned level = is_buffer ? 0 : image->u.tex.level;
@@ -278,6 +277,6 @@ panfrost_track_image_access(struct panfrost_batch *batch,
                         rsrc->base.width0);
       }
    } else {
-      panfrost_batch_read_rsrc(batch, rsrc, stage);
+      panfrost_batch_read_rsrc(batch, rsrc);
    }
 }

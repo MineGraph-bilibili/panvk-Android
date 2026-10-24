@@ -22,7 +22,6 @@
 
 #include "vk_util.h"
 #include "wsi_common.h"
-#include "util/log.h"
 
 static VKAPI_PTR PFN_vkVoidFunction
 panvk_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
@@ -57,10 +56,14 @@ panvk_can_present_on_device(VkPhysicalDevice pdevice, int fd)
 #include "panvk_entrypoints.h"
 #include "panvk_image.h"
 #include "vk_object.h"
+#include "vk_android.h"
 
 struct panvk_android_swapchain_image {
    struct wsi_image base;
    AHardwareBuffer *ahb;
+   uint32_t width;
+   uint32_t height;
+   uint32_t stride; /* in pixels */
 };
 
 struct panvk_android_swapchain {
@@ -112,8 +115,8 @@ panvk_wsi_android_get_capabilities2(VkIcdSurfaceBase *surface,
 
    const VkSurfacePresentModeKHR *mode =
       vk_find_struct_const(info_next, SURFACE_PRESENT_MODE_KHR);
-   vk_foreach_struct(ext, pSurfaceCapabilities->pNext) {
-      if (ext->sType == VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR) {
+   vk_foreach_struct(sType, ext, pSurfaceCapabilities->pNext) {
+      if (sType == VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR) {
          VkSurfacePresentModeCompatibilityKHR *compat = (void *)ext;
          const VkPresentModeKHR present_mode =
             mode ? mode->presentMode : VK_PRESENT_MODE_FIFO_KHR;
@@ -258,6 +261,38 @@ panvk_android_swapchain_wait_for_present2(struct wsi_swapchain *swapchain,
    return present_id <= chain->completed_present_id ? VK_SUCCESS : VK_TIMEOUT;
 }
 
+/* Bounding box of the damaged rectangles, clamped to the image extent.
+ * Returns false when the app reported no usable damage (present it all). */
+static bool
+panvk_android_swapchain_damage_bounds(const VkPresentRegionKHR *damage,
+                                      uint32_t width, uint32_t height,
+                                      ARect *bounds)
+{
+   if (!damage || !damage->pRectangles || damage->rectangleCount == 0)
+      return false;
+
+   int32_t left = INT32_MAX, top = INT32_MAX, right = 0, bottom = 0;
+   for (uint32_t i = 0; i < damage->rectangleCount; i++) {
+      const VkRectLayerKHR *r = &damage->pRectangles[i];
+      int64_t l = MAX2((int64_t)r->offset.x, 0);
+      int64_t t = MAX2((int64_t)r->offset.y, 0);
+      int64_t rr = MIN2((int64_t)r->offset.x + r->extent.width, (int64_t)width);
+      int64_t bb = MIN2((int64_t)r->offset.y + r->extent.height, (int64_t)height);
+      if (rr <= l || bb <= t)
+         continue;
+      left = MIN2(left, (int32_t)l);
+      top = MIN2(top, (int32_t)t);
+      right = MAX2(right, (int32_t)rr);
+      bottom = MAX2(bottom, (int32_t)bb);
+   }
+
+   if (right <= left || bottom <= top)
+      return false;
+
+   *bounds = (ARect){.left = left, .top = top, .right = right, .bottom = bottom};
+   return true;
+}
+
 static VkResult
 panvk_android_swapchain_queue_present(
    struct wsi_swapchain *swapchain,
@@ -269,25 +304,41 @@ panvk_android_swapchain_queue_present(
    if (image_index >= chain->base.image_count)
       return VK_ERROR_OUT_OF_DATE_KHR;
 
-   VK_FROM_HANDLE(vk_device, dev, swapchain->device);
-   dev->dispatch_table.DeviceWaitIdle(swapchain->device);
+   /* Software WSI already waited on this image's fence in
+    * wsi_common_queue_present() (the fence is signaled once the app's
+    * rendering submit has completed), so the GPU no longer touches the AHB.
+    * The dma-buf path does not wait and keeps the full device flush. */
+   const struct wsi_device *wsi = swapchain->wsi;
+   if (!wsi->sw || swapchain->sw_fence_wait_in_present_thread) {
+      VK_FROM_HANDLE(vk_device, dev, swapchain->device);
+      dev->dispatch_table.DeviceWaitIdle(swapchain->device);
+   }
 
    if (chain->window && chain->images[image_index].ahb) {
+      const struct panvk_android_swapchain_image *img = &chain->images[image_index];
+      ARect damage_bounds;
+      ARect *p_damage_bounds =
+         panvk_android_swapchain_damage_bounds(damage, img->width, img->height,
+                                               &damage_bounds) ? &damage_bounds : NULL;
       ANativeWindow_Buffer win_buf;
-      if (ANativeWindow_lock(chain->window, &win_buf, NULL) == 0) {
+      if (ANativeWindow_lock(chain->window, &win_buf, p_damage_bounds) == 0) {
          void *ahb_data = NULL;
-         AHardwareBuffer_Desc desc;
-         AHardwareBuffer_describe(chain->images[image_index].ahb, &desc);
-         if (AHardwareBuffer_lock(chain->images[image_index].ahb,
-                                  AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &ahb_data) == 0) {
-            uint32_t copy_h = win_buf.height < (int)desc.height ? (uint32_t)win_buf.height : desc.height;
-            uint32_t copy_w = win_buf.width < (int)desc.width ? (uint32_t)win_buf.width : desc.width;
-            for (uint32_t y = 0; y < copy_h; y++) {
-               memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
-                      (char *)ahb_data + y * desc.stride * 4,
-                      copy_w * 4);
+         if (win_buf.bits && win_buf.width > 0 && win_buf.height > 0 &&
+             AHardwareBuffer_lock(img->ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+                                  -1, NULL, &ahb_data) == 0) {
+            uint32_t copy_w = MIN2((uint32_t)win_buf.width, img->width);
+            uint32_t copy_h = MIN2((uint32_t)win_buf.height, img->height);
+            if (win_buf.stride == (int32_t)img->stride && copy_w == img->width) {
+               /* Both sides are row-contiguous: copy in one go. */
+               memcpy(win_buf.bits, ahb_data, (size_t)copy_h * img->stride * 4);
+            } else {
+               for (uint32_t y = 0; y < copy_h; y++) {
+                  memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
+                         (char *)ahb_data + y * img->stride * 4,
+                         copy_w * 4);
+               }
             }
-            AHardwareBuffer_unlock(chain->images[image_index].ahb, NULL);
+            AHardwareBuffer_unlock(img->ahb, NULL);
          }
          ANativeWindow_unlockAndPost(chain->window);
       }
@@ -306,6 +357,7 @@ panvk_android_swapchain_destroy(
    struct panvk_android_swapchain *chain = (struct panvk_android_swapchain *)swapchain;
    VK_FROM_HANDLE(vk_device, dev, swapchain->device);
 
+   vk_android_set_owned_ahb(NULL);
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       if (chain->images[i].base.image != VK_NULL_HANDLE)
          dev->dispatch_table.DestroyImage(swapchain->device, chain->images[i].base.image, pAllocator);
@@ -377,6 +429,15 @@ panvk_wsi_android_create_swapchain(
          panvk_android_swapchain_destroy(&chain->base, pAllocator);
          return VK_ERROR_INITIALIZATION_FAILED;
       }
+      /* Ours and still undefined: the no-mapper linear probe may write it. */
+      vk_android_set_owned_ahb(chain->images[i].ahb);
+
+      /* Cache the geometry so present does not query the mapper every frame. */
+      AHardwareBuffer_Desc img_desc;
+      AHardwareBuffer_describe(chain->images[i].ahb, &img_desc);
+      chain->images[i].width = img_desc.width;
+      chain->images[i].height = img_desc.height;
+      chain->images[i].stride = img_desc.stride;
 
       VkExternalMemoryImageCreateInfo emici = {
          .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -452,6 +513,7 @@ panvk_wsi_android_create_swapchain(
          return result;
       }
    }
+   vk_android_set_owned_ahb(NULL);
 
    *swapchain_out = &chain->base;
    return VK_SUCCESS;
@@ -505,12 +567,6 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
     * PanVK override is present, so both ICDs exercise the same raw-FD DRI3
     * transport instead of silently falling back to the slower SHM path. */
    const char *termux_wsi = getenv("WSI_X11_TERMUX");
-   /* Default to the dmabuf DRI3 path when neither switch is set: launchers
-    * like Winlator Hub rewrite their container config and silently drop
-    * user-set environment variables, which has twice regressed kbase devices
-    * to the ~25ms/frame MIT-SHM CPU copy path.  PANVK_KBASE_DRI3=0 still
-    * opts out, and an explicit WSI_X11_TERMUX switch keeps its old meaning. */
-   const bool dri3_default_on = !dri3_option && !termux_wsi;
    const bool termux_raw_dri3 =
       uses_kbase && !dri3_option && termux_wsi && strcmp(termux_wsi, "0") != 0;
    const bool kbase_raw_dri3 =
@@ -521,8 +577,7 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
 #if defined(HAVE_PAN_KMOD_KBASE)
       uses_kbase &&
       ((!dri3_option && termux_raw_dri3) ||
-       (dri3_option && strcmp(dri3_option, "0") != 0) ||
-       dri3_default_on) &&
+       (dri3_option && strcmp(dri3_option, "0") != 0)) &&
       kbase_kmod_supports_dmabuf(physical_device->kmod.dev);
 #else
       false;
@@ -535,8 +590,6 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
                             &instance->drirc.options,
                             &(struct wsi_device_options){
                                .sw_device = uses_kbase && !kbase_dmabuf,
-                               .wait_present_before_queue = kbase_dmabuf,
-                               .x11_use_raw_fd_modifier =
                                   kbase_dmabuf && kbase_raw_dri3,
                             });
    if (result != VK_SUCCESS)
@@ -558,24 +611,6 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
       !uses_kbase || (kbase_dmabuf && !kbase_raw_dri3);
    physical_device->wsi_device.can_present_on_device =
       panvk_can_present_on_device;
-
-   /* Which present path was selected. The SHM path costs a full-frame CPU
-    * copy per Present (~25ms measured at 1280x720 on Winlator Hub), so a
-    * wrong selection here pins every application to a fixed low framerate
-    * regardless of its GPU load. */
-#if defined(HAVE_PAN_KMOD_KBASE)
-   mesa_logi("panvk_wsi: kbase=%d sw=%d dmabuf=%d raw=%d modifiers=%d "
-             "dma_heap_fd=%d dri3_opt='%s' termux='%s' default_dri3=%d",
-             uses_kbase, physical_device->wsi_device.sw, kbase_dmabuf,
-             kbase_raw_dri3, physical_device->wsi_device.supports_modifiers,
-             kbase_kmod_supports_dmabuf(physical_device->kmod.dev),
-             dri3_option ? dri3_option : "", termux_wsi ? termux_wsi : "",
-             dri3_default_on);
-#else
-   mesa_logi("panvk_wsi: kbase=%d sw=%d dmabuf=0 raw=0 modifiers=%d",
-             uses_kbase, physical_device->wsi_device.sw,
-             physical_device->wsi_device.supports_modifiers);
-#endif
 
    physical_device->vk.wsi_device = &physical_device->wsi_device;
 

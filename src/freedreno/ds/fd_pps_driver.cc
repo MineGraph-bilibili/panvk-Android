@@ -78,7 +78,7 @@ FreedrenoDriver::collect_countables()
 {
    assert(io);  /* This is legacy path only */
 
-   last_dump_ts = gpu_timestamp();
+   last_dump_ts = gpu_timestamp_ticks();
 
    for (const auto &countable : countables)
       countable.collect();
@@ -92,8 +92,10 @@ FreedrenoDriver::configure_counters_stream()
       perfcntr_stream_fd = -1;
    }
 
+   records.clear();
+
    unsigned sample_size = sizeof(uint64_t) * (2 + countables.size());
-   unsigned bufsz = 2 * sample_size;
+   unsigned bufsz = 4 * sample_size + 1;
    unsigned bufsz_shift = ffs(util_next_power_of_two(bufsz)) - 1;
 
    struct drm_msm_perfcntr_group groups[num_perfcntrs];
@@ -120,7 +122,7 @@ FreedrenoDriver::configure_counters_stream()
    if (fd < 0)
       return fd;
 
-   sample_buf = malloc(sample_size);
+   sample_buf.resize(sample_size / sizeof(uint64_t));
 
    perfcntr_stream_fd = fd;
 
@@ -155,27 +157,15 @@ perfcntr_stream_ready(int perfcntr_stream_fd)
    return true;
 }
 
-static uint64_t
-ticks_to_ns(uint64_t ticks)
-{
-   constexpr uint64_t ALWAYS_ON_FREQUENCY_HZ = 19200000;
-   constexpr double GPU_TICKS_PER_NS = ALWAYS_ON_FREQUENCY_HZ / 1000000000.0;
-
-   return ticks / GPU_TICKS_PER_NS;
-}
-
-bool
+void
 FreedrenoDriver::collect_countables_stream()
 {
-   unsigned nsamples = 0;
-   bool discontinuity = false;
-
    assert(perfcntr_stream_fd >= 0);
 
    while (perfcntr_stream_ready(perfcntr_stream_fd)) {
       unsigned sample_size = sizeof(uint64_t) * (2 + countables.size());
       size_t sz = sample_size;
-      void *ptr = sample_buf;
+      void *ptr = sample_buf.data();
 
       while (sz > 0) {
          ssize_t ret = read(perfcntr_stream_fd, ptr, sz);
@@ -193,30 +183,14 @@ FreedrenoDriver::collect_countables_stream()
          ptr = static_cast<char *>(ptr) + ret;
       }
 
-      uint64_t *buf = (uint64_t *)sample_buf;
-      uint64_t ts = buf[0];
-      uint32_t seqno = buf[1] & 0xffffffff;
-
-      discontinuity = seqno == 0;
-
-      /* Capture the timestamp from the *start* of the sampling period: */
-      last_capture_ts = last_dump_ts;
-      last_dump_ts = ts;
-
-      auto elapsed_time_ns = ticks_to_ns(last_dump_ts - last_capture_ts);
-
-      time = (float)elapsed_time_ns / 1000000000.0;
-
-      /* advance past header: */
-      buf += 2;
-
-      for (const auto &countable : countables)
-         countable.collect_stream(buf);
-
-      nsamples++;
+      const uint64_t *buf = sample_buf.data();
+      FreedrenoPerfRecord record = {
+         .timestamp = buf[0],
+         .seqno = static_cast<uint32_t>(buf[1]),
+         .values = std::vector<uint64_t>(buf + 2, buf + sample_buf.size()),
+      };
+      records.emplace_back(std::move(record));
    }
-
-   return (nsamples > 0) && !discontinuity;
 }
 
 bool
@@ -351,8 +325,10 @@ FreedrenoDriver::dump_perfcnt()
       }
    }
 
-   if (!io)
-      return collect_countables_stream();
+   if (!io) {
+      collect_countables_stream();
+      return records.size() >= 2;
+   }
 
    auto last_ts = last_dump_ts;
 
@@ -361,7 +337,7 @@ FreedrenoDriver::dump_perfcnt()
 
    collect_countables();
 
-   auto elapsed_time_ns = ticks_to_ns(last_dump_ts - last_ts);
+   auto elapsed_time_ns = fd_ticks_to_ns(last_dump_ts - last_ts);
 
    time = (float)elapsed_time_ns / 1000000000.0;
 
@@ -379,7 +355,34 @@ FreedrenoDriver::dump_perfcnt()
 
 uint64_t FreedrenoDriver::next()
 {
-   auto ret = last_capture_ts;
+   if (!io) {
+      while (records.size() >= 2) {
+         const FreedrenoPerfRecord &record_a = records[0];
+         const FreedrenoPerfRecord &record_b = records[1];
+
+         /* A zero seqno marks the first sample after a discontinuity. */
+         if (record_b.seqno == 0) {
+            records.erase(records.begin());
+            continue;
+         }
+
+         auto elapsed_time_ns =
+            fd_ticks_to_ns(record_b.timestamp - record_a.timestamp);
+         time = (float)elapsed_time_ns / 1000000000.0;
+
+         for (const FreedrenoDriver::Countable &countable : countables)
+            countable.collect_stream(record_a.values.data(),
+                                     record_b.values.data());
+
+         uint64_t timestamp = fd_ticks_to_ns(record_a.timestamp);
+         records.erase(records.begin());
+         return timestamp;
+      }
+
+      return 0;
+   }
+
+   auto ret = fd_ticks_to_ns(last_capture_ts);
    last_capture_ts = 0;
    return ret;
 }
@@ -391,6 +394,7 @@ FreedrenoDriver::disable_perfcnt()
       close(perfcntr_stream_fd);
       perfcntr_stream_fd = -1;
    }
+   records.clear();
 }
 
 /*
@@ -509,10 +513,11 @@ FreedrenoDriver::Countable::resolve_sample_idx(const struct drm_msm_perfcntr_con
 }
 
 void
-FreedrenoDriver::Countable::collect_stream(const uint64_t *buf) const
+FreedrenoDriver::Countable::collect_stream(const uint64_t *record_a,
+                                           const uint64_t *record_b) const
 {
-   d->state[id].last_value = d->state[id].value;
-   d->state[id].value = buf[d->state[id].idx];
+   d->state[id].last_value = record_a[d->state[id].idx];
+   d->state[id].value = record_b[d->state[id].idx];
 }
 
 /* Collect current counter value and calculate delta since last sample: */
@@ -611,11 +616,17 @@ FreedrenoDriver::gpu_clock_id() const
 }
 
 uint64_t
-FreedrenoDriver::gpu_timestamp() const
+FreedrenoDriver::gpu_timestamp_ticks() const
 {
    uint64_t ts;
    fd_pipe_get_param(pipe, FD_TIMESTAMP, &ts);
    return ts;
+}
+
+uint64_t
+FreedrenoDriver::gpu_timestamp() const
+{
+   return fd_ticks_to_ns(gpu_timestamp_ticks());
 }
 
 bool

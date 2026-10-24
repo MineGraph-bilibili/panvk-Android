@@ -23,6 +23,7 @@ void radv_trap_handler_finish(struct radv_device *device);
 void radv_check_trap_handler(struct radv_queue *queue);
 
 bool radv_vm_fault_occurred(struct radv_device *device, struct radv_winsys_gpuvm_fault_info *fault_info);
+bool radv_shader_abort_occurred(struct radv_device *device);
 
 ALWAYS_INLINE static bool
 radv_device_fault_detection_enabled(const struct radv_device *device)
@@ -30,7 +31,7 @@ radv_device_fault_detection_enabled(const struct radv_device *device)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   return instance->debug_flags & RADV_DEBUG_HANG;
+   return RADV_DEBUG(instance, HANG);
 }
 
 struct radv_trace_data {

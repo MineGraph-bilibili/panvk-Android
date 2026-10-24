@@ -69,40 +69,6 @@
 #include <clang/Options/OptionUtils.h>
 #endif
 
-/* Tee diagnostics to stderr as well: the in-memory log is only replayed via
- * the logger after a *successful* return, so on a hard crash (e.g. the
- * EndSourceFileAction SEGV after a fatal error) nothing would ever show.
- */
-namespace {
-class TeeDiagClient : public clang::DiagnosticConsumer {
-public:
-   TeeDiagClient(std::unique_ptr<clang::DiagnosticConsumer> a,
-                 std::unique_ptr<clang::DiagnosticConsumer> b)
-      : a_(std::move(a)), b_(std::move(b))
-   {
-   }
-
-   void
-   HandleDiagnostic(clang::DiagnosticsEngine::Level level,
-                    const clang::Diagnostic &info) override
-   {
-      /* Flatten the message WITHOUT SourceManager rendering and print it
-       * first: rendering (a_/b_) can itself crash when the diagnostic has
-       * no valid source location, and the in-memory log would be lost. */
-      clang::StoredDiagnostic sd(level, info);
-      llvm::errs() << "CLC-DIAG[" << (unsigned)level << "]["
-                   << sd.getID() << "] " << sd.getMessage() << "\n";
-
-      a_->HandleDiagnostic(level, info);
-      b_->HandleDiagnostic(level, info);
-   }
-
-private:
-   std::unique_ptr<clang::DiagnosticConsumer> a_;
-   std::unique_ptr<clang::DiagnosticConsumer> b_;
-};
-}
-
 /* We have to include our own headers after LLVM/clang as they seem to use
  * `UNUSED` within enum definitions:
  * https://github.com/llvm/llvm-project/blob/ea443eeb2ab8ed49ffb783c2025fed6629a36f10/clang/include/clang/Basic/OffloadArch.h#L19
@@ -905,21 +871,13 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    // http://www.llvm.org/bugs/show_bug.cgi?id=19735
    c->getDiagnosticOpts().ShowCarets = false;
 
-   // Tee diagnostics to stderr as well: the in-memory log is only replayed
-   // via the logger after a *successful* return, so on a hard crash (e.g.
-   // EndSourceFileAction SEGV after a fatal error) nothing would ever show.
-   {
-      std::unique_ptr<clang::DiagnosticConsumer> mem_client(
-         new clang::TextDiagnosticPrinter(diag_log_stream, diag_opts));
-      std::unique_ptr<clang::DiagnosticConsumer> err_client(
-         new clang::TextDiagnosticPrinter(llvm::errs(), diag_opts));
-      c->createDiagnostics(
+   c->createDiagnostics(
 #if LLVM_VERSION_MAJOR >= 20 && LLVM_VERSION_MAJOR < 22
                    *llvm::vfs::getRealFileSystem(),
 #endif
-                   new TeeDiagClient(std::move(mem_client),
-                                     std::move(err_client)));
-   }
+                   new clang::TextDiagnosticPrinter(
+                           diag_log_stream,
+                           diag_opts));
 
    c->setTarget(clang::TargetInfo::CreateTargetInfo(
 #if LLVM_VERSION_MAJOR >= 21
@@ -1013,6 +971,18 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    }
    if (args->features.atomic_scope_device) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+__opencl_c_atomic_scope_device");
+   }
+   if (args->features.atomic_fp32_add || args->features.atomic_fp32_minmax) {
+      // TODO: something inside clang unconditionally enables this and min_max?
+      c->getPreprocessorOpts().addMacroDef("cl_ext_float_atomics=1");
+      if (args->features.atomic_fp32_add) {
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_global_atomic_add=1");
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_local_atomic_add=1");
+      }
+      if (args->features.atomic_fp32_minmax) {
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_global_atomic_min_max=1");
+         c->getPreprocessorOpts().addMacroDef("__opencl_c_ext_fp32_local_atomic_min_max=1");
+      }
    }
    if (args->features.extended_bit_ops) {
       c->getPreprocessorOpts().addMacroDef("cl_khr_extended_bit_ops=1");

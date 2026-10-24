@@ -23,7 +23,7 @@ enum amd_gfx_level;
 
 nir_builder PRINTFLIKE(2, 3) radv_meta_nir_init_shader(mesa_shader_stage stage, const char *name, ...);
 
-nir_shader *radv_meta_nir_build_vs_generate_vertices(void);
+nir_shader *radv_meta_nir_build_vs_generate_vertices(bool layered);
 nir_shader *radv_meta_nir_build_fs_noop(void);
 
 nir_def *radv_meta_nir_get_global_ids(nir_builder *b, unsigned num_components);
@@ -63,8 +63,7 @@ nir_shader *radv_meta_nir_build_blit2d_copy_fragment_shader_depth_stencil(radv_m
 
 void radv_meta_nir_build_clear_color_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs,
                                              uint32_t frag_output);
-void radv_meta_nir_build_clear_depthstencil_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs,
-                                                    bool unrestricted);
+nir_shader *radv_meta_nir_build_clear_depthstencil_vertex_shader(void);
 nir_shader *radv_meta_nir_build_clear_htile_mask_shader(void);
 nir_shader *radv_meta_nir_build_clear_dcc_comp_to_single_shader(bool is_msaa);
 

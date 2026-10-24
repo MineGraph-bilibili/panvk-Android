@@ -158,6 +158,9 @@ regions, or immediates).
   execution.  If shared local memory is reserved, also fence shared local
   memory.  Emits no code for a single hardware thread.
 
+- @param hw_regs N
+  Set the number of hardware register for execute(SRC).
+
 - @param hw_threads N
   Set the number of hardware threads for execute(SRC).
 
@@ -190,9 +193,12 @@ Context allocations are sub-allocated from a data buffer bound at graphics
 address 0x30000000.  @addr produces a32 byte addresses for @load/@store
 messages.
 
-The executor reserves r0..r1 for its own payload and r124..r127 for
-macros.  Macro operands are checked for overlap, but raw assembly
-instructions are not.
+The executor reserves r0..r1 for its own payload and the last 4 GRFs
+(as specified by @param hw_regs) for macros. Macro operands are
+checked for overlap, but raw assembly instructions are not.
+
+The number of registers available can be set with @param hw_regs N. By
+default 128 registers are available.
 
 The Gfx versions have differences in their assembly and shared units, so
 other than very simple examples, scripts for this program will be either

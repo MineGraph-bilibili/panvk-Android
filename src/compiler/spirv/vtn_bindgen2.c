@@ -307,7 +307,12 @@ main(int argc, char **argv)
       return 1;
    }
 
-   fread(map, 1, len, fin);
+   if (fread(map, 1, len, fin) != len) {
+      fprintf(stderr, "Failed to read map buffer\n");
+      free(map);
+      fclose(fin);
+      return 1;
+   }
    fclose(fin);
 
    FILE *fp_c = fopen(outcfile, "w");

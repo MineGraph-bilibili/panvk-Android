@@ -815,8 +815,12 @@ static unsigned si_get_init_multi_vgt_param(struct si_screen *sscreen, union si_
    bool partial_es_wave = false;
 
    if (key->u.uses_tess) {
-      /* SWITCH_ON_EOI must be set if PrimID is used. */
-      if (key->u.tess_uses_prim_id)
+      /* SWITCH_ON_EOI must be set if PrimID is used.
+       * On GFX6 single-SE chips (Cape Verde, max_se == 1), SWITCH_ON_EOI doesn't
+       * work in hardware, so it's unnecessary and causes wave splitting (partial_es_wave).
+       * Those chips instead limit TCS workgroup to 1 patch via has_primid_instancing_bug.
+       */
+      if (key->u.tess_uses_prim_id && !sscreen->info.compiler_info.has_primid_instancing_bug)
          ia_switch_on_eoi = true;
 
       /* Bug with tessellation and GS on Bonaire and older 2 SE chips. */

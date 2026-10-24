@@ -7,6 +7,7 @@
 #ifndef ACO_IR_H
 #define ACO_IR_H
 
+#include "aco_interface.h"
 #include "aco_opcodes.h"
 #include "aco_shader_info.h"
 #include "aco_util.h"
@@ -2501,8 +2502,9 @@ void insert_delay_alu(Program* program);
 void combine_delay_alu(Program* program);
 void insert_NOPs(Program* program);
 void form_hard_clauses(Program* program);
-unsigned emit_program(Program* program, std::vector<uint32_t>& code,
-                      std::vector<struct aco_symbol>* symbols = NULL, bool append_endpgm = true);
+void emit_program(Program* program, std::vector<uint32_t>& code,
+                  std::vector<struct aco_symbol>& symbols, bool append_endpgm,
+                  aco_callback_params* params);
 /**
  * Returns true if print_asm can disassemble the given program for the current build/runtime
  * configuration

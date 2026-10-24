@@ -151,9 +151,7 @@ tu_physical_device_get_format_properties(
       out_properties->optimalTilingFeatures = optimal;
       out_properties->bufferFeatures =
          VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT |
-         VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT |
-         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-         VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+         VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
       return;
    }
 
@@ -167,10 +165,6 @@ tu_physical_device_get_format_properties(
    /* We never have to spill to memory for MSRTSS. */
    if (msrtss_out)
       msrtss_out->optimal = true;
-
-   /* We don't support BufferToImage/ImageToBuffer for npot formats */
-   if (!is_npot)
-      buffer |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
 
    if (supported_vtx)
       buffer |= VK_FORMAT_FEATURE_2_VERTEX_BUFFER_BIT;
@@ -363,8 +357,15 @@ tu_physical_device_get_format_properties(
     *    VK_IMAGE_TYPE_2D
     *    [...]
     *    bufferFeatures must not support any features for these formats
+    *
+    * additionally, 1.4.349 spec, section 56.2 "Format Properties":
+    *
+    *
+    *     If format is block-compressed, requires sampler Y′CBCR conversion, or is
+    *     a depth/stencil format then bufferFeatures must not support any features
+    *     for the format"
     */
-   if (ycbcr_info || vk_format_is_depth_or_stencil(vk_format))
+   if (ycbcr_info || vk_format_is_depth_or_stencil(vk_format) || vk_format_is_compressed(vk_format))
       buffer = 0;
 
    /* D32_SFLOAT_S8_UINT is tiled as two images, so no linear format */
@@ -526,8 +527,19 @@ tu_get_image_format_properties(
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
       switch (drm_info->drmFormatModifier) {
-      case DRM_FORMAT_MOD_QCOM_COMPRESSED:
+      case DRM_FORMAT_MOD_QCOM_COMPRESSED: {
          /* falling back to linear/non-UBWC isn't possible with explicit modifier */
+
+         /* VK_IMAGE_COMPRESSION_DISABLED_EXT explicitly asks for
+          * uncompressed storage, which is incompatible with the
+          * QCOM_COMPRESSED (UBWC) modifier since there's no fallback to
+          * linear/non-UBWC with an explicit modifier.
+          */
+         const VkImageCompressionControlEXT *compression_control =
+            vk_find_struct_const(info->pNext, IMAGE_COMPRESSION_CONTROL_EXT);
+         if (compression_control &&
+             (compression_control->flags & VK_IMAGE_COMPRESSION_DISABLED_EXT))
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
          /* formats which don't support tiling */
          if (!format_props.optimalTilingFeatures ||
@@ -551,6 +563,7 @@ tu_get_image_format_properties(
 
          format_feature_flags = format_props.optimalTilingFeatures;
          break;
+      }
       case DRM_FORMAT_MOD_LINEAR:
          format_feature_flags = format_props.linearTilingFeatures;
          break;
@@ -574,6 +587,9 @@ tu_get_image_format_properties(
    }
 
    if (info->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
+      if (!(physical_device->has_sparse_prr && physical_device->info->props.ubwc_all_formats_compatible))
+         return tu_image_unsupported_format(pImageFormatProperties);
+
       /* Don't support multi-planar formats with sparse yet */
       if (vk_format_get_plane_count(info->format) > 1)
          return tu_image_unsupported_format(pImageFormatProperties);
@@ -629,7 +645,9 @@ tu_get_image_format_properties(
         (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
          VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
        !(info->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) &&
-       !(info->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+       !(info->usage & (VK_IMAGE_USAGE_STORAGE_BIT |
+                        VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT |
+                        VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR))) {
       sampleCounts |= VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
 
       /* a7xx supports 8x MSAA except for 128-bit formats. */
@@ -786,11 +804,14 @@ tu_GetPhysicalDeviceImageFormatProperties2(
    VK_FROM_HANDLE(tu_physical_device, physical_device, physicalDevice);
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
    const VkPhysicalDeviceImageViewImageFormatInfoEXT *image_view_info = NULL;
+   const VkImageCompressionControlEXT *compression_control = NULL;
+   const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *drm_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
    VkFilterCubicImageViewImageFormatPropertiesEXT *cubic_props = NULL;
    VkFormatFeatureFlags format_feature_flags;
    VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkHostImageCopyDevicePerformanceQueryEXT *hic_props = NULL;
+   VkImageCompressionPropertiesEXT *compression_props = NULL;
    VkResult result;
 
    result = tu_get_image_format_properties(physical_device,
@@ -799,24 +820,35 @@ tu_GetPhysicalDeviceImageFormatProperties2(
       return result;
 
    /* Extract input structs */
-   vk_foreach_struct_const(s, base_info->pNext)
+   vk_foreach_struct_const(sType, s, base_info->pNext)
    {
-      switch (s->sType) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
          external_info = (const VkPhysicalDeviceExternalImageFormatInfo *) s;
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_IMAGE_FORMAT_INFO_EXT:
          image_view_info = (const VkPhysicalDeviceImageViewImageFormatInfoEXT *) s;
          break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT:
+         drm_info = (const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *) s;
+         break;
+      case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT:
+         compression_control = (const VkImageCompressionControlEXT *) s;
+         break;
       default:
          break;
       }
    }
 
+   bool is_linear_tiling =
+      base_info->tiling == VK_IMAGE_TILING_LINEAR ||
+      (base_info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
+       drm_info && drm_info->drmFormatModifier == DRM_FORMAT_MOD_LINEAR);
+
    /* Extract output structs */
-   vk_foreach_struct(s, base_props->pNext)
+   vk_foreach_struct(sType, s, base_props->pNext)
    {
-      switch (s->sType) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
          external_props = (VkExternalImageFormatProperties *) s;
          break;
@@ -828,6 +860,9 @@ tu_GetPhysicalDeviceImageFormatProperties2(
          break;
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT:
          hic_props = (VkHostImageCopyDevicePerformanceQueryEXT *) s;
+         break;
+      case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT:
+         compression_props = (VkImageCompressionPropertiesEXT *) s;
          break;
       default:
          break;
@@ -843,6 +878,15 @@ tu_GetPhysicalDeviceImageFormatProperties2(
    if (external_info && external_info->handleType != 0) {
       if (external_info->handleType ==
           VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+         /* Turnip cannot import VK_FORMAT_S8_UINT AHBs because stencil-only
+          * AHBs are linear, while depth/stencil images must be tiled.
+          */
+         if (base_info->format == VK_FORMAT_S8_UINT) {
+            result = vk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                               "VK_FORMAT_S8_UINT AHB import is not supported");
+            goto fail;
+         }
+
          result = vk_android_get_ahb_image_properties(physicalDevice,
                                                       base_info, base_props);
          if (result != VK_SUCCESS)
@@ -903,7 +947,7 @@ tu_GetPhysicalDeviceImageFormatProperties2(
        *    optimalDeviceAccess.
        */
       hic_props->optimalDeviceAccess = hic_props->identicalMemoryLayout =
-         base_info->tiling == VK_IMAGE_TILING_LINEAR ||
+         is_linear_tiling ||
          base_info->type == VK_IMAGE_TYPE_1D ||
          !tiling_possible(base_info->format) ||
          (base_info->usage & VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT) ||
@@ -918,6 +962,31 @@ tu_GetPhysicalDeviceImageFormatProperties2(
                         (base_info->usage & ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT),
                         physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
                         physical_device->info->props.has_z24uint_s8uint));
+   }
+
+   if (compression_props) {
+      /* Turnip's only form of compression is UBWC and we don't expose any
+       * fixed-rate compression modes.
+       */
+      compression_props->imageCompressionFixedRateFlags =
+         VK_IMAGE_COMPRESSION_FIXED_RATE_NONE_EXT;
+
+      bool ubwc_supported =
+         !is_linear_tiling &&
+         base_info->type != VK_IMAGE_TYPE_1D &&
+         tiling_possible(base_info->format) &&
+         ubwc_possible(NULL, base_info->format, base_info->type,
+                       base_info->flags, base_info->usage, base_info->usage,
+                       physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
+                       physical_device->info->props.has_z24uint_s8uint);
+
+      if (compression_control &&
+          (compression_control->flags & VK_IMAGE_COMPRESSION_DISABLED_EXT))
+         ubwc_supported = false;
+
+      compression_props->imageCompressionFlags = ubwc_supported ?
+         VK_IMAGE_COMPRESSION_DEFAULT_EXT :
+         VK_IMAGE_COMPRESSION_DISABLED_EXT;
    }
 
    return VK_SUCCESS;

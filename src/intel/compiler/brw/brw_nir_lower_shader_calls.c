@@ -132,7 +132,7 @@ store_resume_addr(nir_builder *b, nir_intrinsic_instr *call)
 static bool
 lower_shader_trace_ray(nir_builder *b, nir_intrinsic_instr *call, void *data)
 {
-   const struct brw_nir_lower_shader_calls_state *state = data;
+   const struct brw_nir_lower_rt_state *state = data;
    const struct intel_device_info *devinfo = state->devinfo;
    struct brw_bs_prog_key *key = state->key;
 
@@ -236,7 +236,8 @@ lower_shader_trace_ray(nir_builder *b, nir_intrinsic_instr *call, void *data)
                      nir_load_btd_global_arg_addr_intel(b),
                      nir_imm_int(b, BRW_RT_BVH_LEVEL_WORLD),
                      nir_imm_int(b, GEN_RT_TRACE_RAY_INITIAL),
-                     false);
+                     false, state->key->base.use_efficient_64bit,
+                     state->devinfo);
    return true;
 }
 
@@ -263,7 +264,7 @@ lower_shader_call_instr(struct nir_builder *b, nir_intrinsic_instr *call,
 
 bool
 brw_nir_lower_shader_calls(nir_shader *shader,
-                           struct brw_nir_lower_shader_calls_state *state)
+                           struct brw_nir_lower_rt_state *state)
 {
    bool a = nir_shader_intrinsics_pass(shader, lower_shader_trace_ray,
                                        nir_metadata_control_flow, state);
@@ -297,6 +298,7 @@ brw_nir_lower_shader_calls(nir_shader *shader,
  */
 nir_shader *
 brw_nir_create_trivial_return_shader(const struct brw_compiler *compiler,
+                                     const struct brw_bs_prog_key *key,
                                      void *mem_ctx)
 {
    const nir_shader_compiler_options *nir_options =
@@ -337,6 +339,7 @@ brw_nir_create_trivial_return_shader(const struct brw_compiler *compiler,
  */
 nir_shader *
 brw_nir_create_null_ahs_shader(const struct brw_compiler *compiler,
+                               const struct brw_bs_prog_key *key,
                                void *mem_ctx)
 {
    const nir_shader_compiler_options *nir_options =
@@ -361,6 +364,7 @@ brw_nir_create_null_ahs_shader(const struct brw_compiler *compiler,
    nir_def *ray_op = nir_imm_int(b, GEN_RT_TRACE_RAY_COMMIT);
    brw_nir_trace_ray(b,
                      nir_load_btd_global_arg_addr_intel(b),
-                     ray_level, ray_op, false);
+                     ray_level, ray_op, false,
+                     key->base.use_efficient_64bit, compiler->devinfo);
    return nir;
 }

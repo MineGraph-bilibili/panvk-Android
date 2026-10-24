@@ -39,6 +39,7 @@
 
 #include "common/intel_gem.h"
 #include "util/u_debug.h"
+#include "util/u_string.h"
 #include "util/log.h"
 #include "util/macros.h"
 
@@ -1265,7 +1266,8 @@ static const struct intel_device_info intel_device_info_nvl_u_h = {
 #define XE3P_FEATURES                                           \
    XE3_FEATURES,                                                \
    .ver = 35,                                                   \
-   .verx10 = 350
+   .verx10 = 350,                                               \
+   .has_integer_dword_mul = true
 
 #define XE3P_CONFIG(platform_suffix)                            \
    XE3P_FEATURES, XE2_PAT_ENTRIES,                              \
@@ -1506,7 +1508,9 @@ scan_for_force_probe(int pci_id, bool *force_on, bool *force_off)
    if (dup == NULL)
       return;
 
-   for (char *entry = strtok(dup, ","); entry; entry = strtok(NULL, ","))
+   char *saveptr;
+   for (char *entry = strtok_r(dup, ",", &saveptr); entry;
+        entry = strtok_r(NULL, ",", &saveptr))
       parse_force_probe_entry(pci_id, entry, force_on, force_off);
 
    free(dup);

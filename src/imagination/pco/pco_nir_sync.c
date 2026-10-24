@@ -172,6 +172,7 @@ static bool lower_global_atomic_intrinsic(nir_builder *b,
                 intrin->def.num_components,
                 intrin->def.bit_size);
    new_intrin->src[0] = nir_src_for_ssa(new_src);
+   nir_intrinsic_set_access(new_intrin, nir_intrinsic_access(intrin));
    assert(nir_intrinsic_has_atomic_op(intrin));
    nir_intrinsic_set_atomic_op(new_intrin, nir_intrinsic_atomic_op(intrin));
 

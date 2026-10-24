@@ -62,8 +62,6 @@ spec@arb_depth_texture@texwrap formats@GL_DEPTH_COMPONENT32- NPOT,Fail
 spec@arb_direct_state_access@gettextureimage-formats init-by-rendering,Fail
 spec@arb_direct_state_access@gettextureimage-formats,Fail
 spec@arb_framebuffer_object@fbo-blit-scaled-linear,Fail
-spec@arb_point_sprite@arb_point_sprite-checkerboard,Fail
-spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
 spec@arb_shader_storage_buffer_object@compiler@atomicmin-swizzle.vert,Fail
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
@@ -72,9 +70,6 @@ spec@arb_texture_buffer_object@texture-buffer-size-clamp@r8ui_texture_buffer_siz
 spec@arb_texture_buffer_object@texture-buffer-size-clamp@rg8ui_texture_buffer_size_via_sampler,Fail
 spec@arb_texture_buffer_object@texture-buffer-size-clamp@rgba8ui_texture_buffer_size_via_sampler,Fail
 spec@arb_texture_rectangle@1-1-linear-texture,Fail
-spec@arb_texture_view@tex-view,Fail
-spec@egl 1.4@eglterminate then unbind context,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 spec@ext_framebuffer_multisample@interpolation 2 centroid-edges,Fail
 spec@ext_framebuffer_multisample@interpolation 4 centroid-edges,Fail
@@ -115,7 +110,6 @@ spec@ext_texture_integer@texwrap formats,Fail
 spec@ext_texture_integer@texwrap formats@GL_ALPHA8I_EXT,Fail
 spec@ext_texture_integer@texwrap formats@GL_ALPHA8I_EXT- NPOT,Fail
 spec@ext_texture_integer@texwrap formats@GL_ALPHA8I_EXT- swizzled,Fail
-spec@ext_texture_lod_bias@lodbias,Fail
 spec@ext_texture_snorm@texwrap formats bordercolor,Fail
 spec@ext_texture_snorm@texwrap formats bordercolor-swizzled,Fail
 spec@ext_texture_snorm@texwrap formats bordercolor-swizzled@GL_LUMINANCE16_ALPHA16_SNORM- swizzled- border color only,Fail
@@ -126,62 +120,21 @@ spec@glsl-1.10@execution@glsl-fs-inline-explosion,Crash
 spec@glsl-1.10@execution@glsl-vs-inline-explosion,Crash
 spec@glsl-1.10@execution@loops@glsl-fs-unroll-explosion,Crash
 spec@glsl-1.10@execution@loops@glsl-vs-unroll-explosion,Crash
-spec@glsl-1.20@execution@clipping@vs-clip-vertex-primitives,Fail
-spec@glsl-1.20@execution@fs-underflow-mul-compare-zero,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp@sRGB decode full precision,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode full precision,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-2d-array.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-2d-array.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-2d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-2d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-3d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-3d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-cube.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-snorm-cube.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-2d-array.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-2d-array.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-2d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-2d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-3d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-3d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-cube.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-r16-unorm-cube.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-2d-array.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-2d-array.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-2d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-2d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-3d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-3d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-cube.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-snorm-cube.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-2d-array.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-2d-array.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-2d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-2d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-3d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-3d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-cube.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rg16-unorm-cube.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-2d-array.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-2d-array.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-2d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-2d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-3d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-3d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-cube.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-snorm-cube.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-2d-array.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-2d-array.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-2d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-2d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-3d.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-3d.vert,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-cube.frag,Fail
-spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-cube.vert,Fail
-spec@oes_point_sprite@arb_point_sprite-checkerboard_gles1,Fail
-spec@oes_shader_io_blocks@compiler@layout-location-aliasing.vert,Fail
+
+# This fails due TMU precision: implicit LOD is wrong for the huge
+# texcoords this test needs at large LOD bias. We could fix it by
+# reducing the max_texture_lod_bias. But then we could increase the
+# SquareSize in the test, and it would be failing again. For normal
+# cases, current max_texture_lod_bias is fine, so we leave the test
+# failing.
+spec@ext_texture_lod_bias@lodbias,Fail
+
+# https://gitlab.freedesktop.org/mesa/piglit/-/merge_requests/1192
+spec@glsl-1.20@execution@fs-underflow-mul-compare-zero,Fail
 
 # A sub-case involving polygon stipple fails because driver doesn't implement
 # stipple
@@ -297,8 +250,6 @@ program@execute@builtin@builtin-ulong-popcount-1.2.generated@popcount ulong16,Fa
 program@execute@builtin@builtin-ulong-popcount-1.2.generated@popcount ulong2,Fail
 program@execute@builtin@builtin-ulong-popcount-1.2.generated@popcount ulong4,Fail
 program@execute@builtin@builtin-ulong-popcount-1.2.generated@popcount ulong8,Fail
-program@execute@global-offset,Fail
-program@execute@global-offset@3d- input dependent,Fail
 program@run kernel with max work item sizes,Fail
 
 # Bisected to 6bc47e65 ("rusticl: Fix work group size validation")
@@ -450,10 +401,35 @@ vk_xfermodes3,Fail
 # Bisected to 08b5876c379 ("v3d: only expose rgba buffer-textures")
 TransferPixelsTest,Fail
 
-# uprev Piglit in Mesa
-spec@glsl-1.30@execution@glsl-packed-back-color,Fail
-
 # VKCTS 1.4.5.3 -> 1.4.6.1 uprev
 dEQP-VK.robustness.buffer_access.through_pointers.graphics.writes.vertex.4B_in_memory_with_scalar_f32,Fail
 dEQP-VK.robustness.buffer_access.through_pointers.graphics.writes.vertex.4B_in_memory_with_scalar_s32,Fail
 dEQP-VK.robustness.buffer_access.through_pointers.graphics.writes.vertex.4B_in_memory_with_scalar_u32,Fail
+
+# OpenCL CTS tests
+API,Fail
+API@get_command_queue_info,Fail
+API@get_command_queue_info_compatibility,Fail
+API@negative_set_immutable_memory_to_writeable_kernel_arg,Fail
+API@queue_properties,Fail
+API@queue_properties_queries,Fail
+Basic,Fail
+Basic@bufferreadwriterect,Fail
+Basic@enqueued_local_size,Fail
+Basic@get_global_linear_id,Fail
+Basic@get_local_linear_id,Fail
+Contractions,Fail
+Contractions@contractions_float_0,Fail
+Contractions@contractions_float_1,Fail
+Contractions@contractions_float_2,Fail
+Contractions@contractions_float_3,Fail
+Contractions@contractions_float_4,Fail
+Contractions@contractions_float_5,Fail
+Contractions@contractions_float_6,Fail
+Contractions@contractions_float_7,Fail
+Device timer,Fail
+Device timer@device_and_host_timers,Fail
+Math,Fail
+Math@atan2,Fail
+Math@atan2pi,Fail
+Profiling,Fail

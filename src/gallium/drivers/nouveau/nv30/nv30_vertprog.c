@@ -79,7 +79,7 @@ nv30_vertprog_validate(struct nv30_context *nv30)
    }
 
    if (!vp->translated) {
-      vp->translated = _nvfx_vertprog_translate(eng3d->oclass, vp);
+      vp->translated = _nvfx_vertprog_translate(eng3d->oclass, vp, &nv30->base.pipe.debug);
       if (!vp->translated) {
          nv30->draw_flags |= NV30_NEW_VERTPROG;
          return;
@@ -240,8 +240,14 @@ nv30_vp_state_create(struct pipe_context *pipe,
 
    tgsi_scan_shader(vp->pipe.tokens, &vp->info);
 
+   // unfortunetly currently nv30 is switching between using hwtcl/swtcl during rendering
+   // this is hack for being able to use shader-db with drm-shim
+   if (debug_get_bool_option("NVFX_SHADER_STATS", false))
+      _nvfx_vertprog_translate(nv30->screen->eng3d->oclass, vp, &nv30->base.debug);
+
    /* just pass-through to draw module */
    vp->draw = draw_create_vertex_shader(nv30->draw, &vp->pipe);
+
    return vp;
 }
 

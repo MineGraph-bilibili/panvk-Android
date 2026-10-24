@@ -620,6 +620,7 @@ d3d12_get_query_result_resource(struct pipe_context *pctx,
    if (index == -1) {
       /* Write the "available" bit, which is always true */
       struct d3d12_resource *res = d3d12_resource(resource);
+      d3d12_batch_reference_resource(d3d12_current_batch(ctx), res, true);
       d3d12_transition_resource_state(ctx, res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_TRANSITION_FLAG_NONE);
       d3d12_apply_resource_states(ctx, false);
 
@@ -720,6 +721,7 @@ d3d12_enable_predication(struct d3d12_context *ctx)
       *  if the resulting predicate data of the predicate is equal to
       *  the operation specified."
       */
+   d3d12_batch_reference_resource(d3d12_current_batch(ctx), ctx->current_predication, false);
    ctx->cmdlist->SetPredication(d3d12_resource_resource(ctx->current_predication), 0,
                                 ctx->predication_condition ? D3D12_PREDICATION_OP_NOT_EQUAL_ZERO :
                                 D3D12_PREDICATION_OP_EQUAL_ZERO);

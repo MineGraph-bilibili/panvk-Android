@@ -107,7 +107,7 @@ genX(batch_emit_push_constants_alloc)(struct anv_batch *batch,
 static void
 cmd_buffer_alloc_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer)
 {
-   if (cmd_buffer->device->physical->instance->drirc.perf.disable_push_const_alloc)
+   if (cmd_buffer->device->physical->drirc.perf.disable_push_const_alloc)
       return;
 
    struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
@@ -185,7 +185,7 @@ get_push_range_address(struct anv_cmd_buffer *cmd_buffer,
 
    switch (range->set) {
    case ANV_DESCRIPTOR_SET_DESCRIPTORS:
-      if (shader->bind_map.layout_type == ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_BUFFER) {
+      if (shader->bind_map.binding_mode == ANV_SHADER_BINDING_MODE_BUFFER) {
          return anv_address_from_u64(
             anv_cmd_buffer_descriptor_buffer_address(
                cmd_buffer,
@@ -269,7 +269,7 @@ get_push_range_bound_size(struct anv_cmd_buffer *cmd_buffer,
 
    switch (range->set) {
    case ANV_DESCRIPTOR_SET_DESCRIPTORS:
-      if (shader->bind_map.layout_type == ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_BUFFER) {
+      if (shader->bind_map.binding_mode == ANV_SHADER_BINDING_MODE_BUFFER) {
          /* It's hard to bound a reference to a descriptor buffer because we
           * don't have an actual buffer, only an address. So just return the
           * maximum size of the heap (which bounds the largest buffer size).
@@ -485,8 +485,8 @@ cmd_buffer_flush_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer,
          }
 
          /* Update the pushed bound length constant if it changed */
-         if (range_mask != push->gfx.push_reg_mask[stage][r]) {
-            push->gfx.push_reg_mask[stage][r] = range_mask;
+         if (range_mask != push->drv_data.gfx.push_reg_mask[stage][r]) {
+            push->drv_data.gfx.push_reg_mask[stage][r] = range_mask;
             cmd_buffer->state.push_constants_dirty |=
                mesa_to_vk_shader_stage(stage);
             bind_state->push_constants_state = ANV_STATE_NULL;
@@ -713,6 +713,8 @@ cmd_buffer_maybe_flush_rt_writes(struct anv_cmd_buffer *cmd_buffer,
       }
    }
 
+   need_rt_flush &= GFX_VERx10 < 350 || !cmd_buffer->device->physical->uses_efficient_64bit;
+
    if (need_rt_flush) {
       anv_cmd_buffer_dirty_descriptors(cmd_buffer,
                                        VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -818,7 +820,7 @@ cmd_buffer_flush_gfx_state(struct anv_cmd_buffer *cmd_buffer)
 
    genX(cmd_buffer_emit_hashing_mode)(cmd_buffer, UINT_MAX, UINT_MAX, 1);
 
-   genX(flush_descriptor_buffers)(cmd_buffer, bind_state, gfx->active_stages);
+   genX(flush_binding_mode)(cmd_buffer, bind_state, gfx->active_stages);
 
    genX(flush_pipeline_select_3d)(cmd_buffer);
 
@@ -974,8 +976,7 @@ cmd_buffer_flush_gfx_state(struct anv_cmd_buffer *cmd_buffer)
    if (cmd_buffer->state.gfx.dirty & ANV_CMD_DIRTY_INDIRECT_DATA_STRIDE) {
       anv_batch_emit(&cmd_buffer->batch, GENX(STATE_BYTE_STRIDE), sb_stride) {
          sb_stride.ByteStride = cmd_buffer->state.gfx.indirect_data_stride >> 2;
-         sb_stride.ByteStrideEnable =
-            cmd_buffer->state.gfx.indirect_data_stride_aligned == U_TRISTATE_NO;
+         sb_stride.ByteStrideEnable = cmd_buffer->state.gfx.indirect_data_stride_set;
       }
    }
 #endif
@@ -991,6 +992,7 @@ cmd_buffer_flush_gfx_state(struct anv_cmd_buffer *cmd_buffer)
 static inline void
 cmd_buffer_flush_gfx_pointers(struct anv_cmd_buffer *cmd_buffer)
 {
+   struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
 
    assert(gfx->base != NULL);
@@ -1025,7 +1027,8 @@ cmd_buffer_flush_gfx_pointers(struct anv_cmd_buffer *cmd_buffer)
     * emitting push constants, on SKL+ we have to emit the corresponding
     * 3DSTATE_BINDING_TABLE_POINTER_* for the push constants to take effect.
     */
-   if (descriptors_dirty) {
+   if (descriptors_dirty &&
+       !(GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit)) {
       cmd_buffer->state.descriptors_pointers_dirty |=
          genX(cmd_buffer_flush_descriptor_sets)(
             cmd_buffer,
@@ -1090,7 +1093,7 @@ genX(cmd_buffer_flush_gfx)(struct anv_cmd_buffer *cmd_buffer)
 ALWAYS_INLINE static bool
 anv_use_generated_draws(const struct anv_cmd_buffer *cmd_buffer, uint32_t count)
 {
-   const struct anv_instance *instance = cmd_buffer->device->physical->instance;
+   const struct anv_physical_device *pdevice = cmd_buffer->device->physical;
 
    /* We cannot generate readable commands in protected mode. */
    if (cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT)
@@ -1103,7 +1106,7 @@ anv_use_generated_draws(const struct anv_cmd_buffer *cmd_buffer, uint32_t count)
        anv_gfx_has_stage(&cmd_buffer->state.gfx, MESA_SHADER_TESS_CTRL))
       return false;
 
-   return count >= instance->drirc.perf.generated_indirect_threshold;
+   return count >= pdevice->drirc.perf.generated_indirect_threshold;
 }
 
 #define gfx_source_hashes(gfx) \
@@ -1987,6 +1990,9 @@ static inline uint32_t xi_argument_format_for_vk_cmd(enum vk_cmd_type cmd)
 #endif
 }
 
+/* Return whether EXECUTE_INDIRECT_DRAW can unroll all the draw calls (returns false)
+ * or whether we need to emit the max count (returns true).
+ */
 static inline bool
 cmd_buffer_set_indirect_stride(struct anv_cmd_buffer *cmd_buffer,
                                uint32_t stride, enum vk_cmd_type cmd)
@@ -2013,29 +2019,28 @@ cmd_buffer_set_indirect_stride(struct anv_cmd_buffer *cmd_buffer,
       UNREACHABLE("unhandled cmd type");
    }
 
-   enum u_tristate aligned = u_tristate_make(stride == data_stride);
+   const bool aligned = stride == data_stride;
 
 #if GFX_VER >= 20
-   /* The stride can change as long as it matches the default command stride
-    * and STATE_BYTE_STRIDE::ByteStrideEnable=false, we can just do nothing.
-    *
-    * Otheriwse STATE_BYTE_STRIDE::ByteStrideEnable=true, any stride change
-    * should be signaled.
+   /* If STATE_BYTE_STRIDE was never set and the indirect data stride is
+    * aligned, no need to do anything. Otherwise check if we need to reprogram
+    * STATE_BYTE_STRIDE.
     */
    struct anv_cmd_graphics_state *gfx_state = &cmd_buffer->state.gfx;
-   if (gfx_state->indirect_data_stride_aligned != aligned) {
-      gfx_state->indirect_data_stride = stride;
-      gfx_state->indirect_data_stride_aligned = aligned;
-      gfx_state->dirty |= ANV_CMD_DIRTY_INDIRECT_DATA_STRIDE;
-   } else if (gfx_state->indirect_data_stride_aligned == U_TRISTATE_NO &&
-              gfx_state->indirect_data_stride != stride) {
-      gfx_state->indirect_data_stride = stride;
-      gfx_state->indirect_data_stride_aligned = aligned;
+   if (aligned && !gfx_state->indirect_data_stride_set)
+      return false;
+
+   if (gfx_state->indirect_data_stride != stride) {
+      gfx_state->indirect_data_stride = aligned ? 0 : stride;
+      gfx_state->indirect_data_stride_set = !aligned;
       gfx_state->dirty |= ANV_CMD_DIRTY_INDIRECT_DATA_STRIDE;
    }
 #endif
 
-   return aligned == U_TRISTATE_YES;
+   /* Gfx20+ can accomodate any stride through programming STATE_BYTE_STRIDE,
+    * ARL cannot unless indirect data is aligned.
+    */
+   return GFX_VER >= 20 ? false : !aligned;
 }
 
 static void
@@ -2047,7 +2052,7 @@ genX(cmd_buffer_emit_execute_indirect_draws)(struct anv_cmd_buffer *cmd_buffer,
                                              enum vk_cmd_type cmd)
 {
 #if GFX_VERx10 >= 125
-   bool aligned_stride =
+   const bool needs_software_unroll =
       cmd_buffer_set_indirect_stride(cmd_buffer, indirect_data_stride, cmd);
 
    cmd_buffer_flush_gfx(cmd_buffer);
@@ -2066,7 +2071,7 @@ genX(cmd_buffer_emit_execute_indirect_draws)(struct anv_cmd_buffer *cmd_buffer,
          ind.TBIMREnabled               = cmd_buffer->state.gfx.dyn_state.use_tbimr;
          ind.PredicateEnable            =
             cmd_buffer->state.conditional_render_enabled;
-         ind.MaxCount                   = aligned_stride ? max_draw_count : 1;
+         ind.MaxCount                   = needs_software_unroll ? 1 : max_draw_count;
          ind.ArgumentBufferStartAddress = draw;
          ind.CountBufferAddress         = count_addr;
          ind.CountBufferIndirectEnable  = !anv_address_is_null(count_addr);
@@ -2078,12 +2083,7 @@ genX(cmd_buffer_emit_execute_indirect_draws)(struct anv_cmd_buffer *cmd_buffer,
       cmd_buffer_post_draw_wa(cmd_buffer, 1,
                               0 /* Doesn't matter for GFX_VER > 9 */);
 
-      /* If all the indirect structures are aligned, then we can let the HW
-       * do the unrolling and we only need one instruction. Otherwise we
-       * need to emit one instruction per draw, but we're still avoiding
-       * the register loads with MI commands.
-       */
-      if (aligned_stride || GFX_VER >= 20)
+      if (!needs_software_unroll)
          break;
 
       offset += indirect_data_stride;

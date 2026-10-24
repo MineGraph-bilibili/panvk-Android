@@ -46,6 +46,7 @@ add_gpus([
         wave_granularity = 2,
         fibers_per_sp = 0, # TODO
         threadsize_base = 8,
+        reg_size_vec4 = 96, # TODO: confirm this
     ))
 
 add_gpus([
@@ -64,6 +65,7 @@ add_gpus([
         wave_granularity = 2,
         fibers_per_sp = 0, # TODO
         threadsize_base = 32, # TODO: Confirm this
+        reg_size_vec4 = 48, # not measured the way a5xx was
     ))
 
 add_gpus([
@@ -84,6 +86,7 @@ add_gpus([
         fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
         highest_bank_bit = 14,
         threadsize_base = 32,
+        reg_size_vec4 = 64,
     ))
 
 add_gpus([
@@ -102,6 +105,7 @@ add_gpus([
         fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
         highest_bank_bit = 14,
         threadsize_base = 32,
+        reg_size_vec4 = 64,
     ))
 
 add_gpus([
@@ -120,6 +124,7 @@ add_gpus([
         fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
         highest_bank_bit = 15,
         threadsize_base = 32,
+        reg_size_vec4 = 64,
     ))
 
 # Props could be modified with env var:
@@ -135,6 +140,7 @@ a6xx_base = GPUProps(
         has_fs_tex_prefetch = True,
         has_sampler_minmax = True,
         has_astc_hdr = True,
+        num_xfb_streams = 4,
 
         supports_double_threadsize = True,
 
@@ -170,6 +176,7 @@ a6xx_gen1_low = GPUProps(
         has_sampler_minmax = False,
         has_astc_hdr = False,
         has_fs_tex_prefetch = False,
+        num_xfb_streams = 1,
         sysmem_per_ccu_color_cache_size = 8 * 1024,
         sysmem_per_ccu_depth_cache_size = 8 * 1024,
         gmem_ccu_color_cache_fraction = CCUColorCacheFraction.HALF.value,
@@ -728,6 +735,7 @@ add_gpus([
     ], A6xxGPUInfo(
         CHIP.A6XX, # NOT a mistake!
         [a6xx_base, a6xx_gen1_low, GPUProps(
+            reg_size_vec4 = 64,
             has_cp_reg_write = False,
             has_gmem_fast_clear = True,
             sysmem_per_ccu_depth_cache_size = 8 * 1024, # ??????
@@ -777,6 +785,7 @@ a7xx_base = GPUProps(
         has_fs_tex_prefetch = True,
         has_sampler_minmax = True,
         has_astc_hdr = True,
+        num_xfb_streams = 4,
 
         supports_double_threadsize = True,
 
@@ -835,6 +844,7 @@ a7xx_base = GPUProps(
 
         alias_mova_quirk = True,
         alias_predication_quirk = True,
+        prefetch_sam_helpers_quirk = True,
     )
 
 a7xx_gen1 = GPUProps(
@@ -893,6 +903,7 @@ a7xx_gen3 = GPUProps(
         max_draw_states = 64,
         has_64b_image_atomics = True,
         has_implicit_fragface_fragcoord_ij_linear = True,
+        subpass_fence_cleans_resolve = True,
     )
 
 a730_magic_regs = dict(
@@ -1403,6 +1414,7 @@ add_gpus([
 
 add_gpus([
         GPUId(chip_id=0xffff44050000, name="Adreno (TM) 830"),
+        GPUId(chip_id=0xffff44050001, name="Adreno (TM) 830v1"),
         GPUId(chip_id=0x44050001, name="Adreno (TM) 830"), # KGSL
     ], A6xxGPUInfo(
         CHIP.A8XX,

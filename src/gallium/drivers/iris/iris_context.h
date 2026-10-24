@@ -297,7 +297,6 @@ struct iris_fs_data {
    uint64_t inputs;
    unsigned num_varying_inputs;
 
-   unsigned fs_config_param;
    uint32_t flat_inputs;
 
    uint8_t computed_depth_mode;
@@ -1472,14 +1471,14 @@ iris_shader_variant_reference(struct iris_compiled_shader **dst,
 bool iris_blorp_lookup_shader(struct blorp_batch *blorp_batch,
                               const void *key,
                               uint32_t key_size,
-                              uint32_t *kernel_out,
+                              uint64_t *kernel_out,
                               void *prog_data_out);
 bool iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
                               const void *key, uint32_t key_size,
                               const void *kernel, uint32_t kernel_size,
                               const void *prog_data,
                               uint32_t prog_data_size,
-                              uint32_t *kernel_out,
+                              uint64_t *kernel_out,
                               void *prog_data_out);
 
 void iris_ensure_indirect_generation_shader(struct iris_batch *batch);

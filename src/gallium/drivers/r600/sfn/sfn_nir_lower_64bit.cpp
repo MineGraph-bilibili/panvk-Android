@@ -619,11 +619,16 @@ LowerSplit64BitVar::split_double_load_ssbo(nir_intrinsic_instr *intr)
    nir_intrinsic_instr *load2 =
       nir_instr_as_intrinsic(nir_instr_clone(b->shader, &intr->instr));
 
-   nir_src_rewrite(&load2->src[0], nir_iadd_imm(b, intr->src[0].ssa, 1));
+   if (nir_src_is_const(intr->src[1]))
+      load2->src[1] = nir_src_for_ssa(
+         nir_imm_int(b, nir_src_as_int(intr->src[1]) + sizeof(uint64_t) * 2));
+   else
+      load2->src[1] =
+         nir_src_for_ssa(nir_iadd_imm(b, intr->src[1].ssa, sizeof(uint64_t) * 2));
+
    load2->num_components = second_components;
    nir_def_init(&load2->instr, &load2->def, second_components, 64);
 
-   nir_intrinsic_set_dest_type(load2, nir_intrinsic_dest_type(intr));
    nir_builder_instr_insert(b, &load2->instr);
 
    intr->def.num_components = intr->num_components = 2;

@@ -35,8 +35,6 @@ lower_xfb_output(nir_builder *b, nir_intrinsic_instr *intr,
    unsigned address_bit_size = nir_address_format_bit_size(address_format);
 
    assert(buffer < MAX_XFB_BUFFERS);
-   const unsigned component = nir_intrinsic_component(intr);
-   assert(start_component >= component);
 
    /* Transform feedback info in units of words, convert to bytes. */
    uint16_t stride = b->shader->info.xfb_stride[buffer] * 4;
@@ -59,8 +57,8 @@ lower_xfb_output(nir_builder *b, nir_intrinsic_instr *intr,
 
    nir_def *src = intr->src[0].ssa;
    nir_component_mask_t mask = nir_component_mask(num_components);
-   nir_def *value =
-      nir_channels(b, src, mask << (start_component - component));
+   mask = (mask << start_component) >> nir_intrinsic_component(intr);
+   nir_def *value = nir_channels(b, src, mask);
    nir_store_global(b, value, addr);
 }
 

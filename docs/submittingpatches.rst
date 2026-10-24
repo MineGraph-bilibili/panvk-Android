@@ -64,6 +64,16 @@ what the change does, and justify that change in the commit messages.
 Using coding assistants or "AI" or other tools does not grant additional
 privileges or reduce our expectations.
 
+"AI" shouldn't be used to generate code comments, commit messages, and
+Gitlab comments. Every contributor should communicate with the community
+directly without other people or tools in the middle. We want contributors
+to develop and practice their own communication and technical writing.
+Those skills deteriorate if they are not used.
+
+Consequentially, contributors can use "AI" for research etc., but all text
+should be their own words. They should get to know the community through
+normal communication and the community should be able to get to know them.
+
 Disclosure is always required when "AI" was involved in the creative
 process of coming up with the code, except in the following cases:
 

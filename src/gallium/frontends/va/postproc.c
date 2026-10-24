@@ -295,6 +295,8 @@ vlVaPostProc(vlVaDriver *drv, vlVaContext *context, struct pipe_video_buffer *sr
             .entrypoint = PIPE_VIDEO_ENTRYPOINT_PROCESSING,
          };
          drv->proc = vl_create_proc(drv->pipe, &templat);
+         if (drv->proc)
+            pipe_reference_init(&drv->proc->reference, 1);
       }
       proc = drv->proc;
    }
@@ -641,7 +643,8 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
       vpp.base.out_fence = &dst_surface->fence;
       context->proc.vpp = vpp;
       context->proc.dst_surface = dst_surface;
-      vlVaSetSurfaceContext(drv, dst_surface, context);
+      dst_surface->entrypoint = context->templat.entrypoint;
+      pipe_video_codec_reference(&dst_surface->codec, context->decoder);
       return VA_STATUS_SUCCESS;
    }
 

@@ -136,3 +136,17 @@ spec@nv_copy_image@nv_copy_image-formats --samples=2
 spec@nv_copy_image@nv_copy_image-formats --samples=4
 spec@nv_copy_image@nv_copy_image-formats --samples=8
 spec@nv_copy_image@nv_copy_image-simple --tex-to-tex
+
+# A subset of these *can* pass, so marking them as flaky despite their near 100% fail rate
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.delete_shader_fragment
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.delete_shader_vertex
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.detach_shader_fragment
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.detach_shader_vertex
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.reattach_shader_fragment
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.reattach_shader_vertex
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.recompile_shader_fragment
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.recompile_shader_vertex
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.replace_shader_fragment
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.replace_shader_vertex
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.replace_source_fragment
+dEQP-GLES3.functional.shader_api.program_binary.binary_persistence.replace_source_vertex

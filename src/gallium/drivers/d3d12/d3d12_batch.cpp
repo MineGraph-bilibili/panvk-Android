@@ -315,8 +315,9 @@ d3d12_end_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
 
    mtx_lock(&screen->submit_mutex);
 
+   bool residency_ok = true;
 #ifndef _GAMING_XBOX
-   d3d12_process_batch_residency(screen, batch);
+   residency_ok = d3d12_process_batch_residency(screen, batch);
 #endif
 
    bool has_state_fixup = d3d12_context_state_resolve_submission(ctx, batch);
@@ -328,7 +329,11 @@ d3d12_end_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
       to_execute++;
       count_to_execute--;
    }
-   screen->cmdqueue->ExecuteCommandLists(count_to_execute, to_execute);
+   /* Submitting work against resources we failed to make resident would just fault */
+   if (residency_ok)
+      screen->cmdqueue->ExecuteCommandLists(count_to_execute, to_execute);
+   else
+      batch->has_errors = true;
 
    batch->fence = d3d12_create_fence(screen, true);
 

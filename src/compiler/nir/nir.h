@@ -781,6 +781,11 @@ typedef struct nir_variable {
       unsigned depth_layout : 3;
 
       /**
+       * Whether the variable is a YUV color-output.
+       */
+      unsigned yuv : 1;
+
+      /**
        * Vertex stream output identifier.
        *
        * For packed outputs, NIR_STREAM_PACKED is set and bits [2*i+1,2*i]
@@ -2212,6 +2217,10 @@ typedef enum {
    /**
     * Identifies any subgroup-like operation whose behaviour depends on other
     * logical threads. This is incompatible with CAN_REORDER.
+    *
+    * It also indicates that the intrinsic can be CSE'ed if:
+    * - the active invocations don't change
+    * - the intrinsic has no access index or ACCESS_CAN_REORDER is set
     */
    NIR_INTRINSIC_SUBGROUP = BITFIELD_BIT(2),
 
@@ -2272,6 +2281,14 @@ typedef struct nir_io_xfb {
                                      max (1K - 4) bytes */
    } out[4];
 } nir_io_xfb;
+
+typedef struct nir_ps_input_info_amd {
+   unsigned slot : 5;         /* The index into SPI_PS_INPUT_CNTL_[0-31]. */
+   unsigned component : 2;
+   unsigned high_16bits : 1;  /* Only for load_interpolated_input_amd. */
+   unsigned vertex_index : 2; /* Only for load_input_vertex_amd (selects P0, P1, P2). */
+   unsigned padding : 22;
+} nir_ps_input_info_amd;
 
 unsigned
 nir_instr_xfb_write_mask(nir_intrinsic_instr *instr);
@@ -2812,14 +2829,16 @@ typedef struct nir_tex_instr {
     */
    bool sampler_non_uniform;
 
+   /** Similar to texture_non_uniform but for the second texture. */
+   bool texture_2_non_uniform;
+   /** Similar to texture_non_uniform but for the second sampler. */
+   bool sampler_2_non_uniform;
+
    /** True if this texture instruction uses an embedded sampler.
     *
     * In this case, sampler_index is the index in embedded sampler table.
     */
    bool embedded_sampler;
-
-   /** True if the offset is not dynamically uniform */
-   bool offset_non_uniform;
 
    /** True whether this returns the same result anywhere in the shader and
     *  doesn't cause page faults.
@@ -3124,7 +3143,12 @@ nir_def_instr_nonconst(nir_def *def)
                  "nir_load_const_instr: nir_def always has to be at the same offset relative to nir_instr.");
    static_assert(offsetof(nir_phi_instr, def) == offsetof(nir_undef_instr, def),
                  "nir_phi_instr: nir_def always has to be at the same offset relative to nir_instr.");
-   return &container_of(def, nir_undef_instr, def)->instr;
+
+   /* Manually calculate the pointer address to avoid accessing through
+    * an instr type that's not actually correct.
+    */
+   char *ptr = (char *)def - offsetof(nir_undef_instr, def);
+   return (nir_instr *)ptr;
 }
 
 static inline const nir_instr *
@@ -3357,6 +3381,8 @@ nir_scalar_intrinsic_op(nir_scalar s)
    return nir_def_as_intrinsic(s.def)->intrinsic;
 }
 
+nir_scalar nir_scalar_chase_movs(nir_scalar s);
+
 static inline nir_scalar
 nir_scalar_chase_alu_src(nir_scalar s, unsigned alu_src_idx)
 {
@@ -3385,10 +3411,8 @@ nir_scalar_chase_alu_src(nir_scalar s, unsigned alu_src_idx)
    }
    assert(out.comp < out.def->num_components);
 
-   return out;
+   return nir_scalar_chase_movs(out);
 }
-
-nir_scalar nir_scalar_chase_movs(nir_scalar s);
 
 static inline nir_scalar
 nir_get_scalar(nir_def *def, unsigned channel)
@@ -4452,6 +4476,12 @@ static inline nir_variable *
 nir_intrinsic_get_var(const nir_intrinsic_instr *intrin, unsigned i)
 {
    return nir_deref_instr_get_variable(nir_src_as_deref(intrin->src[i]));
+}
+
+static inline nir_variable *
+nir_cmat_call_get_var(const nir_cmat_call_instr *call, unsigned i)
+{
+   return nir_deref_instr_get_variable(nir_src_as_deref(call->params[i]));
 }
 
 /*
@@ -5563,6 +5593,7 @@ bool nir_split_var_copies(nir_shader *shader);
 bool nir_separate_merged_clip_cull_io(nir_shader *nir);
 bool nir_split_per_member_structs(nir_shader *shader);
 bool nir_split_struct_vars(nir_shader *shader, nir_variable_mode modes);
+bool nir_opt_scalar_array_vars_to_vec(nir_shader *shader, nir_variable_mode modes);
 
 bool nir_lower_returns_impl(nir_function_impl *impl);
 bool nir_lower_returns(nir_shader *shader);
@@ -5802,8 +5833,14 @@ typedef struct {
 } nir_lower_xfb_to_stores_options;
 
 bool nir_lower_xfb_to_stores(nir_shader *nir, const nir_lower_xfb_to_stores_options *options);
+
+typedef enum {
+   nir_io_indirect_loads_lower_vertex_index = BITFIELD_BIT(0),
+   nir_io_indirect_loads_lower_divergent_offset_only = BITFIELD_BIT(1),
+} nir_lower_io_indirect_loads_options;
+
 bool nir_lower_io_indirect_loads(nir_shader *nir, nir_variable_mode modes,
-                                 bool lower_indirect_vertex_index);
+                                 nir_lower_io_indirect_loads_options options);
 bool nir_remove_outputs(nir_shader *shader, mesa_shader_stage next_stage,
                         uint64_t remove_varying, uint64_t remove_sysval);
 
@@ -5949,6 +5986,7 @@ typedef struct nir_load_store_vectorize_options {
 } nir_load_store_vectorize_options;
 
 bool nir_opt_load_store_vectorize(nir_shader *shader, const nir_load_store_vectorize_options *options);
+bool nir_opt_vectorize_robust_ssbo_loads(nir_shader *shader);
 bool nir_opt_load_store_update_alignments(nir_shader *shader);
 
 typedef bool (*nir_lower_shader_calls_should_remat_func)(nir_instr *instr, void *data);
@@ -6355,6 +6393,7 @@ typedef struct nir_lower_tex_options {
    unsigned bt709_external;
    unsigned bt2020_external;
    unsigned yuv_full_range_external;
+   unsigned bypass_csc_external;
 
    /**
     * To emulate certain texture wrap modes, this can be used
@@ -6978,8 +7017,7 @@ bool nir_opt_find_array_copies(nir_shader *shader);
 bool nir_def_is_frag_coord_z(nir_def *def);
 bool nir_opt_fragdepth(nir_shader *shader);
 
-bool nir_opt_gcm(nir_shader *shader, bool value_number,
-                 bool hoist_tex_from_loops);
+bool nir_opt_gcm(nir_shader *shader, bool value_number);
 
 bool nir_opt_generate_bfi(nir_shader *shader);
 
@@ -7039,6 +7077,15 @@ typedef enum {
    /* The following options only impact load_global/ubo/ssbo. */
    nir_move_only_convergent =          BITFIELD_BIT(30),
    nir_move_only_divergent =           BITFIELD_BIT(31),
+
+   nir_move_all =
+      nir_move_const_undef | nir_move_alu | nir_move_copies |
+      nir_move_comparisons | nir_move_tex_sample | nir_move_tex_load |
+      nir_move_tex_load_fragment_mask | nir_move_tex_lod | nir_move_tex_query |
+      nir_move_load_image | nir_move_load_image_fragment_mask |
+      nir_move_query_image | nir_move_load_input | nir_move_load_global |
+      nir_move_load_ubo | nir_move_load_ssbo | nir_move_load_uniform |
+      nir_move_load_buffer_amd | nir_move_load_frag_coord,
 } nir_move_options;
 
 bool nir_can_move_instr(nir_instr *instr, nir_move_options options);
@@ -7140,9 +7187,20 @@ bool nir_opt_uniform_atomics(nir_shader *shader, bool fs_atomics_predicated);
 bool nir_opt_uniform_subgroup(nir_shader *shader,
                               const nir_lower_subgroups_options *);
 
+typedef struct nir_opt_shared_vars_to_subgroup_options {
+   bool optimize_constant_access_to_uniform;
+   bool optimize_divergent_access_to_shuffle;
+
+   /* Whether workgroup ids are assigned in linear order inside
+    * the subgroups.
+    */
+   bool linear_workgroup_ids;
+   unsigned ballot_num_components;
+   unsigned ballot_size;
+} nir_opt_shared_vars_to_subgroup_options;
+
 bool nir_opt_shared_vars_to_subgroup(nir_shader *shader,
-                                     unsigned ballot_num_components,
-                                     unsigned ballot_size);
+                                     const nir_opt_shared_vars_to_subgroup_options *options);
 
 bool nir_opt_vectorize(nir_shader *shader, nir_vectorize_cb filter,
                        void *data);
@@ -7230,6 +7288,12 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
 bool
 nir_addition_might_overflow(nir_shader *shader, struct hash_table *range_ht,
                             nir_scalar ssa, unsigned const_val);
+
+bool
+nir_is_op_nuw(nir_shader *shader, struct hash_table *range_ht, nir_op op, nir_scalar src0, nir_scalar src1);
+
+bool
+nir_is_scalar_nuw(nir_shader *shader, struct hash_table *range_ht, nir_scalar scalar);
 
 typedef struct nir_opt_preamble_options {
    /* True if gl_DrawID is considered uniform, i.e. if the preamble is run

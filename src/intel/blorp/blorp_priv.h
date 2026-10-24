@@ -37,7 +37,13 @@ extern "C" {
 #endif
 
 
-#define BLORP_INLINE_PARAM_THREAD_GROUP_ID_Z_DIMENSION (0)
+#define BLORP_INLINE_PARAM_PUSH_ADDRESS_LDW            (0)
+#define BLORP_INLINE_PARAM_PUSH_ADDRESS_UDW            (4)
+#define BLORP_INLINE_PARAM_THREAD_GROUP_ID_Z_DIMENSION (8)
+#define BLORP_INLINE_PARAM_SURFACES_LDW                (12)
+#define BLORP_INLINE_PARAM_SURFACES_UDW                (16)
+#define BLORP_INLINE_PARAM_SAMPLER_LDW                 (20)
+#define BLORP_INLINE_PARAM_SAMPLER_UDW                 (24)
 
 void blorp_init(struct blorp_context *blorp, void *driver_ctx,
                 struct isl_device *isl_dev, const struct blorp_config *config);
@@ -73,7 +79,7 @@ struct blorp_compiler {
 /**
  * Binding table indices used by BLORP.
  */
-enum {
+enum blorp_binding {
    BLORP_RENDERBUFFER_BT_INDEX,
    BLORP_TEXTURE_BT_INDEX,
    BLORP_TEXBUF_BT_INDEX,
@@ -336,13 +342,17 @@ struct blorp_params
    unsigned num_layers;
    bool dst_clear_color_as_input;
 
+   bool use_efficient_64bit;
    bool use_pre_baked_binding_table;
-   uint32_t pre_baked_binding_table_offset;
+   /* Binding table offset or pointer to the RENDER_SURFACE_STATE in efficient
+    * 64bit mode.
+    */
+   uint64_t pre_baked_binding_table_offset;
 
-   uint32_t vs_prog_kernel;
-   uint32_t sf_prog_kernel;
-   uint32_t wm_prog_kernel;
-   uint32_t cs_prog_kernel;
+   uint64_t vs_prog_kernel;
+   uint64_t sf_prog_kernel;
+   uint64_t wm_prog_kernel;
+   uint64_t cs_prog_kernel;
 
    /* These are pointers to struct {brw,elk}_stage_prog_data. */
    void *vs_prog_data;
@@ -359,7 +369,7 @@ blorp_op_to_intel_measure_snapshot(enum blorp_op op);
 
 const char *blorp_op_to_name(enum blorp_op op);
 
-void blorp_params_init(struct blorp_params *params);
+void blorp_params_init(struct blorp_params *params, struct blorp_context *blorp);
 
 #pragma pack(push, 1)
 struct blorp_base_key
@@ -367,6 +377,7 @@ struct blorp_base_key
    char name[8];
    enum blorp_shader_type shader_type;
    enum blorp_shader_pipeline shader_pipeline;
+   bool efficient_64bit;
 };
 #pragma pack(pop)
 
@@ -375,13 +386,14 @@ struct blorp_base_key
  * want to ensure that all their bytes - not just fields, but also holes and
  * padding - get properly initialized. That's why we do a memset() here.
  */
-#define BLORP_KEY_INIT(_key, _shader_type, _pipeline) do { \
+#define BLORP_KEY_INIT(_key, _context, _shader_type, _pipeline) do { \
    __typeof(_key) *_k = &(_key); \
    memset(_k, 0, sizeof(*_k)); \
    _k->base = (struct blorp_base_key) { \
       .name = "blorp", \
       .shader_type = (_shader_type), \
       .shader_pipeline = (_pipeline), \
+      .efficient_64bit = (_context)->config.use_efficient_64bit, \
    }; \
 } while(0)
 

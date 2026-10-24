@@ -48,6 +48,7 @@ __fd6_setup_blend_variant(struct fd6_blend_stateobj *blend,
    enum a3xx_rop_code rop = ROP_COPY;
    bool reads_dest = false;
    unsigned mrt_blend = 0;
+   bool is_yuv = cso->is_yuv;
 
    if (cso->logicop_enable) {
       rop = (enum a3xx_rop_code)cso->logicop_func; /* maps 1:1 */
@@ -61,10 +62,12 @@ __fd6_setup_blend_variant(struct fd6_blend_stateobj *blend,
    unsigned nregs = (3 * A6XX_MAX_RENDER_TARGETS) + 3;
    fd_crb crb(blend->ctx->pipe, nregs);
 
-   for (unsigned i = 0; i <= cso->max_rt; i++) {
+   unsigned max_rt = is_yuv ? MAX2(cso->max_rt, 1) : cso->max_rt;
+
+   for (unsigned i = 0; i <= max_rt; i++) {
       const struct pipe_rt_blend_state *rt;
 
-      if (cso->independent_blend_enable)
+      if (cso->independent_blend_enable && i <= cso->max_rt)
          rt = &cso->rt[i];
       else
          rt = &cso->rt[0];
@@ -82,14 +85,14 @@ __fd6_setup_blend_variant(struct fd6_blend_stateobj *blend,
                  .alpha_blend_en = rt->blend_enable,
                  .rop_enable = cso->logicop_enable,
                  .rop_code = rop,
-                 .component_enable = rt->colormask,
+                 .component_enable = (is_yuv && i == 1) ? 0xf : rt->colormask,
                ));
 
       if (CHIP == A8XX) {
          crb.add(SP_MRT_BLEND_CNTL_REG(CHIP, i,
                  .color_blend_en = rt->blend_enable,
                  .alpha_blend_en = rt->blend_enable,
-                 .component_write_mask = rt->colormask,
+                 .component_write_mask = (is_yuv && i == 1) ? 0xf : rt->colormask,
          ));
       }
 
@@ -104,6 +107,7 @@ __fd6_setup_blend_variant(struct fd6_blend_stateobj *blend,
 
    /* sRGB + dither on a7xx goes badly: */
    bool dither = (CHIP < A7XX) ? cso->dither : false;
+   bool independent_blend = cso->independent_blend_enable || is_yuv;
 
    crb.add(A6XX_RB_DITHER_CNTL(
             .dither_mode_mrt0 = dither ? DITHER_ALWAYS : DITHER_DISABLE,
@@ -117,14 +121,14 @@ __fd6_setup_blend_variant(struct fd6_blend_stateobj *blend,
       ))
      .add(SP_BLEND_CNTL(CHIP,
             .enable_blend = mrt_blend,
-            .independent_blend_en = cso->independent_blend_enable,
+            .independent_blend_en = independent_blend,
             .dual_color_in_enable = blend->use_dual_src_blend,
             .alpha_to_coverage = cso->alpha_to_coverage,
             .alpha_to_one = cso->alpha_to_one,
        ))
      .add(A6XX_RB_BLEND_CNTL(
             .blend_reads_dest = mrt_blend,
-            .independent_blend = cso->independent_blend_enable,
+            .independent_blend = independent_blend,
             .dual_color_in_enable = blend->use_dual_src_blend,
             .alpha_to_coverage = cso->alpha_to_coverage,
             .alpha_to_one = cso->alpha_to_one,

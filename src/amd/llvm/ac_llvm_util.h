@@ -51,6 +51,12 @@ struct ac_llvm_compiler {
 LLVMTargetRef ac_get_llvm_target(const char *triple);
 void ac_llvm_run_atexit_for_destructors(void);
 bool ac_is_llvm_processor_supported(LLVMTargetMachineRef tm, const char *processor);
+#if LLVM_VERSION_MAJOR >= 24
+/* Returns the "amdgpu<major>.<minor><stepping>" subarch triple name, or a bare
+ * "amdgpu" if the family's processor is not recognized. */
+const char *ac_get_llvm_subarch_name(enum radeon_family family);
+bool ac_is_llvm_subarch_supported(const char *subarch);
+#endif
 void ac_reset_llvm_all_options_occurrences();
 void ac_add_attr_dereferenceable(LLVMValueRef val, uint64_t bytes);
 void ac_add_attr_alignment(LLVMValueRef val, uint64_t bytes);

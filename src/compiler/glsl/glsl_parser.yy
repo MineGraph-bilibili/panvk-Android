@@ -105,6 +105,7 @@ static bool match_layout_qualifier(const char *s1, const char *s2,
    float real;
    double dreal;
    const char *identifier;
+   enum yuv_csc_standard csc_standard;
 
    struct ast_type_qualifier type_qualifier;
 
@@ -159,6 +160,7 @@ static bool match_layout_qualifier(const char *s1, const char *s2,
 %token <n> INTCONSTANT UINTCONSTANT BOOLCONSTANT
 %token <n64> INT64CONSTANT UINT64CONSTANT
 %token <identifier> FIELD_SELECTION
+%token <csc_standard> CSCSTANDARD
 %token LEFT_OP RIGHT_OP
 %token INC_OP DEC_OP LE_OP GE_OP EQ_OP NE_OP
 %token AND_OP OR_OP XOR_OP MUL_ASSIGN DIV_ASSIGN ADD_ASSIGN
@@ -311,6 +313,7 @@ translation_unit:
          }
          state->symbols->add_default_precision_qualifier("sampler2D", ast_precision_low);
          state->symbols->add_default_precision_qualifier("samplerExternalOES", ast_precision_low);
+         state->symbols->add_default_precision_qualifier("__samplerExternal2DY2YEXT", ast_precision_low);
          state->symbols->add_default_precision_qualifier("samplerCube", ast_precision_low);
          state->symbols->add_default_precision_qualifier("atomic_uint", ast_precision_high);
       }
@@ -492,6 +495,13 @@ primary_expression:
       $$ = new(ctx) ast_expression(ast_bool_constant, NULL, NULL, NULL);
       $$->set_location(@1);
       $$->primary_expression.bool_constant = $1;
+   }
+   | CSCSTANDARD
+   {
+      linear_ctx *ctx = state->linalloc;
+      $$ = new(ctx) ast_expression(ast_csc_standard, NULL, NULL, NULL);
+      $$->set_location(@1);
+      $$->primary_expression.csc_standard = $1;
    }
    | '(' expression ')'
    {
@@ -1745,6 +1755,24 @@ layout_qualifier_id:
             _mesa_glsl_warning(& @1, state,
                                "GL_NV_viewport_array2 layout "
                                "identifier `%s' used", $1);
+         }
+      }
+
+      /* Layout qualifier for EXT_YUV_target. */
+      if (match_layout_qualifier($1, "yuv", state) == 0) {
+         if (state->stage != MESA_SHADER_FRAGMENT) {
+            _mesa_glsl_error(& @1, state,
+                              "yuv layout qualifier only valid in fragment "
+                              "shaders");
+         }
+
+         if (state->EXT_YUV_target_enable) {
+            $$.flags.q.yuv = 1;
+         } else {
+            _mesa_glsl_error(& @1, state,
+                              "yuv layout qualifier present, but the "
+                              "EXT_YUV_target_enable extension is not "
+                              "enabled.");
          }
       }
 

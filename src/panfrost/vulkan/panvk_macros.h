@@ -52,6 +52,9 @@ panvk_catch_indirect_alloc_failure(VkResult error)
       case 7:                                                                  \
          panvk_arch_name(name, v7)(__VA_ARGS__);                               \
          break;                                                                \
+      case 9:                                                                  \
+         panvk_arch_name(name, v9)(__VA_ARGS__);                               \
+         break;                                                                \
       case 10:                                                                 \
          panvk_arch_name(name, v10)(__VA_ARGS__);                              \
          break;                                                                \
@@ -81,12 +84,15 @@ panvk_catch_indirect_alloc_failure(VkResult error)
       case 7:                                                                  \
          ret = panvk_arch_name(name, v7)(__VA_ARGS__);                         \
          break;                                                                \
-      case 10:                                                                \
-         ret = panvk_arch_name(name, v10)(__VA_ARGS__);                       \
-         break;                                                               \
-      case 11:                                                                \
-         ret = panvk_arch_name(name, v11)(__VA_ARGS__);                       \
-         break;                                                               \
+      case 9:                                                                  \
+         ret = panvk_arch_name(name, v9)(__VA_ARGS__);                         \
+         break;                                                                \
+      case 10:                                                                 \
+         ret = panvk_arch_name(name, v10)(__VA_ARGS__);                        \
+         break;                                                                \
+      case 11:                                                                 \
+         ret = panvk_arch_name(name, v11)(__VA_ARGS__);                        \
+         break;                                                                \
       case 12:                                                                 \
          ret = panvk_arch_name(name, v12)(__VA_ARGS__);                        \
          break;                                                                \

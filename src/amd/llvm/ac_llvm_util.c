@@ -83,26 +83,47 @@ LLVMTargetRef ac_get_llvm_target(const char *triple)
 
 static LLVMTargetMachineRef ac_create_target_machine(enum radeon_family family,
                                                      enum ac_target_machine_options tm_options,
-                                                     LLVMCodeGenOptLevel level,
-                                                     const char **out_triple)
+                                                     LLVMCodeGenOptLevel level)
 {
    assert(family >= CHIP_TAHITI);
-   const char *triple = (tm_options & AC_TM_SUPPORTS_SPILL) ? "amdgcn-mesa-mesa3d" : "amdgcn--";
-   LLVMTargetRef target = ac_get_llvm_target(triple);
+
+   const char *vendor_os = (tm_options & AC_TM_SUPPORTS_SPILL) ? "-mesa-mesa3d" : "--";
+   char triple[64];
+   int triple_len;
+
+#if LLVM_VERSION_MAJOR >= 24
+   /* The ISA is encoded in the triple's subarch field, so the cpu name is left
+    * empty. An unrecognized subarch is fatal in LLVMCreateTargetMachine, so
+    * validate it first.
+    */
+   const char *subarch = ac_get_llvm_subarch_name(family);
+   if (!ac_is_llvm_subarch_supported(subarch)) {
+      fprintf(stderr, "amd: LLVM doesn't support %s, bailing out...\n", subarch);
+      return NULL;
+   }
+   triple_len = snprintf(triple, sizeof(triple), "%s%s", subarch, vendor_os);
+   const char *name = "";
+#else
+   triple_len = snprintf(triple, sizeof(triple), "amdgcn%s", vendor_os);
    const char *name = ac_get_llvm_processor_name(family);
+#endif
+
+   if (triple_len < 0 || triple_len >= (int)sizeof(triple)) {
+      fprintf(stderr, "amd: failed to format LLVM triple, bailing out...\n");
+      return NULL;
+   }
+
+   LLVMTargetRef target = ac_get_llvm_target(triple);
 
    LLVMTargetMachineRef tm =
       LLVMCreateTargetMachine(target, triple, name, "", level,
                               LLVMRelocDefault, LLVMCodeModelDefault);
 
-   if (!ac_is_llvm_processor_supported(tm, name)) {
+   if (name[0] && !ac_is_llvm_processor_supported(tm, name)) {
       LLVMDisposeTargetMachine(tm);
       fprintf(stderr, "amd: LLVM doesn't support %s, bailing out...\n", name);
       return NULL;
    }
-
-   if (out_triple)
-      *out_triple = triple;
 
    return tm;
 }
@@ -160,10 +181,9 @@ void ac_llvm_set_target_features(LLVMValueRef F, struct ac_llvm_context *ctx, bo
 bool ac_init_llvm_compiler(struct ac_llvm_compiler *compiler, enum radeon_family family,
                            enum ac_target_machine_options tm_options)
 {
-   const char *triple;
    memset(compiler, 0, sizeof(*compiler));
 
-   compiler->tm = ac_create_target_machine(family, tm_options, LLVMCodeGenLevelDefault, &triple);
+   compiler->tm = ac_create_target_machine(family, tm_options, LLVMCodeGenLevelDefault);
    if (!compiler->tm)
       return false;
 

@@ -100,6 +100,8 @@ simple_type("dmat4x3", "GL_DOUBLE_MAT4x3", "GLSL_TYPE_DOUBLE", 3, 4)
 
 simple_type("atomic_uint", "GL_UNSIGNED_INT_ATOMIC_COUNTER", "GLSL_TYPE_ATOMIC_UINT", 1, 1)
 
+simple_type("yuvCscStandardEXT", "GL_INVALID_ENUM", "GLSL_TYPE_YUV_CSC_STANDARD_EXT",  1, 1)
+
 sampler_type("sampler",           "GL_SAMPLER_1D",                   "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_1D",   0, 0, "GLSL_TYPE_VOID")
 sampler_type("sampler1D",         "GL_SAMPLER_1D",                   "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_1D",   0, 0, "GLSL_TYPE_FLOAT")
 sampler_type("sampler2D",         "GL_SAMPLER_2D",                   "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_2D",   0, 0, "GLSL_TYPE_FLOAT")
@@ -137,6 +139,18 @@ sampler_type("usamplerBuffer",    "GL_UNSIGNED_INT_SAMPLER_BUFFER",             
 sampler_type("usampler2DMS",      "GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE",       "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_MS",   0, 0, "GLSL_TYPE_UINT")
 sampler_type("usampler2DMSArray", "GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY", "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_MS",   0, 1, "GLSL_TYPE_UINT")
 
+sampler_type("u16sampler1D",        "GL_UNSIGNED_INT_SAMPLER_1D",                   "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_1D",   0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16sampler2D",        "GL_UNSIGNED_INT_SAMPLER_2D",                   "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_2D",   0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16sampler3D",        "GL_UNSIGNED_INT_SAMPLER_3D",                   "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_3D",   0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16samplerCube",      "GL_UNSIGNED_INT_SAMPLER_CUBE",                 "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_CUBE", 0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16sampler1DArray",   "GL_UNSIGNED_INT_SAMPLER_1D_ARRAY",             "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_1D",   0, 1, "GLSL_TYPE_UINT16")
+sampler_type("u16sampler2DArray",   "GL_UNSIGNED_INT_SAMPLER_2D_ARRAY",             "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_2D",   0, 1, "GLSL_TYPE_UINT16")
+sampler_type("u16samplerCubeArray", "GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY",       "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_CUBE", 0, 1, "GLSL_TYPE_UINT16")
+sampler_type("u16sampler2DRect",    "GL_UNSIGNED_INT_SAMPLER_2D_RECT",              "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_RECT", 0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16samplerBuffer",    "GL_UNSIGNED_INT_SAMPLER_BUFFER",               "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_BUF",  0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16sampler2DMS",      "GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE",       "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_MS",   0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16sampler2DMSArray", "GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY", "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_MS",   0, 1, "GLSL_TYPE_UINT16")
+
 sampler_type("samplerShadow",          "GL_SAMPLER_1D_SHADOW",             "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_1D",       1, 0, "GLSL_TYPE_VOID")
 sampler_type("sampler1DShadow",        "GL_SAMPLER_1D_SHADOW",             "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_1D",       1, 0, "GLSL_TYPE_FLOAT")
 sampler_type("sampler2DShadow",        "GL_SAMPLER_2D_SHADOW",             "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_2D",       1, 0, "GLSL_TYPE_FLOAT")
@@ -147,6 +161,8 @@ sampler_type("samplerCubeArrayShadow", "GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW", "GLSL
 sampler_type("sampler2DRectShadow",    "GL_SAMPLER_2D_RECT_SHADOW",        "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_RECT",     1, 0, "GLSL_TYPE_FLOAT")
 
 sampler_type("samplerExternalOES",     "GL_SAMPLER_EXTERNAL_OES",          "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_EXTERNAL", 0, 0, "GLSL_TYPE_FLOAT")
+
+sampler_type("samplerExternal2DY2YEXT", "GL_SAMPLER_EXTERNAL_2D_Y2Y_EXT", "GLSL_TYPE_SAMPLER", "GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y", 0, 0, "GLSL_TYPE_FLOAT")
 
 sampler_type("texture1D",         "GL_SAMPLER_1D",                   "GLSL_TYPE_TEXTURE", "GLSL_SAMPLER_DIM_1D",   0, 0, "GLSL_TYPE_FLOAT")
 sampler_type("texture2D",         "GL_SAMPLER_2D",                   "GLSL_TYPE_TEXTURE", "GLSL_SAMPLER_DIM_2D",   0, 0, "GLSL_TYPE_FLOAT")
@@ -229,6 +245,17 @@ sampler_type("uimage2DArray",   "GL_UNSIGNED_INT_IMAGE_2D_ARRAY",             "G
 sampler_type("uimageCubeArray", "GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY",       "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_CUBE",   0, 1, "GLSL_TYPE_UINT")
 sampler_type("uimage2DMS",      "GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE",       "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_MS",     0, 0, "GLSL_TYPE_UINT")
 sampler_type("uimage2DMSArray", "GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY", "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_MS",     0, 1, "GLSL_TYPE_UINT")
+sampler_type("u16image1D",        "GL_UNSIGNED_INT_IMAGE_1D",                   "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_1D",     0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16image2D",        "GL_UNSIGNED_INT_IMAGE_2D",                   "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_2D",     0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16image3D",        "GL_UNSIGNED_INT_IMAGE_3D",                   "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_3D",     0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16image2DRect",    "GL_UNSIGNED_INT_IMAGE_2D_RECT",              "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_RECT",   0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16imageCube",      "GL_UNSIGNED_INT_IMAGE_CUBE",                 "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_CUBE",   0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16imageBuffer",    "GL_UNSIGNED_INT_IMAGE_BUFFER",               "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_BUF",    0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16image1DArray",   "GL_UNSIGNED_INT_IMAGE_1D_ARRAY",             "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_1D",     0, 1, "GLSL_TYPE_UINT16")
+sampler_type("u16image2DArray",   "GL_UNSIGNED_INT_IMAGE_2D_ARRAY",             "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_2D",     0, 1, "GLSL_TYPE_UINT16")
+sampler_type("u16imageCubeArray", "GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY",       "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_CUBE",   0, 1, "GLSL_TYPE_UINT16")
+sampler_type("u16image2DMS",      "GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE",       "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_MS",     0, 0, "GLSL_TYPE_UINT16")
+sampler_type("u16image2DMSArray", "GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY", "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_MS",     0, 1, "GLSL_TYPE_UINT16")
 sampler_type("i64image1D",        "GL_INT_IMAGE_1D",                          "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_1D",     0, 0, "GLSL_TYPE_INT64")
 sampler_type("i64image2D",        "GL_INT_IMAGE_2D",                          "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_2D",     0, 0, "GLSL_TYPE_INT64")
 sampler_type("i64image3D",        "GL_INT_IMAGE_3D",                          "GLSL_TYPE_IMAGE", "GLSL_SAMPLER_DIM_3D",     0, 0, "GLSL_TYPE_INT64")

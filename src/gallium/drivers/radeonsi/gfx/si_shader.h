@@ -263,10 +263,10 @@ enum {
  */
 #define GS_STATE_NUM_ES_OUTPUTS__SHIFT          14
 #define GS_STATE_NUM_ES_OUTPUTS__MASK           0x3f
-#define GS_STATE_CULL_FACE_FRONT__SHIFT         20
-#define GS_STATE_CULL_FACE_FRONT__MASK          0x1
-#define GS_STATE_CULL_FACE_BACK__SHIFT          21
-#define GS_STATE_CULL_FACE_BACK__MASK           0x1
+#define GS_STATE_CULL_FACE_NEGATIVE_DETERMINANT__SHIFT  20
+#define GS_STATE_CULL_FACE_NEGATIVE_DETERMINANT__MASK   0x1
+#define GS_STATE_CULL_FACE_POSITIVE_DETERMINANT__SHIFT  21
+#define GS_STATE_CULL_FACE_POSITIVE_DETERMINANT__MASK   0x1
 /* Small prim filter precision = num_samples / quant_mode where num_samples is in {1, 2, 4, 8} and
  * quant_mode is in {256, 1024, 4096}, which is equal to 1/2^n where n is between 5 and 12.
  *

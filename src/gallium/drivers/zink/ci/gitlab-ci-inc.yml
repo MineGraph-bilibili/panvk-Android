@@ -250,8 +250,6 @@
     GPU_VERSION: zink-anv-adl
     HWCI_KERNEL_MODULES: i915
     LAVA_CMDLINE: null
-    EGL_PLATFORM: surfaceless
-    WAFFLE_PLATFORM: gbm
 
 .zink-anv-tgl-test:
   extends:
@@ -272,8 +270,6 @@
     - .zink-trace-test
   variables:
     GPU_VERSION: zink-anv-tgl
-    EGL_PLATFORM: surfaceless
-    WAFFLE_PLATFORM: gbm
 
 .zink-nvk-test-valve:
   extends:

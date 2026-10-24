@@ -81,3 +81,21 @@ mtl_new_texture_with_descriptor(mtl_heap *heap,
       return [hp newTextureWithDescriptor:descriptor offset:offset];
    }
 }
+
+void
+mtl_heap_set_label(mtl_heap *heap, const char *label)
+{
+   @autoreleasepool {
+      id<MTLHeap> h = (id<MTLHeap>)heap;
+      h.label = @(label);
+   }
+}
+
+void
+mtl_resource_set_label(mtl_resource *resource, const char *label)
+{
+   @autoreleasepool {
+      id<MTLResource> res = (id<MTLResource>)resource;
+      res.label = @(label);
+   }
+}

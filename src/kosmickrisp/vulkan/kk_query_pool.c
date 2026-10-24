@@ -9,6 +9,8 @@
 
 #include "kk_query_pool.h"
 
+#include "kosmickrisp/libkk/kk_query.h"
+
 #include "kk_bo.h"
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
@@ -74,8 +76,9 @@ kk_query_report_addr(struct kk_device *dev, struct kk_query_pool *pool,
    struct kk_bo *bo =
       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
 
-   uint16_t *remap_index = kk_pool_index_ptr(pool);
-   return bo->gpu + pool->query_start + (remap_index[query] * sizeof(uint64_t));
+   uint32_t index =
+      kk_pool_is_ts(pool) ? query : kk_pool_index_ptr(pool)[query];
+   return bo->gpu + pool->query_start + (index * sizeof(uint64_t));
 }
 
 static uint64_t
@@ -93,9 +96,10 @@ kk_query_report_map(struct kk_device *dev, struct kk_query_pool *pool,
       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
 
    uint64_t *queries = (uint64_t *)(bo->cpu + pool->query_start);
-   uint16_t *remap_index = kk_pool_index_ptr(pool);
+   uint32_t index =
+      kk_pool_is_ts(pool) ? query : kk_pool_index_ptr(pool)[query];
 
-   return (struct kk_query_report *)&queries[remap_index[query]];
+   return (struct kk_query_report *)&queries[index];
 }
 
 static void
@@ -107,11 +111,18 @@ host_zero_queries(struct kk_device *dev, struct kk_query_pool *pool,
       struct kk_query_report *reports =
          kk_query_report_map(dev, pool, first_index + i);
 
-      uint32_t *available = kk_query_available_map(pool, first_index + i);
-      *available = set_available;
+      /* Timestamp pools have no availability word: an unavailable query is
+       * the sentinel sitting in the report, which the resolve overwrites. */
+      uint64_t value = 0;
+      if (kk_pool_is_ts(pool)) {
+         value = set_available ? 0 : LIBKK_QUERY_UNAVAILABLE;
+      } else {
+         uint32_t *available = kk_query_available_map(pool, first_index + i);
+         *available = set_available;
+      }
 
       for (unsigned j = 0; j < kk_reports_per_query(pool); ++j) {
-         reports[j].value = 0;
+         reports[j].value = value;
       }
    }
 }
@@ -134,12 +145,19 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
     * than 0 */
    assert(pool->vk.query_count > 0);
 
-   /* We place the availability, then index, and then data (if in this buffer) */
-   pool->index_start = align(pool->vk.query_count * sizeof(uint32_t),
-                             sizeof(struct kk_query_report));
+   /* We place the availability, then index, and then data (if in this buffer).
+    * Timestamp pools carry availability in the report itself, so they need no
+    * availability array. */
+   uint32_t availability_size = 0;
+   uint32_t index_size = 0;
+   if (!kk_pool_is_ts(pool)) {
+      availability_size = pool->vk.query_count * sizeof(uint32_t);
+      index_size = sizeof(uint16_t) * pool->vk.query_count;
+   }
+
+   pool->index_start = align(availability_size, sizeof(struct kk_query_report));
    uint32_t bo_size =
-      align(pool->index_start + sizeof(uint16_t) * pool->vk.query_count,
-            sizeof(struct kk_query_report));
+      align(pool->index_start + index_size, sizeof(struct kk_query_report));
 
    uint32_t reports_per_query = kk_reports_per_query(pool);
    pool->query_stride = reports_per_query * sizeof(struct kk_query_report);
@@ -158,8 +176,8 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
-   uint16_t *remap_index = kk_pool_index_ptr(pool);
    if (kk_pool_is_oq(pool)) {
+      uint16_t *remap_index = kk_pool_index_ptr(pool);
 
       for (unsigned i = 0; i < pool->vk.query_count; ++i) {
          uint64_t zero = 0;
@@ -185,12 +203,6 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       if (pool->ts.heap == NULL) {
          kk_DestroyQueryPool(device, kk_query_pool_to_handle(pool), pAllocator);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      }
-      pool->ts.stage_map = UTIL_DYNARRAY_INIT;
-
-      /* set up default mapping for unique queries */
-      for (unsigned i = 0; i < pool->vk.query_count; ++i) {
-         remap_index[i] = i;
       }
    }
 
@@ -220,7 +232,6 @@ kk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
    } else if (kk_pool_is_ts(pool)) {
       if (pool->ts.heap)
          mtl_release(pool->ts.heap);
-      util_dynarray_fini(&pool->ts.stage_map);
    }
 
    kk_destroy_bo(dev, pool->bo);
@@ -248,9 +259,9 @@ emit_zero_queries(struct kk_cmd_buffer *cmd, struct kk_query_pool *pool,
       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
 
    struct libkk_reset_query_args info = {
-      .availability = pool->bo->gpu,
+      .availability = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu,
       .results = results_bo->gpu + pool->query_start,
-      .oq_index = pool->bo->gpu + pool->index_start,
+      .oq_index = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu + pool->index_start,
 
       .first_query = first_index,
       .reports_per_query = kk_reports_per_query(pool),
@@ -263,9 +274,7 @@ static uint32_t
 kk_mv_query_count(struct kk_cmd_buffer *cmd)
 {
    struct kk_rendering_state *render = &cmd->state.gfx.render;
-   return cmd->gfx.encoder && render->view_mask
-             ? util_bitcount(render->view_mask)
-             : 1;
+   return render->view_mask ? util_bitcount(render->view_mask) : 1;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -275,13 +284,12 @@ kk_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
 
-   assert(cmd->gfx.encoder == NULL);
+   assert(cmd->metal.render == NULL);
 
    /* A prior timestamp write may have a resolve still pending. Land it before
     * the reset zeroes the pool BO, otherwise the deferred resolve would clobber
     * the reset and leave the query spuriously available. */
-   if (util_dynarray_num_elements(&cmd->pre_gfx->ts_resolves,
-                                  struct kk_ts_resolve) > 0)
+   if (util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve) > 0)
       cs_end(cmd);
 
    emit_zero_queries(cmd, pool, firstQuery, queryCount, false);
@@ -297,7 +305,8 @@ typedef struct {
 static const StageMapping stage_lut[] = {
    {VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
        VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
-       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT |
+       VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
     MTL_RENDER_STAGE_TILE},
 
    {VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
@@ -311,25 +320,34 @@ static const StageMapping stage_lut[] = {
 
    {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+       VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+       VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+       VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
        VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
-       VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT,
+       VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+       VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT |
+       VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
     MTL_RENDER_STAGE_VERTEX},
 };
 
 static enum mtl_render_stages
 kk_pipeline_stages_to_mtl_render_stage(VkPipelineStageFlags2 vk_flags)
 {
-   if (vk_flags == VK_PIPELINE_STAGE_2_NONE) {
-      return 0;
-   }
+   /* `stage` is a first synchronization scope, where TOP_OF_PIPE and NONE both
+    * mean no stage of execution. */
+   if (vk_flags == VK_PIPELINE_STAGE_2_NONE)
+      return MTL_RENDER_STAGE_VERTEX;
 
    for (size_t i = 0; i < ARRAY_SIZE(stage_lut); ++i) {
       if (vk_flags & stage_lut[i].vk_flags) {
          return stage_lut[i].stage;
       }
    }
-   return 0;
+
+   /* There are currently no restrictions on non-renderpass stages being passed
+    * to vkCmdWriteTimestamp*() in a renderpass, map them to the last stage */
+   return MTL_RENDER_STAGE_TILE;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -346,63 +364,53 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    enum mtl_render_stages mtl_stage =
       kk_pipeline_stages_to_mtl_render_stage(stage);
 
-   /* The sampled value lives in the counter heap; queue a resolve into the pool
-    * BO (overwriting the unavailable sentinel) so both the host and GPU result
-    * paths can read it. Flushed on the GPU timeline at cs_end. */
-   struct kk_ts_resolve resolve = {
-      .heap = pool->ts.heap,
-      .index = query,
-      .dst_addr = kk_query_report_addr(dev, pool, query),
-   };
+   uint32_t heap_index = query;
 
-   /* non-gfx or not found*/
-   if (cmd->gfx.encoder && mtl_stage) {
-      uint64_t addr = kk_query_available_addr(pool, query);
-      for (uint32_t i = 0; i < count; i++) {
-         libkk_write_u32(cmd, kk_grid_1d(1), false, addr, true);
-         addr += sizeof(uint32_t);
-      }
-
+   if (cmd->metal.render) {
       /* If we've already issued a timestamp write for a render stage, reuse it
        * because reissuing might return a 0 timestamp
        */
-      util_dynarray_foreach(&pool->ts.stage_map, struct kk_ts_stage_entry,
+      bool reused = false;
+      util_dynarray_foreach(&cmd->ts_stage_map, struct kk_ts_stage_entry,
                             entry) {
-         if (entry->stage == mtl_stage && entry->pass == cmd->gfx.encoder) {
-            uint16_t *remap_index = kk_pool_index_ptr(pool);
-            remap_index[query] = entry->index;
-            return;
+         if (entry->stage == mtl_stage && entry->heap == pool->ts.heap) {
+            heap_index = entry->index;
+            reused = true;
+            break;
          }
       }
-      struct kk_ts_stage_entry entry = {.stage = mtl_stage,
-                                        .pass = cmd->gfx.encoder,
-                                        .index = query};
-      util_dynarray_append(&pool->ts.stage_map, entry);
 
-      mtl_render_write_timestamp(cmd->gfx.encoder, mtl_stage, pool->ts.heap,
-                                 query);
-      util_dynarray_append(&cmd->gfx.ts_resolves, resolve);
+      if (!reused) {
+         struct kk_ts_stage_entry entry = {.heap = pool->ts.heap,
+                                           .stage = mtl_stage,
+                                           .index = query};
+         util_dynarray_append(&cmd->ts_stage_map, entry);
+
+         mtl_render_write_timestamp(cmd->metal.render, mtl_stage, pool->ts.heap,
+                                    query);
+      }
    } else {
-      bool top = true;
-      struct kk_encoder_state *es;
+      /* compute encoder active or nothing active. If the latter, the write will
+       * create a new compute encoder.  The timestamp write needs compute work
+       * in the encoder to trigger it.  Rewrite the low half of the sentinel the
+       * report already holds, which leaves the query unavailable until the
+       * resolve lands. */
+      libkk_write_u32(cmd, kk_grid_1d(1), true,
+                      kk_query_report_addr(dev, pool, query),
+                      (uint32_t)LIBKK_QUERY_UNAVAILABLE);
 
-      const VkPipelineStageFlagBits2 bottom_mask =
-         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
-      if (cmd->gfx.encoder && ((stage & bottom_mask) != 0)) {
-         top = false;
-      }
-      es = top ? cmd->pre_gfx : cmd->post_gfx;
+      mtl_compute_write_timestamp(cmd->metal.compute, pool->ts.heap, query);
+   }
 
-      /* write the availability markers. For compute, this must happen before the
-       * timestamp write to ensure that there is compute work to trigger it. */
-      uint64_t addr = kk_query_available_addr(pool, query);
-      for (uint32_t i = 0; i < count; i++) {
-         libkk_write_u32(cmd, kk_grid_1d(1), top, addr, true);
-         addr += sizeof(uint32_t);
-      }
-
-      mtl_compute_write_timestamp(es->encoder, pool->ts.heap, query);
-      util_dynarray_append(&es->ts_resolves, resolve);
+   /* Resolve the Metal timestamp value to all multiview query indices so that
+    * they all become available. */
+   for (uint32_t i = 0; i < count; i++) {
+      struct kk_ts_resolve resolve = {
+         .heap = pool->ts.heap,
+         .index = heap_index,
+         .dst_addr = kk_query_report_addr(dev, pool, query + i),
+      };
+      util_dynarray_append(&cmd->ts_resolves, resolve);
    }
 }
 
@@ -452,6 +460,14 @@ static bool
 kk_query_is_available(struct kk_device *dev, struct kk_query_pool *pool,
                       uint32_t query)
 {
+   if (kk_pool_is_ts(pool)) {
+      /* The resolve of the sampled value is what makes the query available. */
+      const struct kk_query_report *report =
+         kk_query_report_map(dev, pool, query);
+      return p_atomic_read((const uint64_t *)&report->value) !=
+             LIBKK_QUERY_UNAVAILABLE;
+   }
+
    uint32_t *available = kk_query_available_map(pool, query);
    return p_atomic_read(available) != 0;
 }
@@ -539,24 +555,22 @@ kk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-kk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
-                           uint32_t firstQuery, uint32_t queryCount,
-                           VkBuffer dstBuffer, VkDeviceSize dstOffset,
-                           VkDeviceSize stride, VkQueryResultFlags flags)
+kk_CmdCopyQueryPoolResultsToMemoryKHR(
+   VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery,
+   uint32_t queryCount, const VkStridedDeviceAddressRangeKHR *pDstRange,
+   VkAddressCommandFlagsKHR dstFlags, VkQueryResultFlags flags)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
-   VK_FROM_HANDLE(kk_buffer, dst_buf, dstBuffer);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    /* Timestamp results are resolved into the pool BO on a deferred command
     * buffer; make sure any pending resolve lands before this copy reads it.
     * This also gives VK_QUERY_RESULT_WAIT_BIT its meaning for timestamps. */
-   if (util_dynarray_num_elements(&cmd->pre_gfx->ts_resolves,
-                                  struct kk_ts_resolve) > 0)
+   if (util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve) > 0)
       cs_end(cmd);
 
-   mtl_compute_encoder *encoder = cs_get_compute(cmd, true);
+   mtl_compute_encoder *encoder = cs_get_compute(cmd);
    /* The resolveCounterHeap runs on the blit stage and it needs to be available
     * for the compute job to copy results to the bo. */
    mtl_barrier_after_queue_stages(encoder, MTL_STAGE_BLIT, MTL_STAGE_DISPATCH);
@@ -565,11 +579,11 @@ kk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
 
    struct libkk_copy_queries_args args = {
-      .availability = pool->bo->gpu,
+      .availability = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu,
       .results = results_bo->gpu + pool->query_start,
-      .oq_index = pool->bo->gpu + pool->index_start,
-      .dst_addr = dst_buf->vk.device_address + dstOffset,
-      .dst_stride = stride,
+      .oq_index = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu + pool->index_start,
+      .dst_addr = pDstRange->address,
+      .dst_stride = pDstRange->stride,
       .first_query = firstQuery,
       .flags = flags,
       .reports_per_query = kk_reports_per_query(pool),

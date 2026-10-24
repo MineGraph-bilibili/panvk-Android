@@ -6,7 +6,7 @@ use crate::ir::*;
 use crate::ops::*;
 
 fn legalize_op_swizzles(b: &mut impl SSABuilder, op: &mut Op) {
-    let mut swizzle_bits = [0_u8; 4];
+    let mut swizzle_bits = [0_u8; Instr::MAX_SRC_COUNT];
     debug_assert!(op.srcs().len() <= swizzle_bits.len());
 
     for (i, (src, src_type)) in op.srcs_types().enumerate() {

@@ -51,7 +51,7 @@ The exact supported features vary per driver:
      -
    * - V3DV
      - ``gpu.counters.v3d``
-     -
+     - ``gpu.renderstages.broadcom``
 
 Run
 ---
@@ -225,7 +225,8 @@ V3D / V3DV
 
 As we can only have one performance monitor active at a given time, we can only monitor
 32 performance counters. There is a need to define the performance counters of interest
-for pps_producer using the environment variable ``V3D_DS_COUNTER``.
+for pps_producer using the environment variable ``V3D_DS_COUNTER``. This is not required
+for render-stage tracing, as pps_producer is not essential to it.
 
 .. code-block:: sh
 

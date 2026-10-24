@@ -18,12 +18,13 @@
 /**
  * Return the IR key for the shader cache.
  */
-void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
-                         unsigned wave_size, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN])
+void si_get_ir_cache_key(struct si_shader *shader, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN])
 {
    struct blob blob = {};
    unsigned ir_size;
    void *ir_binary;
+   struct si_shader_selector *sel = shader->selector;
+   bool is_ge = (sel->stage <= MESA_SHADER_GEOMETRY || sel->stage == MESA_SHADER_MESH);
 
    if (sel->nir_binary) {
       ir_binary = sel->nir_binary;
@@ -43,10 +44,10 @@ void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
     */
    unsigned shader_variant_flags = 0;
 
-   if (ngg)
+   if (is_ge && shader->key.ge.as_ngg)
       shader_variant_flags |= 1 << 0;
    /* bit gap */
-   if (wave_size == 32)
+   if (shader->wave_size == 32)
       shader_variant_flags |= 1 << 2;
    /* bit gap */
    /* use_ngg_culling disables NGG passthrough for non-culling shaders to reduce context
@@ -65,7 +66,7 @@ void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
    if ((sel->stage == MESA_SHADER_VERTEX ||
         sel->stage == MESA_SHADER_TESS_EVAL ||
         sel->stage == MESA_SHADER_GEOMETRY) &&
-       !es &&
+       (!is_ge || !shader->key.ge.as_es) &&
        sel->screen->options.vrs2x2)
       shader_variant_flags |= 1 << 10;
    if (sel->screen->options.inline_uniforms)

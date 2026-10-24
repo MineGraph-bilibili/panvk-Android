@@ -32,20 +32,22 @@ class Opcode:
 def normalize_hw_opcode(hw_opcode: HwOpcodeInput) -> HwOpcode:
     if isinstance(hw_opcode, int):
         return {"pre_xe": hw_opcode, "xe": hw_opcode, "xe2": hw_opcode,
-                "xe3p": hw_opcode}
+                "xe3p": hw_opcode, "xe3p_64bit": hw_opcode}
 
-    assert hw_opcode.keys() <= {"pre_xe", "xe", "xe2", "xe3p"}
+    assert hw_opcode.keys() <= {"pre_xe", "xe", "xe2", "xe3p", "xe3p_64bit"}
     assert all(value is None or isinstance(value, int)
                for value in hw_opcode.values())
     pre_xe = hw_opcode.get("pre_xe")
     xe = hw_opcode.get("xe", pre_xe)
     xe2 = hw_opcode.get("xe2", xe)
     xe3p = hw_opcode.get("xe3p", xe2)
+    xe3p_64bit = hw_opcode.get("xe3p_64bit", xe3p)
     return {
         "pre_xe": pre_xe,
         "xe": xe,
         "xe2": xe2,
         "xe3p": xe3p,
+        "xe3p_64bit": xe3p_64bit,
     }
 
 
@@ -157,6 +159,7 @@ op('dpas', 'GEN_FORMAT_DPAS_THREE_SRC', {"xe": 89}, num_srcs=3)
 
 op('send',   'GEN_FORMAT_SEND', 49, num_srcs=1)
 op('sendc',  'GEN_FORMAT_SEND', 50, num_srcs=1)
+op('sendg',  'GEN_FORMAT_SEND', {"xe3p_64bit": 51}, num_srcs=1)
 op('sends',  'GEN_FORMAT_SEND', {"pre_xe": 51, "xe": None}, num_srcs=1)
 op('sendsc', 'GEN_FORMAT_SEND', {"pre_xe": 52, "xe": None}, num_srcs=1)
 

@@ -525,9 +525,8 @@ struct nv30_vertprog;
 
 //XXX: needed to make it build, clean this up!
 void
-_nvfx_fragprog_translate(uint16_t oclass, struct nv30_fragprog *fp);
+_nvfx_fragprog_translate(uint16_t oclass, struct nv30_fragprog *fp, struct util_debug_callback *debug);
 
-bool
-_nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp);
+bool _nvfx_vertprog_translate(uint16_t oclass, struct nv30_vertprog *vp, struct util_debug_callback *debug);
 
 #endif

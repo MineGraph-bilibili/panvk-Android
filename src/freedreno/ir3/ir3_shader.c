@@ -267,15 +267,15 @@ disasm_collect(struct ir3_shader_variant *v, uint8_t *mismatch_array,
    return stream_data;
 }
 
-static uint16_t
+static uint32_t
 variant_unpadded_binary_size(struct ir3_shader_variant *v)
 {
    /* This helper returns the size (in dwords) of variant's binary after
     * the padding nops at the end are ignored.
     */
-   uint16_t size = v->info.sizedwords;
+   uint32_t size = v->info.sizedwords;
 
-   for (uint16_t i = 0; i < v->info.sizedwords; i += 2) {
+   for (uint32_t i = 0; i < v->info.sizedwords; i += 2) {
       uint32_t *dword = &v->bin[v->info.sizedwords - 2 - i];
       if (!!dword[0] || !!dword[1])
          break;
@@ -302,8 +302,8 @@ validate_roundtrip_variant_binary(struct ir3_shader_variant *rt_v, struct ir3_sh
     * If there's a mismatch, print both disassemblies with highlighted
     * points of difference.
     */
-   uint16_t v_sizedwords = variant_unpadded_binary_size(v);
-   uint16_t rt_v_sizedwords = variant_unpadded_binary_size(rt_v);
+   uint32_t v_sizedwords = variant_unpadded_binary_size(v);
+   uint32_t rt_v_sizedwords = variant_unpadded_binary_size(rt_v);
    if (v_sizedwords == rt_v_sizedwords &&
        !memcmp(v->bin, rt_v->bin, v_sizedwords * 4))
       return true;
@@ -530,6 +530,7 @@ alloc_variant(struct ir3_shader *shader, const struct ir3_shader_key *key,
       v->fs.color_is_dual_source = info->fs.color_is_dual_source;
       v->fs.uses_fbfetch_output  = info->fs.uses_fbfetch_output;
       v->fs.fbfetch_coherent     = info->fs.fbfetch_coherent;
+      v->fs.yuv_color            = info->fs.yuv_color;
       break;
 
    case MESA_SHADER_COMPUTE:

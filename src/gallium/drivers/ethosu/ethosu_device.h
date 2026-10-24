@@ -49,7 +49,11 @@ struct ethosu_ml_device {
    struct ethosu_block ifm_ublock;
    struct ethosu_block ofm_ublock;
    unsigned max_concurrent_blocks;
+   /* Bits the pooling OFM scale is quantised to.  The register holds 32
+    * on both devices; the U85 leaves the top bit clear, as Vela does. */
+   unsigned ofm_scale_bits;
    uint32_t sram_size;
+   void *weight_cache;
 };
 
 struct ethosu_screen {

@@ -82,6 +82,7 @@
         <stat name="Texture" display="T" type="float">Estimated normalized Texture cycles</stat>
         <stat name="Load/store" display="LS" type="float">Estimated normalized Load/Store cycles</stat>
         <stat name="Code size">Binary size in bytes</stat>
+        <stat name="Constant data size">Inline constant pool size in bytes</stat>
         <stat name="Threads" more="better" type="u16">Maximum number of threads in flight on a compute unit</stat>
         <stat name="Loops">Number of hardware loops</stat>
         <stat name="Spills">Number of spill instructions</stat>
@@ -173,6 +174,12 @@
          <stat name="GRF registers">
             Number of GRF registers required by the shader.
          </stat>
+         <stat name="VRT size">
+            Size of the GRF register file
+         </stat>
+         <stat name="VRT threads" more="better">
+            Number of concurrent threads that can be launched
+         </stat>
          <stat name="Push constant ranges">
             Number of push constants ranges provided to the shader.
          </stat>
@@ -188,9 +195,6 @@
          <stat name="Workgroup Memory Size">
             Number of bytes of workgroup shared memory used by this shader
             including any padding.
-         </stat>
-         <stat name="Non SSA regs after NIR">
-            Non SSA regs after NIR translation to BRW.
          </stat>
          <stat name="Source hash" hash="true" type="u64">
             Hash generated from shader source or vkd3d-proton provided.

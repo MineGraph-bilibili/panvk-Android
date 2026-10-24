@@ -12,7 +12,7 @@
 namespace r600 {
 
 GeometryShader::GeometryShader(const r600_shader_key& key):
-    Shader("GS"),
+    Shader("GS", {(uint8_t)key.gs.nr_cbufs, 0, (uint8_t)key.gs.dynamic_ssbo_offset}),
     m_tri_strip_adj_fix(key.gs.tri_strip_adj_fix)
 {
 }
@@ -370,6 +370,7 @@ GeometryShader::do_get_shader_info(r600_shader *sh_info)
    sh_info->ring_item_sizes[0] = m_ring_item_sizes[0];
    sh_info->cc_dist_mask = m_cc_dist_mask;
    sh_info->clip_dist_write = m_clip_dist_write;
+   sh_info->dynamic = get_dynamic_offset();
 }
 
 bool

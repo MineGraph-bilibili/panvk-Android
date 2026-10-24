@@ -199,7 +199,7 @@ ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm, const struct radv_llv
    bool exports_mrtz = false;
    bool exports_color_null = false;
    if (shaders[0]->info.stage == MESA_SHADER_FRAGMENT) {
-      exports_mrtz = info->ps.writes_z || info->ps.writes_stencil || info->ps.writes_sample_mask;
+      exports_mrtz = radv_ps_writes_mrtz(info);
       exports_color_null = !exports_mrtz || (shaders[0]->info.outputs_written & (0xffu << FRAG_RESULT_DATA0));
    }
 

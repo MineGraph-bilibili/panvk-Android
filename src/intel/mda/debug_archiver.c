@@ -7,6 +7,7 @@
 
 #include "slice.h"
 #include "tar.h"
+#include "util/os_time.h"
 #include "util/ralloc.h"
 #include "util/u_debug.h"
 #include "util/u_process.h"
@@ -97,8 +98,9 @@ debug_archiver_open(void *mem_ctx, const char *name, const char *info)
 
    if (prefix) {
       if (!strcmp(prefix, "timestamp")) {
+         struct tm tm_buf;
          time_t now = time(NULL);
-         struct tm *tm_info = localtime(&now);
+         struct tm *tm_info = os_localtime(&now, &tm_buf);
 
          if (tm_info) {
             prefix = ralloc_asprintf(da, "%04d%02d%02d-%02d%02d%02d",

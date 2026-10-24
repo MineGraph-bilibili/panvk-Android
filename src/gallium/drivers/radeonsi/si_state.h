@@ -80,8 +80,8 @@ struct si_state_rasterizer {
    unsigned ngg_cull_flags_lines : 16;
    unsigned sprite_coord_enable : 8;
    unsigned clip_plane_enable : 8;
-   bool ngg_cull_front : 1;
-   bool ngg_cull_back : 1;
+   bool ngg_cull_face_negative_determinant : 1;
+   bool ngg_cull_face_positive_determinant : 1;
    unsigned half_pixel_center : 1;
    unsigned flatshade : 1;
    unsigned flatshade_first : 1;
@@ -477,7 +477,6 @@ bool si_is_format_supported(struct pipe_screen *screen, enum pipe_format format,
 void si_emit_dpbb_state(struct si_context *sctx, unsigned index);
 
 /* si_state_shaders.cpp */
-bool si_shader_mem_ordered(struct si_shader *shader);
 void si_init_shader_functions(struct si_context *sctx);
 void si_schedule_initial_compile(struct si_context *sctx, mesa_shader_stage stage,
                                  struct util_queue_fence *ready_fence,

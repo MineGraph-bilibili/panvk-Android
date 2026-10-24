@@ -90,10 +90,12 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_def *global;
    if (swap) {
       global = nir_global_atomic_swap(b, bit_size, address, intr->src[3].ssa,
-                                      intr->src[4].ssa, .atomic_op = atomic_op);
+                                      intr->src[4].ssa, .atomic_op = atomic_op,
+                                      .access = nir_intrinsic_access(intr));
    } else {
       global = nir_global_atomic(b, bit_size, address, intr->src[3].ssa,
-                                 .atomic_op = atomic_op);
+                                 .atomic_op = atomic_op,
+                                 .access = nir_intrinsic_access(intr));
    }
 
    b->shader->info.use_lowered_image_to_global = true;

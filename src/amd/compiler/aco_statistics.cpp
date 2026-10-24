@@ -691,7 +691,10 @@ collect_preasm_stats(Program* program)
 void
 collect_postasm_stats(Program* program, const std::vector<uint32_t>& code)
 {
-   program->statistics.hash = util_hash_crc32(code.data(), code.size() * 4);
+   uint32_t code_hash = util_hash_crc32(code.data(), code.size() * 4);
+   uint32_t dwords[] = {code_hash, program->config->mem_ordered};
+
+   program->statistics.hash = util_hash_crc32(dwords, sizeof(dwords));
 }
 
 Instruction_cycle_info

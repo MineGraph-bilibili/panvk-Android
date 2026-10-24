@@ -1,5 +1,0 @@
-Name: log
-Description: log
-Version: 1.15
-Libs: -llog
-Cflags:

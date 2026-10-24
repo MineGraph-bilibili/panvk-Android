@@ -107,6 +107,7 @@ class reference_frames_tracker_h264 : public reference_frames_tracker
    // Declare other methods
    reference_frames_tracker_h264( void *logId,
                                   struct pipe_video_codec *codec,
+                                  eAVEncH264VProfile avcProfile,
                                   uint32_t textureWidth,
                                   uint32_t textureHeight,
                                   uint32_t gopLength,

@@ -91,7 +91,7 @@ struct gen_sub_ranges {
 
    constexpr
    const gen_sub_range&
-   operator[](std::size_t i) const
+   operator[](size_t i) const
    {
       assert(i < N);
       return ranges[i];
@@ -160,7 +160,7 @@ struct gen_ranges {
 
    constexpr
    const gen_range&
-   operator[](std::size_t i) const
+   operator[](size_t i) const
    {
       assert(i < N);
       return ranges[i];
@@ -196,6 +196,7 @@ gen_inst_is_split_send(const intel_device_info *devinfo, const gen_inst *inst)
    case GEN_OP_SENDC:
       return devinfo->ver >= 12;
 
+   case GEN_OP_SENDG:
    case GEN_OP_SENDS:
    case GEN_OP_SENDSC:
       return true;

@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 struct etna_context;
+struct etna_screen;
 
 #include "pipe/p_context.h"
 
@@ -47,7 +48,7 @@ void
 etna_blit_save_state(struct etna_context *ctx, bool render_cond);
 
 uint64_t
-etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union *color);
+etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union *color, const struct etna_screen *screen);
 
 void
 etna_clear_blit_init(struct pipe_context *pctx);

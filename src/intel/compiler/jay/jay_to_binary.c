@@ -178,11 +178,8 @@ to_gen_operand(
          offset_B = (r & mask) * 2;
       }
 
-      if (d.file == GPR) {
-         R = gen_restride(gen_grf(grf, 0), 8, 8, 1);
-      } else {
-         R = gen_restride(gen_accumulator(grf / 2), 8, 8, 1);
-      }
+      R = d.file == GPR ? gen_grf(grf, 0) : gen_accumulator(grf / 2);
+      R = gen_restride(R, 1, 1, 0);
 
       R = gen_byte_offset(devinfo, R, simd_offs * simd_width * stride_bits / 8);
 
@@ -206,8 +203,8 @@ to_gen_operand(
        * SIMD1 instructions and are never SIMD split.
        */
       assert(simd_offs == 0 || idx >= 0);
-      unsigned offs_B =
-         (d.reg * (f->shader->dispatch_width / 8)) + (hi ? 2 : 0);
+      unsigned flag_B = jay_type_size_bits(jay_flag_type(f)) / 8;
+      unsigned offs_B = (d.reg * flag_B) + (hi ? 2 : 0);
       R = gen_flag(offs_B / 2);
    } else if (d.file == J_ADDRESS) {
       R = gen_address(d.reg);
@@ -259,9 +256,10 @@ static const struct {
    /* clang-format off */
    OP(ADD3, ADD3, 3),
    OP(ADD, ADD, 2),
+   OP(ADD_RTNE, ADD, 2),
    OP(AND, AND, 2),
    OP(AND_U32_U16, AND, 2),
-   OP(AND_S32_SN, AND, 2),
+   OP(AND_SN_S32, AND, 2),
    OP(ASR, ASR, 2),
    OP(AVG, AVG, 2),
    OP(BFE, BFE, 3),
@@ -360,7 +358,7 @@ emit(struct jay_codegen *jc,
    }
 
    gen->exec_size = jay_simd_width_physical(f->shader, I);
-   gen->no_mask = jay_is_no_mask(I);
+   gen->no_mask = I->uniform || jay_opcode_infos[I->op].no_mask;
    gen->chan_offset = simd_offs * gen->exec_size;
    gen->swsb = dep;
    gen->saturate = I->saturate;
@@ -467,7 +465,7 @@ emit(struct jay_codegen *jc,
 
    case JAY_OPCODE_RELOC: {
       util_dynarray_append(&jc->relocs,
-                           ((struct intel_shader_reloc) {
+                           ((struct intel_shader_reloc){
                               .id = jay_reloc_param(I),
                               .type = INTEL_SHADER_RELOC_TYPE_MOV_IMM,
                               .offset = GEN_INST_BYTES * (jc->num_insts - 1),
@@ -497,6 +495,12 @@ emit(struct jay_codegen *jc,
    }
 
    case JAY_OPCODE_SEND: {
+      assert(
+         (jay_is_null(I->src[1]) ||
+          jay_is_imm(I->src[1]) ||
+          I->src[1].file == J_ADDRESS) &&
+         "if ex_desc is not null or immediate, it must be an address register");
+
       gen_operand ex_desc = to_gen_operand(f, I, 1, simd_offs, false);
       gen->src[0] =
          gen_retype(to_gen_operand(f, I, 2, simd_offs, false), GEN_TYPE_UD);
@@ -590,6 +594,7 @@ emit(struct jay_codegen *jc,
       } else {
          gen->swsb = gen_swsb_null();
          gen->opcode = jay_mul_32_high(I) ? GEN_OP_MACH : GEN_OP_MACL;
+         gen->acc_wr_control = jc->devinfo->ver < 20;
       }
       break;
 
@@ -707,7 +712,7 @@ emit(struct jay_codegen *jc,
 
    static_assert(GEN_OP_ILLEGAL == 0);
    if (!gen->opcode) {
-      jay_print_inst(stderr, NULL, (jay_inst *) I, NULL);
+      jay_print_inst(stderr, f, (jay_inst *) I);
       UNREACHABLE("Unhandled opcode");
    }
 }
@@ -774,7 +779,7 @@ jay_to_binary(jay_shader *s,
          }
 
          jay_foreach_inst_in_block(block, I) {
-            // jay_print_inst(stdout, (jay_inst *) I);
+            // jay_print_inst(stdout, f, (jay_inst *) I);
 
             for (unsigned i = 0; i < (1 << jay_simd_split(s, I)); ++i) {
                for (unsigned j = 0; j < jay_macro_length(I); ++j) {
@@ -797,6 +802,12 @@ jay_to_binary(jay_shader *s,
       if ((gen->dst.file == GEN_GRF || gen->dst.file == GEN_ARF) &&
           gen->dst.region.hstride == 0)
          gen->dst.region.hstride = 1;
+
+      if ((gen->src[2].file == GEN_GRF || gen->src[2].file == GEN_ARF) &&
+          gen->src[2].region.hstride == 0 &&
+          gen->src[2].region.width == 1 &&
+          gen->src[2].region.vstride == 1)
+         gen->src[2] = gen_restride(gen->src[2], 8, 8, 1);
    }
 
    gen_finish_structured_cf(jc.insts, jc.num_insts, jc.final_halt_offset);

@@ -170,12 +170,17 @@ d3d12_video_decoder_destroy(struct pipe_video_codec *codec)
    // Flush and wait for completion of any in-flight GPU work before destroying objects
    d3d12_video_decoder_flush(codec);
    if (pD3D12Dec->m_fenceValue > 1 /* Check we submitted at least one frame */) {
-      d3d12_video_decoder_sync_completion(codec, (pD3D12Dec->m_fenceValue - 1u) % D3D12_VIDEO_DEC_ASYNC_DEPTH, OS_TIMEOUT_INFINITE);
+      d3d12_fence_finish(pD3D12Dec->m_inflightResourcesPool[(pD3D12Dec->m_fenceValue - 1u) % D3D12_VIDEO_DEC_ASYNC_DEPTH].m_fence.get(), OS_TIMEOUT_INFINITE);
       struct pipe_fence_handle *context_queue_completion_fence = NULL;
       pD3D12Dec->base.context->flush(pD3D12Dec->base.context, &context_queue_completion_fence, PIPE_FLUSH_ASYNC | PIPE_FLUSH_HINT_FINISH);
       pD3D12Dec->m_pD3D12Screen->base.fence_finish(&pD3D12Dec->m_pD3D12Screen->base, NULL, context_queue_completion_fence, OS_TIMEOUT_INFINITE);
       pD3D12Dec->m_pD3D12Screen->base.fence_reference(&pD3D12Dec->m_pD3D12Screen->base, &context_queue_completion_fence, NULL);
    }
+
+   // Reset older batches before destroying the decoder
+   // to avoid leaving command allocators in a non-reset state
+   for (uint32_t i = 0; i < D3D12_VIDEO_DEC_ASYNC_DEPTH; ++i)
+      (void) d3d12_video_decoder_sync_completion(codec, i, 0);
 
    //
    // Destroys a decoder
@@ -227,9 +232,13 @@ d3d12_video_decoder_begin_frame(struct pipe_video_codec *codec,
       debug_printf("[d3d12_video_decoder] d3d12_video_decoder_begin_frame Waiting for completion of in flight resource "
                    "sets with previous work\n");
       ASSERTED bool wait_res =
-         d3d12_video_decoder_sync_completion(codec, pD3D12Dec->m_fenceValue % D3D12_VIDEO_DEC_ASYNC_DEPTH, OS_TIMEOUT_INFINITE);
+         d3d12_fence_finish(pD3D12Dec->m_inflightResourcesPool[pD3D12Dec->m_fenceValue % D3D12_VIDEO_DEC_ASYNC_DEPTH].m_fence.get(), OS_TIMEOUT_INFINITE);
       assert(wait_res);
    }
+
+   // Opportunistically reset batches
+   for (uint32_t i = 0; i < D3D12_VIDEO_DEC_ASYNC_DEPTH; ++i)
+      (void) d3d12_video_decoder_sync_completion(codec, i, 0);
 
    HRESULT hr = pD3D12Dec->m_spDecodeCommandList->Reset(
       pD3D12Dec->m_inflightResourcesPool[d3d12_video_decoder_pool_current_index(pD3D12Dec)].m_spCommandAllocator.Get());
@@ -374,6 +383,8 @@ d3d12_video_decoder_store_upper_layer_references(struct d3d12_video_decoder *pD3
 {
 #if D3D12_VIDEO_ANY_DECODER_ENABLED
    pD3D12Dec->m_pCurrentDecodeTarget = target;
+   // Reset each frame; only AV1 frames with film grain enabled set it below.
+   pD3D12Dec->m_pCurrentFilmGrainTarget = nullptr;
    switch (pD3D12Dec->m_d3d12DecProfileType) {
 #if VIDEO_CODEC_H264DEC
       case d3d12_video_decode_profile_type_h264:
@@ -394,6 +405,10 @@ d3d12_video_decoder_store_upper_layer_references(struct d3d12_video_decoder *pD3
       {
          pipe_av1_picture_desc *pPicControlAV1 = (pipe_av1_picture_desc *) picture;
          pD3D12Dec->m_pCurrentReferenceTargets = pPicControlAV1->ref;
+         // AV1 film grain is applied to a separate display surface; the decoded (grain-free)
+         // reconstruction still goes to the DPB. Capture it here so end_frame can route the
+         // grain-applied conversion output to it instead of the reconstruction target.
+         pD3D12Dec->m_pCurrentFilmGrainTarget = pPicControlAV1->film_grain_target;
       } break;
 #endif
 #if VIDEO_CODEC_VP9DEC
@@ -566,6 +581,30 @@ d3d12_video_decoder_end_frame(struct pipe_video_codec *codec,
       return 1;
    }
 
+   // AV1 film grain: the DecodeFrame conversion produces a grain-applied copy in the output
+   // texture while the grain-free reconstruction is written to the reference texture (which goes
+   // to the DPB). Redirect only the output texture to film_grain_target so the grain-applied
+   // frame lands in the surface the client displays, leaving all DPB/reference bookkeeping keyed
+   // to the reconstruction target above (its index mapping was assigned against that target).
+   //
+   // Scope this to reference-only-textures-required configs. Only there does the ConversionArguments
+   // path below (gated on the same flag) actually run, separating the grain-applied output from the
+   // grain-free reconstruction. On non-reference-only or texture-array-DPB configs the output texture
+   // is where the grain-free recon / DPB entry is written, so redirecting it would drop the DPB write
+   // and leave the film-grain surface without grain. Those cases need a larger refactor tracked
+   // separately.
+   bool fReferenceOnly = (pD3D12Dec->m_ConfigDecoderSpecificFlags &
+                          d3d12_video_decode_config_specific_flag_reference_only_textures_required) != 0;
+   if (fReferenceOnly &&
+       pD3D12Dec->m_pCurrentFilmGrainTarget &&
+       pD3D12Dec->m_pCurrentFilmGrainTarget != target) {
+      struct d3d12_video_buffer *pFGVideoBuffer =
+         (struct d3d12_video_buffer *) pD3D12Dec->m_pCurrentFilmGrainTarget;
+      pOutputD3D12Texture = d3d12_resource_resource(pFGVideoBuffer->texture);
+      outputD3D12Subresource = 0;
+      d3d12_promote_to_permanent_residency(pD3D12Dec->m_pD3D12Screen, &pFGVideoBuffer->texture, 1);
+   }
+
    ///
    /// Set codec picture parameters CPU buffer
    ///
@@ -609,8 +648,6 @@ d3d12_video_decoder_end_frame(struct pipe_video_codec *codec,
    d3d12OutputArguments.pOutputTexture2D = pOutputD3D12Texture;
    d3d12OutputArguments.OutputSubresource = outputD3D12Subresource;
 
-   bool fReferenceOnly = (pD3D12Dec->m_ConfigDecoderSpecificFlags &
-                          d3d12_video_decode_config_specific_flag_reference_only_textures_required) != 0;
    if (fReferenceOnly) {
       d3d12OutputArguments.ConversionArguments.Enable = true;
 
@@ -1654,6 +1691,11 @@ d3d12_video_decoder_sync_completion(struct pipe_video_codec *codec,
    HRESULT hr = S_OK;
 
    auto &pool_entry = pD3D12Dec->m_inflightResourcesPool[frame_index];
+   // Command objects are NULL if destroy runs from a failed creation path
+   if (!pool_entry.m_fence ||
+       !pool_entry.m_spCommandAllocator)
+      return false;
+
    if (!d3d12_fence_finish(pool_entry.m_fence.get(), timeout_ns))
       return false;
 
@@ -1667,11 +1709,9 @@ d3d12_video_decoder_sync_completion(struct pipe_video_codec *codec,
    struct d3d12_screen *pD3D12Screen = (struct d3d12_screen *) pD3D12Dec->m_pD3D12Screen;
    assert(pD3D12Screen);
 
-   pD3D12Screen->base.fence_reference(
-      &pD3D12Screen->base,
-      &pD3D12Dec->m_inflightResourcesPool[d3d12_video_decoder_pool_current_index(pD3D12Dec)]
-          .m_pBitstreamUploadGPUCompletionFence,
-      NULL);
+   pD3D12Screen->base.fence_reference(&pD3D12Screen->base,
+                                      &pool_entry.m_pBitstreamUploadGPUCompletionFence,
+                                      NULL);
 
    hr = pool_entry.m_spCommandAllocator->Reset();
    if (FAILED(hr)) {

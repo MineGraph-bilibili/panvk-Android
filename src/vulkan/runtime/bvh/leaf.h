@@ -208,7 +208,7 @@ build_instance(inout vk_aabb bounds, VOID_REF src_ptr, VOID_REF dst_ptr, uint32_
       root_flags = VK_BVH_BOX_FLAG_NO_OPAQUE;
    else
       root_flags = DEREF(REF(uint32_t)(instance.accelerationStructureReference + ROOT_FLAGS_OFFSET));
-   DEREF(node).root_flags = root_flags;
+   DEREF(node).root_flags = root_flags | ((~(instance.custom_instance_and_mask >> 24)) << VK_BVH_BOX_FLAGS_INV_CULL_MASK_SHIFT);
 
    return true;
 }
@@ -254,10 +254,7 @@ main(void)
       is_active = true;
 
    uint32_t id = is_active ? pack_ir_node_id(dst_offset, node_type) : VK_BVH_INVALID_NODE;
-   if (VK_TEST_BUILD_FLAG_64BIT_KEYS)
-      DEREF(INDEX(key64_id_pair, args.ids, primitive_id)).id = id;
-   else
-      DEREF(INDEX(key32_id_pair, args.ids, primitive_id)).id = id;
+   DEREF(INDEX(uint32_t, args.ids, primitive_id)) = id;
 
    uvec4 ballot = subgroupBallot(is_active);
    if (subgroupElect())

@@ -12,19 +12,12 @@ libpan_shader_files = files(
 idep_libpan_per_arch = {}
 
 foreach ver : ['4', '5', '6', '7', '9', '10', '11', '12', '13', '14']
-  libpan_shader_files_cur_ver = libpan_shader_files
-
-  # Software tessellation is used by the CSF PanVK path.
-  if ver == '10' or ver == '11' or ver == '12' or ver == '13' or ver == '14'
-    libpan_shader_files_cur_ver += files('poly_tessellation.cl')
-  endif
-
   libpan_spv = custom_target(
-    input : libpan_shader_files_cur_ver,
+    input : libpan_shader_files,
     output : 'libpan_v' + ver + '.spv',
     command : [
         prog_mesa_clc, '-o', '@OUTPUT@',  '--depfile', '@DEPFILE@',
-        libpan_shader_files_cur_ver, '--',
+        libpan_shader_files, '--',
         '-DPAN_ARCH=@0@'.format(ver),
         '-I' + join_paths(meson.project_source_root(), 'include'),
         '-I' + join_paths(meson.project_source_root(), 'src/compiler/libcl'),

@@ -22,8 +22,9 @@ predicate_block(jay_builder *b,
     *
     * A few opcodes can't be predicated due to ISA restrictions.
     *
-    * Predicating NoMask instructions only works with uniform flags (where we
+    * Predicating uniform instructions only works with uniform flags (where we
     * know lane 0 is set correctly and we're not electing another lane).
+    * NoMask-forced opcode hit this and are mostly unpredicatable anyway.
     */
    jay_foreach_inst_in_block(block, I) {
       if (jay_uses_implicit_flag(I) ||
@@ -31,9 +32,8 @@ predicate_block(jay_builder *b,
           I->op == JAY_OPCODE_MIN ||
           I->op == JAY_OPCODE_MAX ||
           I->op == JAY_OPCODE_CSEL ||
-          I->op == JAY_OPCODE_DPAS ||
-          I->op == JAY_OPCODE_SLICE_REPACK ||
-          (!uniform_condition && jay_is_no_mask(I)) ||
+          jay_opcode_infos[I->op].no_mask ||
+          (!uniform_condition && I->uniform) ||
           (--limit) < 0)
          return false;
    }
@@ -45,7 +45,7 @@ predicate_block(jay_builder *b,
     */
    jay_foreach_inst_in_block_safe(block, I) {
       if (I->op != JAY_OPCODE_ENDIF && I->op != JAY_OPCODE_ELSE) {
-         I = jay_add_predicate(b, I, condition);
+         I = jay_add_predicate(b, I, condition, jay_null());
 
          if (I->op == JAY_OPCODE_BREAK) {
             return false;
@@ -66,8 +66,10 @@ static void
 predicate_if(jay_function *f, jay_block *if_block, jay_inst *if_)
 {
    /* If's fallthrough to the then and branch to the else */
-   jay_block *then_block = if_block->logical_succs[0],
-             *else_block = if_block->logical_succs[1];
+   assert(jay_num_successors(if_block, GPR) == 2);
+   struct util_dynarray *succs = jay_successors(if_block, GPR);
+   jay_block *then_block = *util_dynarray_element(succs, jay_block *, 0),
+             *else_block = *util_dynarray_element(succs, jay_block *, 1);
    assert(then_block == jay_next_block(if_block) && "successors for if");
 
    jay_builder b = jay_init_builder(f, jay_before_inst(if_));
@@ -107,8 +109,8 @@ predicate_if(jay_function *f, jay_block *if_block, jay_inst *if_)
          jay_remove_instruction(endif);
 
          if (whl && whl->op == JAY_OPCODE_WHILE && brk->predication) {
-            jay_add_predicate(&b, whl,
-                              jay_negate(*jay_inst_get_predicate(brk)));
+            jay_add_predicate(&b, whl, jay_negate(*jay_inst_get_predicate(brk)),
+                              jay_null());
             jay_remove_instruction(brk);
          }
       }

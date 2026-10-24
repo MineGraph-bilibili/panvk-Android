@@ -28,7 +28,7 @@ unsafe impl CLInfo<cl_event_info> for cl_event {
                 v.write::<cl_context>(cl_context::from_ptr(ptr))
             }
             CL_EVENT_COMMAND_QUEUE => {
-                let ptr = match event.queue.as_ref() {
+                let ptr = match event.queue() {
                     // Note we use as_ptr here which doesn't increase the reference count.
                     Some(queue) => Weak::as_ptr(queue),
                     None => ptr::null_mut(),
@@ -36,7 +36,7 @@ unsafe impl CLInfo<cl_event_info> for cl_event {
                 v.write::<cl_command_queue>(cl_command_queue::from_ptr(ptr))
             }
             CL_EVENT_REFERENCE_COUNT => v.write::<cl_uint>(Event::refcnt(*self)?),
-            CL_EVENT_COMMAND_TYPE => v.write::<cl_command_type>(event.cmd_type),
+            CL_EVENT_COMMAND_TYPE => v.write::<cl_command_type>(event.cmd_type()),
             _ => Err(CL_INVALID_VALUE),
         }
     }
@@ -46,20 +46,31 @@ unsafe impl CLInfo<cl_event_info> for cl_event {
 unsafe impl CLInfo<cl_profiling_info> for cl_event {
     fn query(&self, q: cl_profiling_info, v: CLInfoValue) -> CLResult<CLInfoRes> {
         let event = Event::ref_from_raw(*self)?;
-        if event.cmd_type == CL_COMMAND_USER {
+
+        let Some(gpu) = event.gpu_event() else {
             // CL_PROFILING_INFO_NOT_AVAILABLE [...] if event is a user event object.
+            return Err(CL_PROFILING_INFO_NOT_AVAILABLE);
+        };
+
+        let res = match *q {
+            CL_PROFILING_COMMAND_QUEUED => gpu.get_time(EventTimes::Queued),
+            CL_PROFILING_COMMAND_SUBMIT => gpu.get_time(EventTimes::Submit),
+            CL_PROFILING_COMMAND_START => gpu.get_time(EventTimes::Start),
+            CL_PROFILING_COMMAND_END => gpu.get_time(EventTimes::End),
+            // For now, we treat Complete the same as End
+            CL_PROFILING_COMMAND_COMPLETE => gpu.get_time(EventTimes::End),
+            _ => return Err(CL_INVALID_VALUE),
+        };
+
+        // We do not have a strong reference to the queue, so just error when the result is 0.
+        if event.status() != CL_COMPLETE as cl_int || res == 0 {
+            // CL_PROFILING_INFO_NOT_AVAILABLE if the CL_QUEUE_PROFILING_ENABLE flag is not set for
+            // the command-queue, if the execution status of the command identified by event is not
+            // CL_COMPLETE
             return Err(CL_PROFILING_INFO_NOT_AVAILABLE);
         }
 
-        match *q {
-            CL_PROFILING_COMMAND_QUEUED => v.write::<cl_ulong>(event.get_time(EventTimes::Queued)),
-            CL_PROFILING_COMMAND_SUBMIT => v.write::<cl_ulong>(event.get_time(EventTimes::Submit)),
-            CL_PROFILING_COMMAND_START => v.write::<cl_ulong>(event.get_time(EventTimes::Start)),
-            CL_PROFILING_COMMAND_END => v.write::<cl_ulong>(event.get_time(EventTimes::End)),
-            // For now, we treat Complete the same as End
-            CL_PROFILING_COMMAND_COMPLETE => v.write::<cl_ulong>(event.get_time(EventTimes::End)),
-            _ => Err(CL_INVALID_VALUE),
-        }
+        v.write::<cl_ulong>(res)
     }
 }
 
@@ -169,7 +180,7 @@ pub fn create_and_queue(
         return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
     }
 
-    let e = Event::new(&q, cmd_type, deps, work);
+    let e = Event::new(&q, cmd_type, deps, work)?;
     if !event.is_null() {
         // SAFETY: we check for null and valid API use is to pass in a valid pointer
         unsafe {
@@ -179,7 +190,7 @@ pub fn create_and_queue(
     if block {
         q.queue(Arc::clone(&e));
         q.flush(true)?;
-        if e.deps.iter().any(|dep| dep.is_error()) {
+        if e.deps().iter().any(|dep| dep.is_error()) {
             return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
         }
         // return any execution errors when blocking

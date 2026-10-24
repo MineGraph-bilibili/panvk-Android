@@ -148,7 +148,7 @@ time_elapsed_get_sample(struct fd_batch *batch,
    /* copy sample counter _LO and _HI to scratch: */
    OUT_PKT3(ring, CP_REG_TO_MEM, 2);
    OUT_RING(ring, CP_REG_TO_MEM_0_REG(REG_A4XX_RBBM_PERFCTR_CP_0_LO) |
-                     CP_REG_TO_MEM_0_64B |
+                     CP_REG_TO_MEM_0_IS_64B |
                      CP_REG_TO_MEM_0_CNT(2)); /* write 2 regs to mem */
    OUT_RELOC(ring, scratch_bo, sample_off, 0, 0);
 

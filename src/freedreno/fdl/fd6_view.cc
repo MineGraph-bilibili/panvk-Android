@@ -199,9 +199,35 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
    }
 
    view->offset = fdl_surface_offset(layout, args->base_miplevel, args->base_array_layer);
-   uint64_t base_addr = args->iova + view->offset;
-   uint64_t ubwc_addr = args->iova +
-      fdl_ubwc_offset(layout, args->base_miplevel, args->base_array_layer);
+
+   bool multi_plane = util_format_get_num_planes(args->format) > 1;
+
+   bool ubwc_enabled = fdl_ubwc_enabled(layout, args->base_miplevel);
+
+   /* For single-plane RGB, base_addr[1] is the ubwc addr, otherwise for
+    * multi-plane descriptors, base_addr[n] is the per-plane addr of pixel
+    * or combined ubwc+pixel data:
+    */
+   uint64_t base_addr[3] = {0};
+
+   if (multi_plane) {
+      if (ubwc_enabled) {
+         /* no separate ubwc base, image must have the expected layout */
+         for (uint32_t i = 0; i < 3; i++) {
+            base_addr[i] = args->iova +
+               fdl_ubwc_offset(layouts[i], args->base_miplevel, args->base_array_layer);
+         }
+      } else {
+         for (uint32_t i = 0; i < 3; i++) {
+            base_addr[i] = args->iova +
+               fdl_surface_offset(layouts[i], args->base_miplevel, args->base_array_layer);
+         }
+      }
+   } else {
+      base_addr[0] = args->iova + view->offset;
+      base_addr[1] = args->iova +
+         fdl_ubwc_offset(layout, args->base_miplevel, args->base_array_layer);
+   }
 
    uint32_t pitch = fdl_pitch(layout, args->base_miplevel);
    uint32_t ubwc_pitch = fdl_ubwc_pitch(layout, args->base_miplevel);
@@ -214,7 +240,10 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
       fd6_texture_swap(args->format, (enum a6xx_tile_mode)layout->tile_mode, layout->is_mutable);
    enum a6xx_tile_mode tile_mode = (enum a6xx_tile_mode)fdl_tile_mode(layout, args->base_miplevel);
 
-   bool ubwc_enabled = fdl_ubwc_enabled(layout, args->base_miplevel);
+   if (ubwc_enabled && util_format_is_yuv(args->format) &&
+       util_format_get_num_planes(args->format) == 2) {
+      texture_format = FMT6_R8_G8B8_2PLANE_420_UNORM;
+   }
 
    bool is_d24s8 = (args->format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
                     args->format == PIPE_FORMAT_Z24X8_UNORM ||
@@ -268,8 +297,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          A6XX_TEX_MEMOBJ_2_PITCH(pitch) |
          A6XX_TEX_MEMOBJ_2_TYPE(fdl6_tex_type(args->type, false));
       view->descriptor[3] = A6XX_TEX_MEMOBJ_3_ARRAY_PITCH(layer_size);
-      view->descriptor[4] = base_addr;
-      view->descriptor[5] = (base_addr >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(depth);
+      view->descriptor[4] = base_addr[0];
+      view->descriptor[5] = (base_addr[0] >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(depth);
       if (args->filter_width) {
          view->descriptor[6] = A6XX_TEX_MEMOBJ_6_LOG2_PHASES(
                                   util_logbase2_ceil(args->filter_num_phases) / 2) |
@@ -281,9 +310,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
       if (layout->tile_all)
          view->descriptor[3] |= A6XX_TEX_MEMOBJ_3_TILE_ALL;
 
-      if (args->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
-          args->format == PIPE_FORMAT_G8_B8R8_420_UNORM ||
-          args->format == PIPE_FORMAT_G8_B8_R8_420_UNORM) {
+      if (multi_plane) {
          /* chroma offset re-uses MIPLVLS bits */
          assert(args->level_count == 1);
          if (args->chroma_offsets[0] == FDL_CHROMA_LOCATION_MIDPOINT)
@@ -291,30 +318,28 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          if (args->chroma_offsets[1] == FDL_CHROMA_LOCATION_MIDPOINT)
             view->descriptor[0] |= A6XX_TEX_MEMOBJ_0_CHROMA_MIDPOINT_Y;
 
-         uint64_t base_addr[3];
+         uint32_t plane_count = util_format_get_num_planes(args->format);
 
          if (ubwc_enabled) {
             view->descriptor[3] |= A6XX_TEX_MEMOBJ_3_FLAG;
-            /* no separate ubwc base, image must have the expected layout */
-            for (uint32_t i = 0; i < 3; i++) {
-               base_addr[i] = args->iova +
-                  fdl_ubwc_offset(layouts[i], args->base_miplevel, args->base_array_layer);
-            }
-         } else {
-            for (uint32_t i = 0; i < 3; i++) {
-               base_addr[i] = args->iova +
-                  fdl_surface_offset(layouts[i], args->base_miplevel, args->base_array_layer);
-            }
          }
 
-         view->descriptor[4] = base_addr[0];
-         view->descriptor[5] |= base_addr[0] >> 32;
          view->descriptor[6] =
             A6XX_TEX_MEMOBJ_6_PLANE_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
          view->descriptor[7] = base_addr[1];
          view->descriptor[8] = base_addr[1] >> 32;
-         view->descriptor[9] = base_addr[2];
-         view->descriptor[10] = base_addr[2] >> 32;
+         /* 2-plane formats (eg. NV12) interleave U and V in the second plane,
+          * so there is no separate V plane base address; the descriptor
+          * words must still be written (to zero) since callers don't
+          * necessarily zero-initialize view->descriptor themselves.
+          */
+         if (plane_count > 2) {
+            view->descriptor[9] = base_addr[2];
+            view->descriptor[10] = base_addr[2] >> 32;
+         } else {
+            view->descriptor[9] = 0;
+            view->descriptor[10] = 0;
+         }
 
          assert(args->type != FDL_VIEW_TYPE_3D);
          return;
@@ -332,8 +357,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          fdl6_get_ubwc_blockwidth(layout, &block_width, &block_height);
 
          view->descriptor[3] |= A6XX_TEX_MEMOBJ_3_FLAG;
-         view->descriptor[7] = ubwc_addr;
-         view->descriptor[8] = ubwc_addr >> 32;
+         view->descriptor[7] = base_addr[1];
+         view->descriptor[8] = base_addr[1] >> 32;
          view->descriptor[9] |= A6XX_TEX_MEMOBJ_9_FLAG_BUFFER_ARRAY_PITCH(layout->ubwc_layer_size >> 2);
          view->descriptor[10] |=
             A6XX_TEX_MEMOBJ_10_FLAG_BUFFER_PITCH(ubwc_pitch) |
@@ -348,12 +373,9 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
    } else if (CHIP >= A8XX) {
       uint32_t *descriptor = view->descriptor;
 
-      assert(!args->filter_width); /* Need descriptor fields defined. */
-
-      descriptor[0] = A8XX_TEX_MEMOBJ_0_BASE_LO(base_addr);
-      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr >> 32) |
-                      A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, false)) |
-                      A8XX_TEX_MEMOBJ_1_DEPTH(depth);
+      descriptor[0] = A8XX_TEX_MEMOBJ_0_BASE_LO(base_addr[0]);
+      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr[0] >> 32) |
+                      A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, false));
       descriptor[2] = A8XX_TEX_MEMOBJ_2_WIDTH(width) |
                       A8XX_TEX_MEMOBJ_2_HEIGHT(height) |
                       A8XX_TEX_MEMOBJ_2_SAMPLES((enum a3xx_msaa_samples)util_logbase2(layout->nr_samples));
@@ -366,26 +388,13 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
                       COND(util_format_is_srgb(args->format), A8XX_TEX_MEMOBJ_4_SRGB);
       descriptor[5] = COND(is_mutable, A8XX_TEX_MEMOBJ_5_MUTABLEEN);
       descriptor[6] = A8XX_TEX_MEMOBJ_6_TEX_LINE_OFFSET(pitch * 8) |   /* in bits */
-                      A8XX_TEX_MEMOBJ_6_MIN_LINE_OFFSET(layout->pitchalign - 6) |
                       A8XX_TEX_MEMOBJ_6_MIPLVLS(args->level_count - 1);
 
-      if (args->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
-          args->format == PIPE_FORMAT_G8_B8R8_420_UNORM ||
-          args->format == PIPE_FORMAT_G8_B8_R8_420_UNORM) {
-         uint64_t base_addr[3];
+      if (multi_plane) {
+         uint32_t plane_count = util_format_get_num_planes(args->format);
 
          if (ubwc_enabled) {
             descriptor[4] |= A8XX_TEX_MEMOBJ_4_FLAG;
-            /* no separate ubwc base, image must have the expected layout */
-            for (uint32_t i = 0; i < 3; i++) {
-               base_addr[i] = args->iova +
-                  fdl_ubwc_offset(layouts[i], args->base_miplevel, args->base_array_layer);
-            }
-         } else {
-            for (uint32_t i = 0; i < 3; i++) {
-               base_addr[i] = args->iova +
-                  fdl_surface_offset(layouts[i], args->base_miplevel, args->base_array_layer);
-            }
          }
 
          descriptor[4] |= A8XX_TEX_MEMOBJ_4_BASE_U_LO(base_addr[1]);
@@ -396,16 +405,31 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          if (args->chroma_offsets[1] == FDL_CHROMA_LOCATION_MIDPOINT)
             view->descriptor[7] |= A8XX_TEX_MEMOBJ_7_UV_OFFSET_V(0.25);
 
-         descriptor[8] |= A8XX_TEX_MEMOBJ_8_BASE_V_LO(base_addr[2]);
-         descriptor[9] |= A8XX_TEX_MEMOBJ_9_BASE_V_HI(base_addr[2] >> 32) |
-                          A8XX_TEX_MEMOBJ_9_UV_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
+         /* 2-plane formats (eg. NV12) interleave U and V in the second plane,
+          * so there is no separate V plane base address; BASE_V_LO/_HI must
+          * still be cleared (to zero) since callers don't necessarily
+          * zero-initialize the descriptor themselves.
+          */
+         if (plane_count > 2) {
+            descriptor[8] = A8XX_TEX_MEMOBJ_8_BASE_V_LO(base_addr[2]);
+            descriptor[9] = A8XX_TEX_MEMOBJ_9_BASE_V_HI(base_addr[2] >> 32);
+         } else {
+            descriptor[8] = 0;
+            descriptor[9] = 0;
+         }
+         descriptor[9] |=
+            A8XX_TEX_MEMOBJ_9_UV_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
 
          return;
-      } else if (args->filter_width) {
-         descriptor[5] |= A8XX_TEX_MEMOBJ_5_FILTER_SIZE_X(args->filter_width) |
-                          A8XX_TEX_MEMOBJ_5_FILTER_SIZE_Y(args->filter_height) |
-                          A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_X(args->filter_center_x) |
-                          A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_Y(args->filter_center_y);
+      } else {
+         descriptor[1] |= A8XX_TEX_MEMOBJ_1_DEPTH(depth);
+         descriptor[6] |= A8XX_TEX_MEMOBJ_6_MIN_LINE_OFFSET(layout->pitchalign - 6);
+         if (args->filter_width) {
+            descriptor[5] |= A8XX_TEX_MEMOBJ_5_FILTER_SIZE_X(args->filter_width) |
+                           A8XX_TEX_MEMOBJ_5_FILTER_SIZE_Y(args->filter_height) |
+                           A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_X(args->filter_center_x) |
+                           A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_Y(args->filter_center_y);
+         }
       }
 
       descriptor[7] = A8XX_TEX_MEMOBJ_7_ARRAY_SLICE_OFFSET(layer_size);
@@ -424,8 +448,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          fdl6_get_ubwc_blockwidth(layout, &block_width, &block_height);
 
          descriptor[4] |= A8XX_TEX_MEMOBJ_4_FLAG |
-                          A8XX_TEX_MEMOBJ_4_FLAG_LO(ubwc_addr);
-         descriptor[5] |= A8XX_TEX_MEMOBJ_5_FLAG_HI(ubwc_addr >> 32) |
+                          A8XX_TEX_MEMOBJ_4_FLAG_LO(base_addr[1]);
+         descriptor[5] |= A8XX_TEX_MEMOBJ_5_FLAG_HI(base_addr[1] >> 32) |
                           A8XX_TEX_MEMOBJ_5_FLAG_BUFFER_PITCH(ubwc_pitch);
          descriptor[8] |= A8XX_TEX_MEMOBJ_8_FLAG_ARRAY_PITCH(layout->ubwc_layer_size) |
                           A8XX_TEX_MEMOBJ_8_FLAG_BUFFER_LOGW(util_logbase2_ceil(DIV_ROUND_UP(width, block_width))) |
@@ -470,8 +494,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          A6XX_GRAS_LRZ_VIEW_INFO_BASE_MIP_LEVEL(args->base_miplevel);
    }
 
-   view->base_addr = base_addr;
-   view->ubwc_addr = ubwc_addr;
+   view->base_addr = base_addr[0];
+   view->ubwc_addr = base_addr[1];
    view->layer_size = layer_size;
    view->ubwc_layer_size = layout->ubwc_layer_size;
 
@@ -493,8 +517,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          A6XX_TEX_MEMOBJ_2_PITCH(pitch) |
          A6XX_TEX_MEMOBJ_2_TYPE(fdl6_tex_type(args->type, true));
       view->storage_descriptor[3] = view->descriptor[3];
-      view->storage_descriptor[4] = base_addr;
-      view->storage_descriptor[5] = (base_addr >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(storage_depth);
+      view->storage_descriptor[4] = base_addr[0];
+      view->storage_descriptor[5] = (base_addr[0] >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(storage_depth);
       for (unsigned i = 6; i <= 10; i++)
          view->storage_descriptor[i] = view->descriptor[i];
    } else if (CHIP >= A8XX) {
@@ -502,7 +526,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
 
       uint32_t *descriptor = view->storage_descriptor;
 
-      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr >> 32) |
+      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr[0] >> 32) |
                       A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, true)) |
                       A8XX_TEX_MEMOBJ_1_DEPTH(storage_depth);
       descriptor[3] = A8XX_TEX_MEMOBJ_3_FMT(storage_format) |
@@ -598,7 +622,35 @@ fdl6_buffer_view_init(uint32_t *descriptor, enum pipe_format format,
 
    if (CHIP <= A7XX) {
       uint64_t base_iova = iova & ~0x3full;
-      unsigned texel_offset = (iova & 0x3f) / elem_size;
+      unsigned alignment_offset = (iova & 0x3f);
+      unsigned texel_offset = alignment_offset / elem_size;
+
+      /* Single texel alignment edge cases.
+       * For non-POT sizes, single component alignment is the requirement,
+       * and it's possible we may not be able to express the texel offset
+       * as a simple mask.
+       */
+      if (texel_offset * elem_size != alignment_offset) {
+          /* For POT sizes, alignment is equal to size of format.
+           * By shifting the address back in steps of 64, we're
+           * mathematically guaranteed to hit a case where we start
+           * aligning correctly. There is a potential risk of generating a
+           * base VA that is not inside the resource, but HW should not care.
+           * A maximum of 2 fixup steps is required which guarantees that any possible
+           * case will fall within the [0, 63] texel_offset range.
+           */
+          assert(elem_size % 3 == 0);
+          for (unsigned iter = 0; iter < 2; iter++) {
+              base_iova -= 0x40;
+              alignment_offset += 0x40;
+              texel_offset = alignment_offset / elem_size;
+              if (texel_offset * elem_size == alignment_offset)
+                  break;
+          }
+
+          assert(texel_offset * elem_size == alignment_offset);
+          assert(texel_offset < 64);
+      }
 
       descriptor[0] =
          A6XX_TEX_MEMOBJ_0_TILE_MODE(TILE6_LINEAR) |

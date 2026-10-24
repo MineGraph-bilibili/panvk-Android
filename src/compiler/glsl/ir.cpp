@@ -238,6 +238,7 @@ ir_expression::ir_expression(int op, ir_rvalue *op0)
    case ir_unop_cos:
    case ir_unop_asin:
    case ir_unop_acos:
+   case ir_unop_tanh:
    case ir_unop_dFdx:
    case ir_unop_dFdx_coarse:
    case ir_unop_dFdx_fine:
@@ -855,7 +856,8 @@ ir_constant::ir_constant(const ir_constant *c, unsigned i)
    case GLSL_TYPE_UINT16:  this->value.u16[0] = c->value.u16[i]; break;
    case GLSL_TYPE_INT16:  this->value.i16[0] = c->value.i16[i]; break;
    case GLSL_TYPE_UINT:  this->value.u[0] = c->value.u[i]; break;
-   case GLSL_TYPE_INT:   this->value.i[0] = c->value.i[i]; break;
+   case GLSL_TYPE_INT:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT: this->value.i[0] = c->value.i[i]; break;
    case GLSL_TYPE_FLOAT: this->value.f[0] = c->value.f[i]; break;
    case GLSL_TYPE_FLOAT16: this->value.f16[0] = c->value.f16[i]; break;
    case GLSL_TYPE_BOOL:  this->value.b[0] = c->value.b[i]; break;
@@ -1501,6 +1503,7 @@ ir_constant::has_value(const ir_constant *c) const
 	    return false;
 	 break;
       case GLSL_TYPE_INT:
+      case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
 	 if (this->value.i[i] != c->value.i[i])
 	    return false;
 	 break;
@@ -2023,6 +2026,8 @@ ir_variable::ir_variable(const struct glsl_type *type, const char *name,
    this->data.xfb_stride = -1;
    this->data.implicit_conversion_prohibited = false;
    this->data.per_primitive = false;
+   this->data.pixel_local_storage = GLSL_PIXEL_LOCAL_STORAGE_NONE;
+   this->data.yuv = false;
 
    this->interface_type = NULL;
 

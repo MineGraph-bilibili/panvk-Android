@@ -65,7 +65,7 @@ get_nak_cmat_type_for_muladd(struct glsl_cmat_description a_desc,
 
 enum nak_matrix_type_layout {
    NAK_MAT_16x32_INT8,
-   NAK_MAT_16X16,
+   NAK_MAT_16x16,
 };
 
 static enum nak_matrix_type_layout
@@ -110,7 +110,7 @@ determine_matrix_type(struct glsl_cmat_description desc)
          (desc.rows == 16 && desc.cols ==  8 && is_int32                ) ||
          (desc.rows == 16 && desc.cols == 16 && is_int32                )
       );
-      return NAK_MAT_16X16;
+      return NAK_MAT_16x16;
    }
 }
 
@@ -359,7 +359,7 @@ compute_matrix_offsets(struct nir_builder *b, struct glsl_cmat_description desc,
       compute_mat_16x32_int8(b, lane_id, idx, col_offset, row_offset, alternate_tiling_order);
       break;
 
-   case NAK_MAT_16X16:
+   case NAK_MAT_16x16:
       compute_mat_16x16(b, lane_id, idx, col_offset, row_offset, alternate_tiling_order);
       break;
    }
@@ -546,11 +546,11 @@ lower_cmat_convert(nir_builder *b, nir_intrinsic_instr *intr, nir_def *cmat,
     */
    if (a_layout != d_layout) {
       nir_def *lane_id = nir_load_subgroup_invocation(b);
-      unsigned mask    = a_layout == NAK_MAT_16X16 ? 0x1 : 0x2;
-      unsigned compare = a_layout == NAK_MAT_16X16 ? 0x2 : 0x1;
+      unsigned mask    = a_layout == NAK_MAT_16x16 ? 0x1 : 0x2;
+      unsigned compare = a_layout == NAK_MAT_16x16 ? 0x2 : 0x1;
 
       nir_def *adj;
-      if (a_layout == NAK_MAT_16X16) {
+      if (a_layout == NAK_MAT_16x16) {
          adj = nir_ishl_imm(b, nir_iand_imm(b, lane_id, mask), 1);
       } else {
          adj = nir_ushr_imm(b, nir_iand_imm(b, lane_id, mask), 1);
@@ -582,7 +582,7 @@ lower_cmat_convert(nir_builder *b, nir_intrinsic_instr *intr, nir_def *cmat,
             nir_channel(b, zw, 0),
             nir_channel(b, zw, 1)
          );
-      } else if (cmat->num_components == 8 && a_layout == NAK_MAT_16X16) {
+      } else if (cmat->num_components == 8 && a_layout == NAK_MAT_16x16) {
          nir_def *abcd = nir_channels(b, cmat, 0x0f);
          nir_def *efgh = nir_channels(b, cmat, 0xf0);
 

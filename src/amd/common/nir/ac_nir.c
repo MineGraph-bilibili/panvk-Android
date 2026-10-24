@@ -571,10 +571,8 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
                               nir_intrinsic_instr *high, void *data)
 {
    struct ac_nir_config *config = (struct ac_nir_config *)data;
-   bool uses_smem = (nir_intrinsic_has_access(low) &&
-                     nir_intrinsic_access(low) & ACCESS_SMEM_AMD) ||
-                    /* These don't have the "access" field. */
-                    low->intrinsic == nir_intrinsic_load_push_constant;
+   bool uses_smem = nir_intrinsic_has_access(low) &&
+                    nir_intrinsic_access(low) & ACCESS_SMEM_AMD;
    bool is_store = !nir_intrinsic_infos[low->intrinsic].has_dest;
    bool swizzled = low->intrinsic == nir_intrinsic_load_stack ||
                     low->intrinsic == nir_intrinsic_store_stack ||

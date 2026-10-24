@@ -9,9 +9,13 @@
 #include "util/u_atomic.h"
 #include "util/macros.h"
 
+/* Max MSM_INFO_SET_NAME supported strlen(). This doesn't include '\0'. */
+#define FD_MSM_GEM_NAME_LENGTH 31
+
 #ifdef __cplusplus
 
 #include <tuple>
+#include <type_traits>
 
 #define __FD_GPU_GENS A6XX, A7XX, A8XX
 
@@ -160,6 +164,18 @@ struct BitmaskEnum {
 
 #define U642VOID(x) ((void *)(unsigned long)(x))
 #define VOID2U64(x) ((uint64_t)(unsigned long)(x))
+
+/* Convert 19.2MHz RBBM always-on timer ticks to ns */
+static inline uint64_t
+fd_ticks_to_ns(uint64_t ticks)
+{
+   /* 19.2MHz always-on rbbm timer */
+   const uint64_t ALWAYS_ON_FREQUENCY_HZ = 19200000;
+   const uint64_t NS_PER_SEC = 1000000000;
+
+   return (ticks / ALWAYS_ON_FREQUENCY_HZ) * NS_PER_SEC +
+          (ticks % ALWAYS_ON_FREQUENCY_HZ) * NS_PER_SEC / ALWAYS_ON_FREQUENCY_HZ;
+}
 
 /**
  * Helper for allocating sequence #s where zero is a non-valid seqno

@@ -1986,6 +1986,16 @@ texture_error_check( struct gl_context *ctx,
       return GL_TRUE;
    }
 
+   /* GL_EXT_YUV_target: TEXTURE_EXTERNAL_OES with YUV format can only be
+    * specified via EGLImageTargetTexture2DOES, not via TexImage*
+    */
+   if (target == GL_TEXTURE_EXTERNAL_OES) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "glTexImage%dD(TEXTURE_EXTERNAL_OES can only be specified "
+                  "via EGLImageTargetTexture2DOES)", dimensions);
+      return GL_TRUE;
+   }
+
    /* additional checks for ycbcr textures */
    if (internalFormat == GL_YCBCR_MESA) {
       assert(ctx->Extensions.MESA_ycbcr_texture);
@@ -2266,6 +2276,13 @@ texsubimage_error_check(struct gl_context *ctx, GLuint dimensions,
       return GL_TRUE;
    }
 
+    /* GL_EXT_YUV_target: Cannot update YUV textures with TexSubImage */
+   if (util_format_is_yuv(texImage->TexFormat)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "%s(cannot update YUV texture)", callerName);
+      return GL_TRUE;
+   }
+
    err = _mesa_error_check_format_and_type(ctx, format, type);
    if (err != GL_NO_ERROR) {
       _mesa_error(ctx, err,
@@ -2361,6 +2378,14 @@ copytexture_error_check( struct gl_context *ctx, GLuint dimensions,
    GLint rb_base_format;
    struct gl_renderbuffer *rb;
    GLenum rb_internal_format;
+
+   /* GL_EXT_YUV_target: CopyTexImage not allowed for TEXTURE_EXTERNAL_OES */
+   if (target == GL_TEXTURE_EXTERNAL_OES) {
+      _mesa_error(ctx, GL_INVALID_ENUM,
+                  "glCopyTexImage%dD(target=GL_TEXTURE_EXTERNAL_OES not allowed)",
+                  dimensions);
+      return GL_TRUE;
+   }
 
    /* level check */
    if (level < 0 || level >= _mesa_max_texture_levels(ctx, target)) {
@@ -2476,6 +2501,13 @@ copytexture_error_check( struct gl_context *ctx, GLuint dimensions,
    if (rb == NULL) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "glCopyTexImage%dD(read buffer)", dimensions);
+      return GL_TRUE;
+   }
+
+   /* GL_EXT_YUV_target: Cannot copy from a YUV renderable surface */
+   if (util_format_is_yuv(rb->Format)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "glCopyTexImage%dD(cannot copy from YUV source)", dimensions);
       return GL_TRUE;
    }
 
@@ -2713,6 +2745,13 @@ copytexsubimage_error_check(struct gl_context *ctx, GLuint dimensions,
       /* destination image does not exist */
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "%s(invalid texture level %d)", caller, level);
+      return GL_TRUE;
+   }
+
+   /* GL_EXT_YUV_target: Cannot copy to YUV textures */
+   if (util_format_is_yuv(texImage->TexFormat)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "%s(cannot copy to YUV texture)", caller);
       return GL_TRUE;
    }
 

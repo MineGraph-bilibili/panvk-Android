@@ -922,6 +922,10 @@ static void r300_merge_textures_and_samplers(struct r300_context* r300)
                 if (texstate->filter0 & R300_TX_WRAP_T(R300_TX_MIRRORED)) {
                     texstate->filter0 &= ~R300_TX_WRAP_T(R300_TX_MIRRORED);
                 }
+                if (tex->b.target == PIPE_TEXTURE_3D &&
+                    (texstate->filter0 & R300_TX_WRAP_R(R300_TX_MIRRORED))) {
+                    texstate->filter0 &= ~R300_TX_WRAP_R(R300_TX_MIRRORED);
+                }
 
                 /* Change repeat to clamp-to-edge.
                  * (the repeat bit has a value of 0, no masking needed). */
@@ -932,6 +936,11 @@ static void r300_merge_textures_and_samplers(struct r300_context* r300)
                 if ((texstate->filter0 & R300_TX_WRAP_T_MASK) ==
                     R300_TX_WRAP_T(R300_TX_REPEAT)) {
                     texstate->filter0 |= R300_TX_WRAP_T(R300_TX_CLAMP_TO_EDGE);
+                }
+                if (tex->b.target == PIPE_TEXTURE_3D &&
+                    (texstate->filter0 & R300_TX_WRAP_R_MASK) ==
+                    R300_TX_WRAP_R(R300_TX_REPEAT)) {
+                    texstate->filter0 |= R300_TX_WRAP_R(R300_TX_CLAMP_TO_EDGE);
                 }
             } else {
                 /* the MAX_MIP level is the largest (finest) one */

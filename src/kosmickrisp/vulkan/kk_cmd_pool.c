@@ -11,6 +11,10 @@
 #include "kk_entrypoints.h"
 #include "kk_physical_device.h"
 
+#include "kosmickrisp/bridge/mtl_bridge.h"
+
+#include "vk_common_entrypoints.h"
+
 static VkResult
 kk_cmd_bo_create(struct kk_cmd_pool *pool, struct kk_cmd_bo **bo_out)
 {
@@ -81,6 +85,44 @@ kk_cmd_pool_free_bo_list(struct kk_cmd_pool *pool, struct list_head *bos)
    }
 }
 
+mtl_command_allocator *
+kk_cmd_pool_get_allocator(struct kk_cmd_pool *pool)
+{
+   if (util_dynarray_num_elements(&pool->metal.free_allocators,
+                                  mtl_command_allocator *) > 0u)
+      return util_dynarray_pop(&pool->metal.free_allocators,
+                               mtl_command_allocator *);
+
+   struct kk_device *dev = kk_cmd_pool_device(pool);
+   return mtl_new_command_allocator(dev->mtl_handle);
+}
+
+void
+kk_cmd_pool_return_allocator(struct kk_cmd_pool *pool,
+                             mtl_command_allocator *allocator)
+{
+   util_dynarray_append(&pool->metal.free_allocators, allocator);
+}
+
+mtl_command_buffer *
+kk_cmd_pool_get_cmd_buf(struct kk_cmd_pool *pool)
+{
+   if (util_dynarray_num_elements(&pool->metal.free_cmd_bufs,
+                                  mtl_command_buffer *) > 0u)
+      return util_dynarray_pop(&pool->metal.free_cmd_bufs,
+                               mtl_command_buffer *);
+
+   struct kk_device *dev = kk_cmd_pool_device(pool);
+   return mtl_new_command_buffer(dev->mtl_handle);
+}
+
+void
+kk_cmd_pool_return_cmd_buf(struct kk_cmd_pool *pool,
+                           mtl_command_buffer *cmd_buf)
+{
+   util_dynarray_append(&pool->metal.free_cmd_bufs, cmd_buf);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 kk_CreateCommandPool(VkDevice _device,
                      const VkCommandPoolCreateInfo *pCreateInfo,
@@ -102,11 +144,30 @@ kk_CreateCommandPool(VkDevice _device,
       return result;
    }
 
+   pool->metal.free_allocators = UTIL_DYNARRAY_INIT;
+   pool->metal.free_cmd_bufs = UTIL_DYNARRAY_INIT;
+
    list_inithead(&pool->free_bos);
 
    *pCmdPool = kk_cmd_pool_to_handle(pool);
 
    return VK_SUCCESS;
+}
+
+static void
+kk_cmd_pool_release_mtl_objects(struct kk_cmd_pool *pool)
+{
+   util_dynarray_foreach(&pool->metal.free_allocators, mtl_command_allocator *,
+                         allocator) {
+      mtl_release(*allocator);
+   }
+   util_dynarray_clear(&pool->metal.free_allocators);
+
+   util_dynarray_foreach(&pool->metal.free_cmd_bufs, mtl_command_buffer *,
+                         cmd_buf) {
+      mtl_release(*cmd_buf);
+   }
+   util_dynarray_clear(&pool->metal.free_cmd_bufs);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -121,7 +182,27 @@ kk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
 
    vk_command_pool_finish(&pool->vk);
    kk_cmd_pool_destroy_bos(pool);
+   kk_cmd_pool_release_mtl_objects(pool);
+   util_dynarray_fini(&pool->metal.free_allocators);
+   util_dynarray_fini(&pool->metal.free_cmd_bufs);
    vk_free2(&device->vk.alloc, pAllocator, pool);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+kk_ResetCommandPool(VkDevice _device, VkCommandPool commandPool,
+                    VkCommandPoolResetFlags flags)
+{
+   VK_FROM_HANDLE(kk_cmd_pool, pool, commandPool);
+
+   VkResult result = vk_common_ResetCommandPool(_device, commandPool, flags);
+   if (result != VK_SUCCESS)
+      return result;
+
+   if (flags & VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) {
+      kk_cmd_pool_release_mtl_objects(pool);
+   }
+
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -132,4 +213,11 @@ kk_TrimCommandPool(VkDevice device, VkCommandPool commandPool,
 
    vk_command_pool_trim(&pool->vk, flags);
    kk_cmd_pool_destroy_bos(pool);
+}
+
+void
+kk_cmd_pool_set_label(struct kk_cmd_pool *pool, const char *label)
+{
+   list_for_each_entry(struct kk_cmd_bo, bo, &pool->free_bos, link)
+      kk_bo_set_label(bo->bo, label);
 }

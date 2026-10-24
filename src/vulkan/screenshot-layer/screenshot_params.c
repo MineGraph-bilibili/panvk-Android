@@ -34,6 +34,7 @@
 #include "screenshot_params.h"
 
 #include "util/os_socket.h"
+#include "util/u_string.h"
 
 enum LogType LOG_TYPE = REQUIRED;
 
@@ -284,10 +285,11 @@ struct ImageRegion getRegionFromInput(const char *str) {
    errno = 0;
    float dimensions[] = {0, 0, 1, 1};
    char *dup = strdup(str);
-   char *token = strtok(dup, "/");
+   char *saveptr;
+   char *token = strtok_r(dup, "/", &saveptr);
    char *endptr;
    int i;
-   for (i = 0; i < 4; i++, token = strtok(NULL, "/")) {
+   for (i = 0; i < 4; i++, token = strtok_r(NULL, "/", &saveptr)) {
       if (!token) {
          LOG(ERROR, "Four region entries were not detected!\n");
          break;

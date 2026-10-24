@@ -115,7 +115,7 @@ tu_spirv_to_nir_library(struct tu_device *dev,
    NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_opt_cse);
-   NIR_PASS(_, nir, nir_opt_gcm, true, true);
+   NIR_PASS(_, nir, nir_opt_gcm, true);
 
    nir_opt_peephole_select_options peephole_select_options = {};
    peephole_select_options.limit = 1;
@@ -423,6 +423,17 @@ lower_load_vulkan_descriptor(nir_builder *b, nir_intrinsic_instr *intrin)
    nir_def_replace(&intrin->def, new_index);
 }
 
+static nir_def *
+bindless_resource_ir3(nir_builder *b, unsigned base, nir_def *desc_offset,
+                      bool can_speculate_descriptor)
+{
+   return nir_bindless_resource_ir3(b, 32, desc_offset,
+                                    .desc_set = base,
+                                    .access = can_speculate_descriptor ?
+                                    ACCESS_CAN_SPECULATE :
+                                    (gl_access_qualifier)0);
+}
+
 static bool
 lower_ssbo_ubo_intrinsic(struct tu_device *dev,
                          nir_builder *b, nir_intrinsic_instr *intrin)
@@ -461,8 +472,10 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
    nir_def *results[MAX_SETS] = { NULL };
 
    if (nir_scalar_is_const(scalar_idx)) {
+      bool can_speculate_descriptor = intrin->instr.pass_flags;
       nir_def *bindless =
-         nir_bindless_resource_ir3(b, 32, descriptor_idx, .desc_set = nir_scalar_as_uint(scalar_idx));
+         bindless_resource_ir3(b, nir_scalar_as_uint(scalar_idx),
+                               descriptor_idx, can_speculate_descriptor);
       nir_src_rewrite(&intrin->src[buffer_src], bindless);
       return true;
    }
@@ -472,8 +485,7 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
       /* if (base_idx == i) { ... */
       nir_if *nif = nir_push_if(b, nir_ieq_imm(b, base_idx, i));
 
-      nir_def *bindless =
-         nir_bindless_resource_ir3(b, 32, descriptor_idx, .desc_set = i);
+      nir_def *bindless = bindless_resource_ir3(b, i, descriptor_idx, false);
 
       nir_intrinsic_instr *copy =
          nir_intrinsic_instr_create(b->shader, intrin->intrinsic);
@@ -518,20 +530,46 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
    return true;
 }
 
+/* Returns whether the descriptor contents can be speculatively prefetched.
+ *
+ * This is true whenever the access is definitely within bounds of the
+ * descriptor array, because the descriptor array must be backed by valid
+ * memory. If it wasn't definitely in bounds, then speculating that load
+ * outside of a potential bounds check conditional or executing it when the
+ * shader has 0 invocations could cause a fault from accessing outside of the
+ * descriptor set.
+ *
+ * This is necessary but not sufficient for the loaded descriptor to be used
+ * speculatively, see can_speculate_resource() for that.
+ */
+static bool
+can_speculate_descriptor_load(nir_src array_index,
+                              const struct tu_descriptor_set_layout *set_layout,
+                              unsigned binding)
+{
+   return nir_src_is_const(array_index) &&
+       (!set_layout->has_variable_descriptors ||
+        binding == set_layout->binding_count - 1) &&
+       nir_src_as_uint(array_index) < set_layout->binding[binding].array_size;
+}
+
 static nir_def *
 build_bindless(struct tu_device *dev, nir_builder *b,
                nir_deref_instr *deref, unsigned combined_descriptor_offset,
                struct tu_shader *shader,
                const struct tu_pipeline_layout *layout,
                uint32_t read_only_input_attachments,
-               bool dynamic_renderpass)
+               bool dynamic_renderpass,
+               bool *descriptor_valid)
 {
    nir_variable *var = nir_deref_instr_get_variable(deref);
 
    unsigned set = var->data.descriptor_set;
    unsigned binding = var->data.binding;
+   const struct tu_descriptor_set_layout *set_layout =
+      layout->set[set].layout;
    const struct tu_descriptor_set_binding_layout *bind_layout =
-      &layout->set[set].layout->binding[binding];
+      &set_layout->binding[binding];
 
    /* input attachments use non bindless workaround */
    if (bind_layout->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT &&
@@ -590,15 +628,22 @@ build_bindless(struct tu_device *dev, nir_builder *b,
                   offset);
    descriptor_stride = bind_layout->size / (4 * FDL6_TEX_CONST_DWORDS);
 
+   bool can_speculate_descriptor = true;
+
    if (deref->deref_type != nir_deref_type_var) {
       assert(deref->deref_type == nir_deref_type_array);
 
       nir_def *arr_index = deref->arr.index.ssa;
       desc_offset = nir_iadd(b, desc_offset,
                              nir_imul_imm(b, arr_index, descriptor_stride));
+      can_speculate_descriptor =
+         can_speculate_descriptor_load(deref->arr.index, set_layout, binding);
    }
 
-   return nir_bindless_resource_ir3(b, 32, desc_offset, .desc_set = set);
+   *descriptor_valid = !bind_layout->partially_bound &&
+      can_speculate_descriptor;
+
+   return bindless_resource_ir3(b, set, desc_offset, can_speculate_descriptor);
 }
 
 static nir_def *
@@ -680,8 +725,20 @@ lower_image_deref(struct tu_device *dev, nir_builder *b,
                   nir_intrinsic_instr *instr, struct tu_shader *shader,
                   const struct tu_pipeline_layout *layout)
 {
+   bool descriptor_valid = true;
    nir_deref_instr *deref = nir_src_as_deref(instr->src[0]);
-   nir_def *bindless = build_bindless(dev, b, deref, 0, shader, layout, 0, false);
+   nir_def *bindless = build_bindless(dev, b, deref, 0, shader, layout, 0, false,
+                                      &descriptor_valid);
+   if ((instr->intrinsic == nir_intrinsic_image_deref_load ||
+        instr->intrinsic == nir_intrinsic_image_deref_sparse_load ||
+        instr->intrinsic == nir_intrinsic_image_deref_size ||
+        instr->intrinsic == nir_intrinsic_image_deref_samples) &&
+       descriptor_valid) {
+      nir_intrinsic_set_access(instr,
+                               (gl_access_qualifier)(nir_intrinsic_access(instr) |
+                                                     ACCESS_CAN_SPECULATE));
+   }
+
    nir_rewrite_image_intrinsic(instr, bindless,
                                nir_image_intrinsic_type_bindless);
 
@@ -808,13 +865,15 @@ lower_tex_subsampled(const struct tu_sampler *sampler,
 
    b->cursor = nir_before_instr(&tex->instr);
 
+   bool descriptor_valid = true;
+
    int tex_src_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
    assert(tex_src_idx >= 0);
    nir_deref_instr *deref = nir_src_as_deref(tex->src[tex_src_idx].src);
    nir_def *bindless = build_bindless(dev, b, deref, 2, shader, layout,
                                       0, /* read_only_input_attachments (not used) */
-                                      false /* dynamic_renderpass (not used)*/
-                                      );
+                                      false, /* dynamic_renderpass (not used)*/
+                                      &descriptor_valid);
 
    nir_def *coord = nir_steal_tex_src(tex, nir_tex_src_coord);
    nir_def *coord_xy = nir_channels(b, coord, 0x3);
@@ -841,7 +900,8 @@ lower_tex_subsampled(const struct tu_sampler *sampler,
    }
 
    nir_def *transformed_coord_xy =
-      tu_get_subsampled_coordinates(b, clamped_coord, bindless);
+      tu_get_subsampled_coordinates(b, clamped_coord, bindless,
+                                    descriptor_valid);
 
    /* Due to VUID-VkSamplerCreateInfo-flags-02577 we only have to handle
     * CLAMP_TO_EDGE and CLAMP_TO_BORDER. We implicitly do CLAMP_TO_EDGE to
@@ -984,12 +1044,14 @@ lower_tex_impl(nir_builder *b, nir_tex_instr *tex, struct tu_device *dev,
           uint32_t read_only_input_attachments, bool dynamic_renderpass,
           bool ref)
 {
+   bool descriptor_valid = true;
    int sampler_src_idx = nir_tex_instr_src_index(tex, ref ? nir_tex_src_sampler_2_deref : nir_tex_src_sampler_deref);
    if (sampler_src_idx >= 0) {
       nir_deref_instr *deref = nir_src_as_deref(tex->src[sampler_src_idx].src);
       nir_def *bindless = build_bindless(dev, b, deref, 1, shader, layout,
                                          read_only_input_attachments,
-                                         dynamic_renderpass);
+                                         dynamic_renderpass,
+                                         &descriptor_valid);
       nir_src_rewrite(&tex->src[sampler_src_idx].src, bindless);
       tex->src[sampler_src_idx].src_type = ref ? nir_tex_src_sampler_2_handle : nir_tex_src_sampler_handle;
    }
@@ -999,7 +1061,8 @@ lower_tex_impl(nir_builder *b, nir_tex_instr *tex, struct tu_device *dev,
       nir_deref_instr *deref = nir_src_as_deref(tex->src[tex_src_idx].src);
       nir_def *bindless = build_bindless(dev, b, deref, 0, shader, layout,
                                          read_only_input_attachments,
-                                         dynamic_renderpass);
+                                         dynamic_renderpass,
+                                         &descriptor_valid);
       nir_src_rewrite(&tex->src[tex_src_idx].src, bindless);
       tex->src[tex_src_idx].src_type = ref ? nir_tex_src_texture_2_handle : nir_tex_src_texture_handle;
 
@@ -1013,6 +1076,9 @@ lower_tex_impl(nir_builder *b, nir_tex_instr *tex, struct tu_device *dev,
       lower_tex_texel_buffer_to_image(b, tex, tex_src_idx);
    }
 
+   if (!descriptor_valid)
+      tex->can_speculate = false;
+
    return true;
 }
 
@@ -1021,6 +1087,8 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, struct tu_device *dev,
           struct tu_shader *shader, const struct tu_pipeline_layout *layout,
           uint32_t read_only_input_attachments, bool dynamic_renderpass)
 {
+   tex->can_speculate = true;
+
    if (tex->op == nir_texop_block_match_sad_qcom ||
        tex->op == nir_texop_block_match_ssd_qcom ||
        tex->op == nir_texop_sample_weighted_qcom) {
@@ -1149,6 +1217,131 @@ lower_inline_ubo(nir_builder *b, nir_intrinsic_instr *intrin, void *cb_data)
 
    nir_def_replace(&intrin->def, val);
    return true;
+}
+
+/* Returns whether we can speculatively access through a Vulkan descriptor.
+ * Used for SSBO/UBO accesses, where vtn produces
+ * vulkan_resource_index/load_vulkan_descriptor. See build_bindless() for the
+ * image case.
+ *
+ * Instructions using descriptors are all bounds-checked, so they are valid to
+ * speculate as long as the descriptor is valid. There are two cases:
+ *
+ * 1. If the descriptor set is fully bound (i.e. no PARTIALLY_BOUND_BIT), then
+ *    all descriptors statically used must be valid. That means the descriptor
+ *    and load using the descriptor is free to speculate as long as it
+ *    is always in-bounds.
+ * 2. If the descriptor set isn't fully bound, the descriptor contents may not
+ *    be valid if no shader invocation dynamically executes the access. This
+ *    is even true if the access post-dominates the exit, because early
+ *    preambles can execute speculative resource access even when there would
+ *    be no shader invocations dynamically executed. However it may still be
+ *    valid to speculatively prefetch the descriptor, as long as the
+ *    descriptor is always in-bounds, since descriptor sets must have memory
+ *    backing them if they are statically used.
+ */
+static bool
+can_speculate_resource(nir_def *def,
+                       const struct tu_pipeline_layout *layout,
+                       bool *can_speculate_descriptor)
+{
+   *can_speculate_descriptor = false;
+
+   /* We're looking for a pattern like this:
+    *
+    * %desc_index = vulkan_resource_index %const (desc_set=..., binding=...)
+    * %desc_with_offset = load_vulkan_descriptor %desc_index
+    * %desc = vec2 %desc_with_offset.x, %desc_with_offset.y
+    */
+   nir_scalar comp1 = nir_scalar_resolved(def, 0);
+   nir_scalar comp2 = nir_scalar_resolved(def, 1);
+
+   if (comp1.def != comp2.def || comp1.comp != 0 || comp2.comp != 1)
+      return false;
+
+   nir_instr *instr = nir_def_instr(comp1.def);
+
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic != nir_intrinsic_load_vulkan_descriptor)
+      return false;
+
+   nir_instr *resource = nir_def_instr(intr->src[0].ssa);
+   if (resource->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *resource_intr = nir_instr_as_intrinsic(resource);
+   if (resource_intr->intrinsic != nir_intrinsic_vulkan_resource_index)
+      return false;
+
+   unsigned set = nir_intrinsic_desc_set(resource_intr);
+   unsigned binding = nir_intrinsic_binding(resource_intr);
+   struct tu_descriptor_set_layout *set_layout = layout->set[set].layout;
+   struct tu_descriptor_set_binding_layout *bind_layout =
+      &set_layout->binding[binding];
+
+   *can_speculate_descriptor =
+      can_speculate_descriptor_load(resource_intr->src[0], set_layout,
+                                    binding);
+
+   return *can_speculate_descriptor && !bind_layout->partially_bound;
+}
+
+static bool
+set_speculate_intrinsic(nir_intrinsic_instr *intrin,
+                        const struct tu_pipeline_layout *layout)
+{
+   bool can_speculate = false, can_speculate_descriptor = false;
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_ubo:
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_load_uav_ir3:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
+   case nir_intrinsic_get_ssbo_size:
+      can_speculate = can_speculate_resource(intrin->src[0].ssa, layout,
+                                             &can_speculate_descriptor);
+      break;
+
+   case nir_intrinsic_store_ssbo:
+      can_speculate = can_speculate_resource(intrin->src[1].ssa, layout,
+                                             &can_speculate_descriptor);
+      break;
+
+   default:
+      return false;
+   }
+
+   if ((intrin->intrinsic == nir_intrinsic_load_ubo ||
+        intrin->intrinsic == nir_intrinsic_load_ssbo ||
+        intrin->intrinsic == nir_intrinsic_load_uav_ir3 ||
+        intrin->intrinsic == nir_intrinsic_get_ssbo_size) &&
+       can_speculate) {
+      nir_intrinsic_set_access(intrin,
+                               (gl_access_qualifier)(nir_intrinsic_access(intrin) |
+                                                     ACCESS_CAN_SPECULATE));
+   }
+
+   /* We need to communicate this to descriptor lowering, which happens in a
+    * separate pass afterwards and which destroys load_vulkan_descriptor
+    * intrinsics. We stuff the information in the pass_flags.
+    */
+   intrin->instr.pass_flags = can_speculate_descriptor;
+   return true;
+}
+
+static bool
+set_speculate_instr(nir_builder *b, nir_instr *instr, void *cb_data)
+{
+   struct lower_instr_params *params = (struct lower_instr_params *) cb_data;
+   if (instr->type == nir_instr_type_intrinsic) {
+      return set_speculate_intrinsic(nir_instr_as_intrinsic(instr),
+                                     params->layout);
+   }
+
+   return false;
 }
 
 /* Figure out the range of push constants that we're actually going to push to
@@ -1394,6 +1587,11 @@ tu_lower_io(nir_shader *shader, struct tu_device *dev,
    }
 
    progress |= nir_shader_instructions_pass(shader,
+                                            set_speculate_instr,
+                                            nir_metadata_none,
+                                            &params);
+
+   progress |= nir_shader_instructions_pass(shader,
                                             lower_instr,
                                             nir_metadata_none,
                                             &params);
@@ -1549,7 +1747,8 @@ lower_ssbo_descriptor_instr(nir_builder *b, nir_intrinsic_instr *intrin,
       descriptor_idx = nir_iadd_imm(b, descriptor_idx, 1);
       nir_def *new_buffer =
          nir_bindless_resource_ir3(b, 32, descriptor_idx,
-                                   .desc_set = nir_intrinsic_desc_set(bindless));
+                                   .desc_set = nir_intrinsic_desc_set(bindless),
+                                   .access = nir_intrinsic_access(bindless));
       nir_src_rewrite(&intrin->src[buffer_src], new_buffer);
 
       return true;
@@ -2946,6 +3145,8 @@ tu_upload_shader(struct tu_device *dev,
    /* We emit an empty VPC including streamout state in the binning draw state */
    if (binning || v->type == MESA_SHADER_GEOMETRY) {
       size += vpc_size;
+      if (safe_const)
+         size += vpc_size;
    }
 
    pthread_mutex_lock(&dev->pipeline_mutex);
@@ -2958,6 +3159,12 @@ tu_upload_shader(struct tu_device *dev,
 
    uint32_t pvtmem_size = v->pvtmem_size;
    bool per_wave = v->pvtmem_per_wave;
+
+   /* Shader stages that don't expose private memory are not expected to benefit
+    * as much from per-wave layout.
+    */
+   if ((v->type == MESA_SHADER_COMPUTE) && !per_wave)
+      perf_debug(dev, "falling back to per-fiber pvtmem layout");
 
    if (v->binning) {
       pvtmem_size = MAX2(pvtmem_size, shader->variant->binning->pvtmem_size);
@@ -3373,6 +3580,10 @@ tu_shader_create(struct tu_device *dev,
        key->fdm_per_layer) {
       shader->fs.max_fdm_layers = key->max_fdm_layers;
    }
+
+   if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+       key->read_only_input_attachments)
+      shader->fs.read_only_input_attachments = true;
 
    for (unsigned i = 0; i < layout->num_sets; i++) {
       if (layout->set[i].layout) {

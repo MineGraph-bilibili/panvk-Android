@@ -1,5 +1,6 @@
 /*
  * Copyright © 2015 Intel Corporation
+ * Copyright © 2026 NXP
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -1901,10 +1902,6 @@ wsi_wl_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
    if (pdevice->supported_extensions.EXT_attachment_feedback_loop_layout)
       image_usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
-   VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = vk_find_struct(caps, SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT);
-   if (surface_caps && pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
-      surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
-
    VkImageUsageFlags2CreateInfoKHR *usage2 =
       vk_find_struct(caps->pNext, IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR);
    if (usage2) {
@@ -1948,6 +1945,50 @@ wsi_wl_surface_check_presentation(VkIcdSurfaceBase *icd_surface,
    return VK_SUCCESS;
 }
 
+#define WSI_WL_MAX_PRESENT_MODES 3
+
+static VkResult
+wsi_wl_surface_get_present_modes(VkIcdSurfaceBase *icd_surface,
+                                 struct wsi_device *wsi_device,
+                                 uint32_t* pPresentModeCount,
+                                 VkPresentModeKHR* pPresentModes)
+{
+   VkIcdSurfaceWayland *surface = (VkIcdSurfaceWayland *)icd_surface;
+   struct wsi_wayland *wsi =
+      (struct wsi_wayland *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WAYLAND];
+
+   struct wsi_wl_display display;
+   if (wsi_wl_display_init(wsi, &display, surface->display, true,
+                           wsi_device->sw, "mesa present modes query"))
+      return VK_ERROR_SURFACE_LOST_KHR;
+
+   VkPresentModeKHR present_modes[WSI_WL_MAX_PRESENT_MODES];
+   uint32_t present_modes_count = 0;
+
+   /* The following two modes are always supported */
+   present_modes[present_modes_count++] = VK_PRESENT_MODE_MAILBOX_KHR;
+   present_modes[present_modes_count++] = VK_PRESENT_MODE_FIFO_KHR;
+
+   if (display.tearing_control_manager)
+      present_modes[present_modes_count++] = VK_PRESENT_MODE_IMMEDIATE_KHR;
+
+   assert(present_modes_count <= ARRAY_SIZE(present_modes));
+   wsi_wl_display_finish(&display);
+
+   if (pPresentModes == NULL) {
+      *pPresentModeCount = present_modes_count;
+      return VK_SUCCESS;
+   }
+
+   *pPresentModeCount = MIN2(*pPresentModeCount, present_modes_count);
+   typed_memcpy(pPresentModes, present_modes, *pPresentModeCount);
+
+   if (*pPresentModeCount < present_modes_count)
+      return VK_INCOMPLETE;
+   else
+      return VK_SUCCESS;
+}
+
 static VkResult
 wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
                                  struct wsi_device *wsi_device,
@@ -1964,10 +2005,10 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
       wsi_wl_surface_get_capabilities(surface, wsi_device, present_mode,
                                       caps);
 
-   vk_foreach_struct(ext, caps->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, caps->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
-         VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
+         VkSurfaceProtectedCapabilitiesKHR *protected = ext;
          protected->supportsProtected =
             wsi_device->supports_protected[VK_ICD_WSI_PLATFORM_WAYLAND];
          break;
@@ -1975,7 +2016,7 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR: {
          /* Unsupported. */
-         VkSurfacePresentScalingCapabilitiesKHR *scaling = (void *)ext;
+         VkSurfacePresentScalingCapabilitiesKHR *scaling = ext;
          scaling->supportedPresentScaling = 0;
          scaling->supportedPresentGravityX = 0;
          scaling->supportedPresentGravityY = 0;
@@ -1985,52 +2026,56 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR: {
-         /* Can easily toggle between FIFO and MAILBOX on Wayland. */
-         VkSurfacePresentModeCompatibilityKHR *compat = (void *)ext;
+         /* All present modes are compatible with each other. */
+         VkSurfacePresentModeCompatibilityKHR *compat = ext;
+
          if (compat->pPresentModes) {
             assert(present_mode);
-            VK_OUTARRAY_MAKE_TYPED(VkPresentModeKHR, modes, compat->pPresentModes, &compat->presentModeCount);
+
+            VkPresentModeKHR present_modes[WSI_WL_MAX_PRESENT_MODES];
+            uint32_t present_mode_count = ARRAY_SIZE(present_modes);
+
+            result = wsi_wl_surface_get_present_modes(surface, wsi_device,
+                                                      &present_mode_count,
+                                                      present_modes);
+            if (result != VK_SUCCESS)
+               return result;
+
+            VK_OUTARRAY_MAKE_TYPED(VkPresentModeKHR, modes,
+                  compat->pPresentModes, &compat->presentModeCount);
             /* Must always return queried present mode even when truncating. */
             vk_outarray_append_typed(VkPresentModeKHR, &modes, mode) {
                *mode = present_mode->presentMode;
             }
-            switch (present_mode->presentMode) {
-            case VK_PRESENT_MODE_MAILBOX_KHR:
-               vk_outarray_append_typed(VkPresentModeKHR, &modes, mode) {
-                  *mode = VK_PRESENT_MODE_FIFO_KHR;
+
+            for (uint32_t i = 0; i < present_mode_count; i++) {
+               if (present_modes[i] != present_mode->presentMode) {
+                  vk_outarray_append_typed(VkPresentModeKHR, &modes, mode) {
+                     *mode = present_modes[i];
+                  }
                }
-               break;
-            case VK_PRESENT_MODE_FIFO_KHR:
-               vk_outarray_append_typed(VkPresentModeKHR, &modes, mode) {
-                  *mode = VK_PRESENT_MODE_MAILBOX_KHR;
-               }
-               break;
-            default:
-               break;
             }
          } else {
             if (!present_mode) {
                wsi_common_vk_warn_once("Use of VkSurfacePresentModeCompatibilityKHR "
                                        "without a VkSurfacePresentModeKHR set. This is an "
                                        "application bug.\n");
-               compat->presentModeCount = 1;
-            } else {
-               switch (present_mode->presentMode) {
-               case VK_PRESENT_MODE_MAILBOX_KHR:
-               case VK_PRESENT_MODE_FIFO_KHR:
-                  compat->presentModeCount = 2;
-                  break;
-               default:
-                  compat->presentModeCount = 1;
-                  break;
-               }
             }
+
+            uint32_t present_mode_count = 0;
+            result = wsi_wl_surface_get_present_modes(surface, wsi_device,
+                                                      &present_mode_count,
+                                                      NULL);
+            if (result != VK_SUCCESS)
+               return result;
+
+            compat->presentModeCount = present_mode_count;
          }
          break;
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR: {
-         VkSurfaceCapabilitiesPresentId2KHR *pid2 = (void *)ext;
+         VkSurfaceCapabilitiesPresentId2KHR *pid2 = ext;
          bool has_feedback;
 
          result = wsi_wl_surface_check_presentation(surface, wsi_device,
@@ -2043,7 +2088,7 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR: {
-         VkSurfaceCapabilitiesPresentWait2KHR *pwait2 = (void *)ext;
+         VkSurfaceCapabilitiesPresentWait2KHR *pwait2 = ext;
          bool has_feedback;
 
          result = wsi_wl_surface_check_presentation(surface, wsi_device,
@@ -2056,7 +2101,7 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
       }
 
       case VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT: {
-         VkPresentTimingSurfaceCapabilitiesEXT *wait = (void *)ext;
+         VkPresentTimingSurfaceCapabilitiesEXT *wait = ext;
          bool has_feedback, has_commit_timing, has_fifo;
 
          wait->presentStageQueries = 0;
@@ -2098,6 +2143,30 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
 
          break;
       }
+
+      case VK_STRUCTURE_TYPE_SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT: {
+         VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = ext;
+         VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
+
+         if (pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_bind_memory2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_id2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_wait2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_swapchain_mutable_format)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
+         if (pdevice->supported_extensions.EXT_present_timing)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_swapchain_maintenance1 ||
+             pdevice->supported_extensions.EXT_swapchain_maintenance1)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_DEFERRED_MEMORY_ALLOCATION_BIT_EXT;
+         if (wsi_device->supports_protected[VK_ICD_WSI_PLATFORM_WAYLAND])
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR;
+      }
+      break;
 
       default:
          /* Ignored */
@@ -2195,48 +2264,6 @@ wsi_wl_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
    wsi_wl_display_finish(&display);
 
    return vk_outarray_status(&out);
-}
-
-static VkResult
-wsi_wl_surface_get_present_modes(VkIcdSurfaceBase *icd_surface,
-                                 struct wsi_device *wsi_device,
-                                 uint32_t* pPresentModeCount,
-                                 VkPresentModeKHR* pPresentModes)
-{
-   VkIcdSurfaceWayland *surface = (VkIcdSurfaceWayland *)icd_surface;
-   struct wsi_wayland *wsi =
-      (struct wsi_wayland *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WAYLAND];
-
-   struct wsi_wl_display display;
-   if (wsi_wl_display_init(wsi, &display, surface->display, true,
-                           wsi_device->sw, "mesa present modes query"))
-      return VK_ERROR_SURFACE_LOST_KHR;
-
-   VkPresentModeKHR present_modes[3];
-   uint32_t present_modes_count = 0;
-
-   /* The following two modes are always supported */
-   present_modes[present_modes_count++] = VK_PRESENT_MODE_MAILBOX_KHR;
-   present_modes[present_modes_count++] = VK_PRESENT_MODE_FIFO_KHR;
-
-   if (display.tearing_control_manager)
-      present_modes[present_modes_count++] = VK_PRESENT_MODE_IMMEDIATE_KHR;
-
-   assert(present_modes_count <= ARRAY_SIZE(present_modes));
-   wsi_wl_display_finish(&display);
-
-   if (pPresentModes == NULL) {
-      *pPresentModeCount = present_modes_count;
-      return VK_SUCCESS;
-   }
-
-   *pPresentModeCount = MIN2(*pPresentModeCount, present_modes_count);
-   typed_memcpy(pPresentModes, present_modes, *pPresentModeCount);
-
-   if (*pPresentModeCount < present_modes_count)
-      return VK_INCOMPLETE;
-   else
-      return VK_SUCCESS;
 }
 
 static VkResult
@@ -2605,12 +2632,42 @@ wsi_wl_swapchain_release_images(struct wsi_swapchain *wsi_chain,
    return VK_SUCCESS;
 }
 
+static VkResult
+wsi_wl_swapchain_update_tearing_hint(struct wsi_wl_swapchain *chain)
+{
+   struct wsi_wl_display *dpy = chain->wsi_wl_surface->display;
+
+   if (chain->retired || !dpy->tearing_control_manager)
+      return VK_SUCCESS;
+
+   if (chain->base.present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+      if (!chain->tearing_control) {
+         chain->tearing_control =
+            wp_tearing_control_manager_v1_get_tearing_control(
+               dpy->tearing_control_manager,
+               chain->wsi_wl_surface->wayland_surface.wrapper);
+         if (!chain->tearing_control)
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      wp_tearing_control_v1_set_presentation_hint(
+         chain->tearing_control,
+         WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC);
+   } else if (chain->tearing_control) {
+      wp_tearing_control_v1_set_presentation_hint(
+         chain->tearing_control,
+         WP_TEARING_CONTROL_V1_PRESENTATION_HINT_VSYNC);
+   }
+
+   return VK_SUCCESS;
+}
+
 static void
 wsi_wl_swapchain_set_present_mode(struct wsi_swapchain *wsi_chain,
                                   VkPresentModeKHR mode)
 {
    struct wsi_wl_swapchain *chain = (struct wsi_wl_swapchain *)wsi_chain;
    chain->base.present_mode = mode;
+   wsi_wl_swapchain_update_tearing_hint(chain);
 }
 
 static void
@@ -2649,6 +2706,13 @@ dispatch_present_id_queue(struct wsi_swapchain *wsi_chain, struct timespec *end_
    err = mtx_lock(&chain->present_ids.lock);
    if (err != thrd_success)
       return VK_ERROR_OUT_OF_DATE_KHR;
+
+   /* Nothing outstanding, skip it */
+   if (chain->present_ids.outstanding_count == 0 &&
+       !chain->present_ids.dispatch_in_progress) {
+      mtx_unlock(&chain->present_ids.lock);
+      return VK_SUCCESS;
+   }
 
    /* Someone else is dispatching events; wait for them to update the chain
     * status and wake us up. */
@@ -3974,15 +4038,9 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    }
 
    if (present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
-      chain->tearing_control =
-         wp_tearing_control_manager_v1_get_tearing_control(dpy->tearing_control_manager,
-                                                           chain->wsi_wl_surface->wayland_surface.wrapper);
-      if (!chain->tearing_control) {
-         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      result = wsi_wl_swapchain_update_tearing_hint(chain);
+      if (result != VK_SUCCESS)
          goto fail_free_wl_chain;
-      }
-      wp_tearing_control_v1_set_presentation_hint(chain->tearing_control,
-                                                  WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC);
    }
 
    if (wsi_wl_use_explicit_sync(dpy, wsi_device)) {

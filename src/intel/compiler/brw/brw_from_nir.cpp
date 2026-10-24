@@ -1085,8 +1085,16 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       bld.COS(result, op[0]);
       break;
 
+   case nir_op_ftanh:
+      bld.TANH(result, op[0]);
+      break;
+
    case nir_op_fadd:
-      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+   case nir_op_fadd_rtne:
+      if (instr->op == nir_op_fadd_rtne) {
+         bld.exec_all().emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                             brw_imm_d(BRW_RND_MODE_RTNE));
+      } else if (nir_has_any_rounding_mode_enabled(execution_mode)) {
          brw_rnd_mode rnd =
             brw_rnd_mode_from_execution_mode(execution_mode);
          bld.exec_all().emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
@@ -1818,6 +1826,9 @@ brw_from_nir_emit_load_const(nir_to_brw_state &ntb,
 static bool
 get_nir_src_bindless(nir_to_brw_state &ntb, const nir_src &src)
 {
+   /* Everything is bindless in efficient 64bit mode */
+   if (ntb.s.key->use_efficient_64bit)
+      return true;
    return ntb.ssa_bind_infos[src.ssa->index].bindless;
 }
 
@@ -1825,6 +1836,12 @@ static bool
 get_nir_src_internal(nir_to_brw_state &ntb, const nir_src &src)
 {
    return ntb.ssa_bind_infos[src.ssa->index].internal;
+}
+
+static unsigned
+get_nir_src_block(nir_to_brw_state &ntb, const nir_src &src)
+{
+   return ntb.ssa_bind_infos[src.ssa->index].block;
 }
 
 /**
@@ -2158,19 +2175,40 @@ emit_pixel_interpolater_alu_at_offset(const brw_builder &bld,
          if (interpolation != INTERP_MODE_NOPERSPECTIVE) {
             jbld.MAD(acc, horiz_offset(rhw_c0, acc_width * j),
                      horiz_offset(rhw_cx, acc_width * j), offset(delta_x, jbld, j));
-            jbld.MAC(offset(rhw, jbld, j),
-                     horiz_offset(rhw_cy, acc_width * j), offset(delta_y, jbld, j));
+            if (devinfo->ver < 35) {
+               jbld.MAC(offset(rhw, jbld, j),
+                        horiz_offset(rhw_cy, acc_width * j),
+                        offset(delta_y, jbld, j));
+            } else {
+               jbld.MAD(offset(rhw, jbld, j),
+                        acc, horiz_offset(rhw_cy, acc_width * j),
+                        offset(delta_y, jbld, j));
+            }
          }
 
          jbld.MAD(acc, horiz_offset(bary1_c0, acc_width * j),
                   horiz_offset(bary1_cx, acc_width * j), offset(delta_x, jbld, j));
-         jbld.MAC(offset(bary1, jbld, j),
-                  horiz_offset(bary1_cy, acc_width * j), offset(delta_y, jbld, j));
+         if (devinfo->ver < 35) {
+            jbld.MAC(offset(bary1, jbld, j),
+                     horiz_offset(bary1_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         } else {
+            jbld.MAD(offset(bary1, jbld, j),
+                     acc, horiz_offset(bary1_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         }
 
          jbld.MAD(acc, horiz_offset(bary2_c0, acc_width * j),
                   horiz_offset(bary2_cx, acc_width * j), offset(delta_x, jbld, j));
-         jbld.MAC(offset(bary2, jbld, j),
-                  horiz_offset(bary2_cy, acc_width * j), offset(delta_y, jbld, j));
+         if (devinfo->ver < 35) {
+            jbld.MAC(offset(bary2, jbld, j),
+                     horiz_offset(bary2_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         } else {
+            jbld.MAD(offset(bary2, jbld, j),
+                     acc, horiz_offset(bary2_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         }
       }
 
       /* Scale the results dividing by the interpolated RHW coordinate
@@ -2579,7 +2617,7 @@ emit_gs_vertex(nir_to_brw_state &ntb, const nir_src &vertex_count_nir_src,
        * effect of any call to EndPrimitive() that the shader may have
        * made before outputting its first vertex.
        */
-      abld.exec_all().MOV(s.control_data_bits, brw_imm_ud(0u));
+      abld.MOV(s.control_data_bits, brw_imm_ud(0u));
       abld.emit(BRW_OPCODE_ENDIF);
    }
 
@@ -3248,56 +3286,6 @@ emit_coherent_fb_read(const brw_builder &bld, const brw_reg &dst, unsigned targe
    return inst;
 }
 
-static brw_reg
-alloc_temporary(const brw_builder &bld, unsigned size, brw_reg *regs, unsigned n)
-{
-   if (n && regs[0].file != BAD_FILE) {
-      return regs[0];
-
-   } else {
-      const brw_reg tmp = bld.vgrf(BRW_TYPE_F, size);
-
-      for (unsigned i = 0; i < n; i++)
-         regs[i] = tmp;
-
-      return tmp;
-   }
-}
-
-static brw_reg
-alloc_frag_output(nir_to_brw_state &ntb, unsigned l)
-{
-   brw_shader &s = ntb.s;
-
-   assert(s.stage == MESA_SHADER_FRAGMENT);
-   const brw_fs_prog_key *const key =
-      reinterpret_cast<const brw_fs_prog_key *>(s.key);
-
-   if (l == FRAG_RESULT_DUAL_SRC_BLEND)
-      return alloc_temporary(ntb.bld, 4, &s.dual_src_output, 1);
-
-   else if (l == FRAG_RESULT_COLOR)
-      return alloc_temporary(ntb.bld, 4, s.outputs,
-                             MAX2(key->nr_color_regions, 1));
-
-   else if (l == FRAG_RESULT_DEPTH)
-      return alloc_temporary(ntb.bld, 1, &s.frag_depth, 1);
-
-   else if (l == FRAG_RESULT_STENCIL)
-      return alloc_temporary(ntb.bld, 1, &s.frag_stencil, 1);
-
-   else if (l == FRAG_RESULT_SAMPLE_MASK)
-      return alloc_temporary(ntb.bld, 1, &s.sample_mask, 1);
-
-   else if (l >= FRAG_RESULT_DATA0 &&
-            l < FRAG_RESULT_DATA0 + BRW_MAX_DRAW_BUFFERS)
-      return alloc_temporary(ntb.bld, 4,
-                             &s.outputs[l - FRAG_RESULT_DATA0], 1);
-
-   else
-      UNREACHABLE("Invalid location");
-}
-
 static void
 emit_is_helper_invocation(nir_to_brw_state &ntb, brw_reg result)
 {
@@ -3606,6 +3594,38 @@ brw_per_primitive_reg(const brw_builder &bld, int location, unsigned comp)
    }
 }
 
+static bool
+load_reg_equal(nir_scalar a, nir_scalar b)
+{
+   if (a.comp != b.comp)
+      return false;
+
+   if (nir_def_instr(a.def)->type != nir_instr_type_intrinsic ||
+       nir_def_instr(b.def)->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *a_int = nir_def_as_intrinsic(a.def);
+   nir_intrinsic_instr *b_int = nir_def_as_intrinsic(b.def);
+
+   if (a_int->intrinsic != nir_intrinsic_load_reg ||
+       b_int->intrinsic != nir_intrinsic_load_reg)
+      return false;
+
+   return nir_scalar_equal(nir_scalar_resolved(a_int->src[0].ssa, 0),
+                           nir_scalar_resolved(b_int->src[0].ssa, 0));
+}
+
+static bool
+scalars_equal(nir_scalar a, nir_scalar b)
+{
+
+   return load_reg_equal(a, b) ||
+          nir_scalar_equal(a, b) ||
+          (nir_scalar_is_const(a) &&
+           nir_scalar_is_const(b) &&
+           nir_scalar_as_uint(a) == nir_scalar_as_uint(b));
+}
+
 static void
 brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
                          nir_intrinsic_instr *instr)
@@ -3706,17 +3726,6 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       break;
    }
 
-   case nir_intrinsic_store_output: {
-      const brw_reg src = get_nir_src(ntb, instr->src[0], -1);
-      const nir_io_semantics sem = nir_intrinsic_io_semantics(instr);
-      const brw_reg new_dest =
-         offset(retype(alloc_frag_output(ntb, sem.location), src.type),
-                bld, nir_intrinsic_component(instr));
-
-      brw_combine_with_vec(bld, new_dest, src, instr->num_components);
-      break;
-   }
-
    case nir_intrinsic_load_output: {
       const nir_io_semantics sem = nir_intrinsic_io_semantics(instr);
       assert(sem.location >= FRAG_RESULT_DATA0);
@@ -3739,7 +3748,7 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
    case nir_intrinsic_terminate_if: {
       /* We track our discarded pixels in f0.1/f1.0.  By predicating on it, we
        * can update just the flag bits that aren't yet discarded.  If there's
-       * no condition, we emit a CMP of g0 != g0, so all currently executing
+       * no condition, we emit 'MOV.NZ null, 0', so all currently executing
        * channels will get turned off.
        */
       brw_inst *cmp = NULL;
@@ -3805,8 +3814,16 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
                           brw_imm_d(0), BRW_CONDITIONAL_Z);
          }
       } else {
-         brw_reg some_reg = brw_reg(retype(brw_vec8_grf(0, 0), BRW_TYPE_UW));
-         cmp = bld.CMP(bld.null_reg_f(), some_reg, some_reg, BRW_CONDITIONAL_NZ);
+         cmp = bld.MOV(retype(brw_null_reg(), BRW_TYPE_UW), brw_imm_uw(0));
+         cmp->conditional_mod = BRW_CONDITIONAL_NZ;
+      }
+
+      if (instr->intrinsic == nir_intrinsic_terminate_if) {
+         brw_inst *iff = bld.IF(BRW_PREDICATE_NORMAL);
+         iff->predicate_inverse = true;
+
+         cmp = bld.MOV(retype(brw_null_reg(), BRW_TYPE_UW), brw_imm_uw(0));
+         cmp->conditional_mod = BRW_CONDITIONAL_NZ;
       }
 
       cmp->predicate = BRW_PREDICATE_NORMAL;
@@ -3826,6 +3843,10 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
          jump->predicate = (devinfo->ver >= 20 ? XE2_PREDICATE_ANY :
                             BRW_PREDICATE_ALIGN1_ANY4H);
       }
+
+      if (instr->intrinsic == nir_intrinsic_terminate_if)
+         bld.emit(BRW_OPCODE_ENDIF);
+
       break;
    }
 
@@ -4051,17 +4072,65 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       bld.MOV(retype(dest, BRW_TYPE_UD), brw_imm_ud(s.max_polygons));
       break;
 
+   case nir_intrinsic_store_render_target_intel: {
+      struct brw_fs_prog_data *fs_prog_data = brw_fs_prog_data(ntb.s.prog_data);
+
+      if (!s.seen_rt_write)
+         ntb.bld.emit(SHADER_OPCODE_HALT_TARGET);
+
+      brw_reg sources[FB_WRITE_LOGICAL_NUM_SRCS];
+      if (ntb.s.key->use_efficient_64bit) {
+         sources[FB_WRITE_LOGICAL_SRC_BINDING] =
+            bld.emit_uniformize(get_nir_src(ntb, instr->src[0], 0));
+      }
+
+      sources[FB_WRITE_LOGICAL_SRC_COLOR0] = get_nir_src(ntb, instr->src[1], -1);
+      if (!nir_src_is_undef(instr->src[2]))
+          sources[FB_WRITE_LOGICAL_SRC_COLOR1] = get_nir_src(ntb, instr->src[2], -1);
+
+      /* If our alpha happens to match src0_alpha, we can skip sending it, as
+       * the hardware will use our alpha in that case.
+       */
+      if (!nir_src_is_undef(instr->src[3]) &&
+          nir_intrinsic_target(instr) != 0 &&
+          !scalars_equal(nir_scalar_resolved(instr->src[3].ssa, 0),
+                         nir_scalar_resolved(instr->src[1].ssa, 3)))
+         sources[FB_WRITE_LOGICAL_SRC_SRC0_ALPHA] = get_nir_src(ntb, instr->src[3], 0);
+
+      if (!nir_src_is_undef(instr->src[4]) && fs_prog_data->uses_omask)
+         sources[FB_WRITE_LOGICAL_SRC_OMASK] = get_nir_src(ntb, instr->src[4], 0);
+      if (!nir_src_is_undef(instr->src[5]))
+         sources[FB_WRITE_LOGICAL_SRC_SRC_DEPTH] = get_nir_src(ntb, instr->src[5], 0);
+      if (!nir_src_is_undef(instr->src[6]))
+         sources[FB_WRITE_LOGICAL_SRC_SRC_STENCIL] = get_nir_src(ntb, instr->src[6], 0);
+
+      brw_fb_write_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
+                                          sources, ARRAY_SIZE(sources))->as_fb_write();
+      write->target     = MAX2(0, (signed) nir_intrinsic_target(instr));
+      write->components = 4;
+      /* Enable null_rt if the shader doesn't write any relevant output. */
+      write->null_rt    = fs_prog_data->alpha_to_coverage == INTEL_NEVER &&
+                          !fs_prog_data->uses_omask &&
+                          !(s.nir->info.outputs_written &
+                            (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+                             BITFIELD64_BIT(FRAG_RESULT_STENCIL))) &&
+                          ((signed) nir_intrinsic_target(instr) < 0);
+      write->last_rt    = !nir_instr_next(&instr->instr);
+      write->eot        = !nir_instr_next(&instr->instr);
+
+      if (fs_prog_data->uses_kill) {
+         write->predicate = BRW_PREDICATE_NORMAL;
+         write->flag_subreg = sample_mask_flag_subreg(s);
+      }
+
+      s.seen_rt_write = true;
+      break;
+   }
+
    default:
       brw_from_nir_emit_intrinsic(ntb, bld, instr);
       break;
    }
-}
-
-static bool
-can_use_instruction_offset(enum lsc_addr_surface_type binding_type, int32_t offset)
-{
-   const unsigned max_bits = brw_max_immediate_offset_bits(binding_type);
-   return offset >= u_intN_min(max_bits) && offset <= u_intN_max(max_bits);
 }
 
 static brw_reg
@@ -4077,6 +4146,7 @@ memory_address(nir_to_brw_state &ntb,
    const brw_builder ubld = (src_offset.is_scalar || src_offset.file == IMM) ?
       bld.scalar_group() : bld;
    brw_reg address;
+   const uint32_t element_size_B = brw_nir_intrinsic_data_element_size(instr);
 
    if ((brw_lsc_supports_base_offset(devinfo) == false) ||
        (!nir_intrinsic_has_base(instr) && !nir_src_is_const(*nir_src_offset))) {
@@ -4088,7 +4158,10 @@ memory_address(nir_to_brw_state &ntb,
       *address_offset = 0;
    } else if (!nir_intrinsic_has_base(instr) && nir_src_is_const(*nir_src_offset)) {
       const int32_t offset = nir_src_as_int(*nir_src_offset);
-      if (can_use_instruction_offset(binding_type, offset)) {
+      if (brw_lsc_can_use_instruction_offset(binding_type,
+                                             ntb.s.key->use_efficient_64bit,
+                                             element_size_B,
+                                             offset)) {
          address = brw_imm_ud(0);
          *address_offset = offset;
       } else {
@@ -4098,7 +4171,10 @@ memory_address(nir_to_brw_state &ntb,
    } else {
       assert(nir_intrinsic_has_base(instr));
       const int32_t offset = nir_intrinsic_base(instr);
-      assert(can_use_instruction_offset(binding_type, offset));
+      assert(brw_lsc_can_use_instruction_offset(binding_type,
+                                                ntb.s.key->use_efficient_64bit,
+                                                element_size_B,
+                                                offset));
       address = src_offset;
       *address_offset = offset;
    }
@@ -4359,13 +4435,21 @@ emit_rt_lsc_fence(const brw_builder &bld,
    brw_send_inst *send = ubld.SEND();
    send->dst = tmp;
 
-   send->src[SEND_SRC_DESC]     = brw_imm_ud(0);
-   send->src[SEND_SRC_EX_DESC]  = brw_imm_ud(0);
+   if (bld.shader->key->use_efficient_64bit) {
+      send->combined_desc = lsc_fence_64bit_msg_desc(scope, flush_type);
+      send->src[SENDG_SRC_IND_0_DESC] = brw_reg();
+      send->src[SENDG_SRC_IND_1_DESC] = brw_reg();
+      send->dst = brw_reg();
+      send->efficient_64bit = true;
+   } else {
+      send->src[SEND_SRC_DESC] = brw_imm_ud(0);
+      send->src[SEND_SRC_EX_DESC] = brw_imm_ud(0);
+      send->desc = lsc_fence_msg_desc(devinfo, scope, flush_type, true);
+   }
+
    send->src[SEND_SRC_PAYLOAD1] = brw_vec8_grf(0, 0);
    send->src[SEND_SRC_PAYLOAD2] = brw_reg();
-
    send->sfid = GEN_SFID_UGM;
-   send->desc = lsc_fence_msg_desc(devinfo, scope, flush_type, true);
    send->mlen = reg_unit(devinfo); /* g0 header */
    send->ex_mlen = 0;
    /* Temp write for scheduling */
@@ -4710,7 +4794,7 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
       ntb.ssa_bind_infos[instr->def.index].binding =
          nir_intrinsic_binding(instr);
 
-      dest = retype(dest, BRW_TYPE_UD);
+      dest = retype(dest, brw_type_with_size(BRW_TYPE_UD, brw_type_size_bits(dest.type)));
       ntb.ssa_values[instr->def.index] = dest;
 
       xbld.MOV(dest,
@@ -5164,6 +5248,7 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
       unsigned nr = base_offset / REG_SIZE;
       nr += instr->intrinsic == nir_intrinsic_load_inline_data_intel ? BRW_INLINE_PARAM_REG : 0;
       brw_reg src = brw_uniform_reg(nr, dest.type);
+      src.offset = base_offset % REG_SIZE;
 
       if (nir_src_is_const(instr->src[0])) {
          unsigned load_offset = nir_src_as_uint(instr->src[0]);
@@ -5172,7 +5257,7 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
           * data take the modulo of the offset with 4 bytes and add it to
           * the offset to read from within the source register.
           */
-         src.offset = load_offset + base_offset % REG_SIZE;
+         src.offset += load_offset;
 
          for (unsigned j = 0; j < instr->num_components; j++) {
             xbld.MOV(offset(dest, xbld, j), offset(src, xbld, j));
@@ -5227,6 +5312,10 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
 
    case nir_intrinsic_load_ubo: {
       s.prog_data->has_ubo_pull = true;
+      if (devinfo->has_lsc) {
+         brw_from_nir_emit_memory_access(ntb, bld, xbld, instr);
+         break;
+      }
 
       bool no_mask_handle = false;
 
@@ -5606,7 +5695,6 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
       brw_reg globals = get_nir_src(ntb, instr->src[0], -1);
       srcs[RT_LOGICAL_SRC_GLOBALS] = bld.emit_uniformize(globals);
       srcs[RT_LOGICAL_SRC_PAYLOADS] = get_nir_src(ntb, instr->src[1], 0);
-      srcs[RT_LOGICAL_SRC_SYNCHRONOUS] = brw_imm_ud(synchronous);
 
       /* Bspec 57508, 47937: Structure_SIMD16TraceRayMessage:: RayQuery Enable
        *
@@ -5616,7 +5704,8 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
        */
       brw_reg dst = synchronous ? bld.vgrf(BRW_TYPE_UD) : bld.null_reg_ud();
 
-      bld.emit(RT_OPCODE_TRACE_RAY_LOGICAL, dst, srcs, RT_LOGICAL_NUM_SRCS);
+      brw_inst *inst = bld.emit(RT_OPCODE_TRACE_RAY_LOGICAL, dst, srcs, RT_LOGICAL_NUM_SRCS);
+      inst->synchronous = synchronous;
 
       /* There is no actual value to use in the destination register of the
        * synchronous trace instruction. All of the communication with the HW
@@ -5714,6 +5803,8 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
 
    int32_t address_offset = 0;
 
+   uint8_t surface_index = 0;
+
    std::optional<memory_logical_mode> mode;
    std::optional<lsc_addr_surface_type> binding_type;
 
@@ -5752,10 +5843,16 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
 
       if (!binding_type.has_value())
          binding_type = LSC_ADDR_SURFTYPE_BTI;
+      if (s.key->use_efficient_64bit)
+         surface_index = get_nir_src_block(ntb, instr->src[0]);
 
-      srcs[MEMORY_LOGICAL_ADDRESS] = get_nir_src(ntb, instr->src[1], 0);
+      /* Payload lowering uses MEMORY_LOGICAL_ADDRESS as a vector, so don't
+       * select a channel here.
+       */
+      srcs[MEMORY_LOGICAL_ADDRESS] = get_nir_src(ntb, instr->src[1], -1);
       break;
 
+   case nir_intrinsic_load_ubo:
    case nir_intrinsic_load_ubo_uniform_block_intel:
       mode = MEMORY_MODE_CONSTANT;
       FALLTHROUGH;
@@ -5776,6 +5873,8 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
          LSC_ADDR_SURFTYPE_BTI;
       srcs[MEMORY_LOGICAL_BINDING] =
          get_nir_buffer_intrinsic_index(ntb, bld, instr, &no_mask_handle);
+      if (s.key->use_efficient_64bit)
+         surface_index = get_nir_src_block(ntb, instr->src[is_store ? 1 : 0]);
       srcs[MEMORY_LOGICAL_ADDRESS] =
          memory_address(ntb, bld, instr, *binding_type, &address_offset);
       break;
@@ -5870,7 +5969,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
    const unsigned nir_bit_size =
       is_store ? instr->src[data_src].ssa->bit_size : instr->def.bit_size;
    const enum lsc_data_size data_size = lsc_bits_to_data_size(nir_bit_size);
-   uint32_t data_bit_size = lsc_data_size_bytes(data_size) * 8;
+   uint32_t data_bit_size = lsc_data_size_register_bytes(data_size) * 8;
 
    const brw_reg_type data_type =
       brw_type_with_size(BRW_TYPE_UD, data_bit_size);
@@ -5936,6 +6035,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
       mem->components = components;
       mem->alignment = alignment;
       mem->flags = flags;
+      mem->surface_index = surface_index;
 
       if (dest.file != BAD_FILE && data_bit_size > nir_bit_size) {
          /* Shrink e.g. D16U32 result back to D16 */
@@ -6020,6 +6120,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
          mem->components = block_comps;
          mem->alignment = alignment;
          mem->flags = flags;
+         mem->surface_index = surface_index;
 
          done += block_comps;
 
@@ -6080,6 +6181,7 @@ brw_from_nir_emit_texture(nir_to_brw_state &ntb,
    int src_idx;
    {
       if ((src_idx = nir_tex_instr_src_index(instr, nir_tex_src_texture_handle)) >= 0) {
+         assert(ntb.s.key->use_efficient_64bit || instr->texture_index == 0);
          srcs[TEX_LOGICAL_SRC_SURFACE] = bld.emit_uniformize(
             get_nir_src(ntb, instr->src[src_idx].src, -1));
          surface_bindless = true;
@@ -6088,10 +6190,12 @@ brw_from_nir_emit_texture(nir_to_brw_state &ntb,
             bld.ADD(get_nir_src(ntb, instr->src[src_idx].src, -1),
                     brw_imm_ud(instr->texture_index)));
       } else {
+         assert(!ntb.s.key->use_efficient_64bit);
          srcs[TEX_LOGICAL_SRC_SURFACE] = brw_imm_ud(instr->texture_index);
       }
 
       if ((src_idx = nir_tex_instr_src_index(instr, nir_tex_src_sampler_handle)) >= 0) {
+         assert(ntb.s.key->use_efficient_64bit || instr->sampler_index == 0);
          srcs[TEX_LOGICAL_SRC_SAMPLER] = bld.emit_uniformize(
             get_nir_src(ntb, instr->src[src_idx].src, -1));
          sampler_bindless = true;
@@ -6099,7 +6203,7 @@ brw_from_nir_emit_texture(nir_to_brw_state &ntb,
          srcs[TEX_LOGICAL_SRC_SAMPLER] = bld.emit_uniformize(
             bld.ADD(get_nir_src(ntb, instr->src[src_idx].src, -1),
                     brw_imm_ud(instr->sampler_index)));
-      } else {
+      } else if (!ntb.s.key->use_efficient_64bit) {
          srcs[TEX_LOGICAL_SRC_SAMPLER] = brw_imm_ud(instr->sampler_index);
       }
    }
@@ -6275,6 +6379,11 @@ brw_from_nir_emit_texture(nir_to_brw_state &ntb,
    tex->coord_components = instr->coord_components;
    tex->fused_eu_disable = (instr->backend_flags & BRW_TEX_INSTR_FUSED_EU_DISABLE) != 0;
    tex->gather_component = instr->component;
+
+   if (ntb.s.key->use_efficient_64bit) {
+      tex->texture_index = instr->texture_index;
+      tex->sampler_index = instr->sampler_index;
+   }
 
    /* If the NIR instruction has an offset param but the sampler payload
     * doesn't, we can put the offset into the header of the message.
@@ -6578,7 +6687,7 @@ brw_from_nir(brw_shader *s)
 
    brw_from_nir_emit_impl(ntb, nir_shader_get_entrypoint((nir_shader *)ntb.nir));
 
-   if (s->stage >= MESA_SHADER_FRAGMENT)
+   if (s->stage > MESA_SHADER_FRAGMENT)
       ntb.bld.emit(SHADER_OPCODE_HALT_TARGET);
 
    ralloc_free(ntb.mem_ctx);

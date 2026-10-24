@@ -15,6 +15,8 @@
 struct lowering_state {
    const struct intel_device_info *devinfo;
 
+   const struct brw_base_prog_key *key;
+
    nir_function_impl *impl;
 
    struct hash_table *queries;
@@ -321,7 +323,8 @@ lower_ray_query_intrinsic(nir_builder *b,
           * tracing call.
           */
          brw_nir_trace_ray(b, nir_load_ray_query_global_intel(b),
-                           level, ctrl, true);
+                           level, ctrl, true,
+                           state->key->use_efficient_64bit, state->devinfo);
 
          struct brw_nir_rt_mem_hit_defs hit_in = {};
          brw_nir_rt_load_mem_hit_from_addr(b, &hit_in, hw_stack_addr, false,
@@ -596,12 +599,14 @@ lower_ray_query_impl(nir_function_impl *impl, struct lowering_state *state)
 
 bool
 brw_nir_lower_ray_queries(nir_shader *shader,
-                          const struct intel_device_info *devinfo)
+                          const struct intel_device_info *devinfo,
+                          struct brw_base_prog_key *key)
 {
    assert(exec_list_length(&shader->functions) == 1);
 
    struct lowering_state state = {
       .devinfo = devinfo,
+      .key = key,
       .impl = nir_shader_get_entrypoint(shader),
       .queries = _mesa_pointer_hash_table_create(NULL),
    };

@@ -14,7 +14,7 @@ mtl_commit_options *
 mtl_new_commit_options(void)
 {
    @autoreleasepool {
-      return [[MTL4CommitOptions new] init];
+      return [MTL4CommitOptions new];
    }
 }
 

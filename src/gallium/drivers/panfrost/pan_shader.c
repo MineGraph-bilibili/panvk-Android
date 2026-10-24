@@ -135,16 +135,10 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
       }
    }
 
-   /* nir_opt_varyings is replacing all flat highp types with float32, we need
-    * to figure out the varying types ourselves */
-   inputs.trust_varying_flat_highp_types = false;
    inputs.varying_layout = varying_layout;
 
    if (s->info.stage == MESA_SHADER_FRAGMENT) {
-      if (key->fs.nr_cbufs_for_fragcolor) {
-         NIR_PASS(_, s, panfrost_nir_remove_fragcolor_stores,
-                  key->fs.nr_cbufs_for_fragcolor);
-      }
+      inputs.fragcolor_nr_cbufs = key->fs.nr_cbufs_for_fragcolor;
 
       if (key->fs.sprite_coord_enable) {
          NIR_PASS(_, s, nir_lower_texcoord_replace_late,
@@ -166,15 +160,14 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
                   nir_metadata_control_flow, key);
          NIR_PASS(_, s, nir_lower_alu);
       }
-
-      NIR_PASS(_, s, nir_shader_intrinsics_pass,
-               lower_sample_mask_writes, nir_metadata_control_flow, NULL);
-
-      if (s->info.fs.accesses_pixel_local_storage)
-         NIR_PASS(_, s, panfrost_nir_lower_pls, screen);
    }
 
    if (dev->arch <= 5 && s->info.stage == MESA_SHADER_FRAGMENT) {
+      if (key->fs.nr_cbufs_for_fragcolor) {
+         NIR_PASS(_, s, panfrost_nir_remove_fragcolor_stores,
+                  key->fs.nr_cbufs_for_fragcolor);
+      }
+
       NIR_PASS(_, s, pan_nir_lower_framebuffer, key->fs.rt_formats,
                pan_raw_format_mask_midgard(key->fs.rt_formats), 0,
                panfrost_device_gpu_prod_id(dev) < 0x700);
@@ -556,40 +549,53 @@ panfrost_create_shader_state(struct pipe_context *pctx,
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    }
 
-   /* gl_FragColor needs to be lowered before lowering I/O, do that now */
+   struct panfrost_device *dev = pan_device(pctx->screen);
+
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
        nir->info.outputs_written & BITFIELD_BIT(FRAG_RESULT_COLOR)) {
-
-      NIR_PASS(_, nir, nir_lower_fragcolor,
-               nir->info.fs.color_is_dual_source ? 1 : 8);
+      /* Bifrost and newer handle gl_FragColor in the backend, but Midgard
+       * still needs the frontend lowering.  Must happen before IO lowering
+       */
+      if (dev->arch <= 5) {
+         assert(!nir->info.io_lowered);
+         NIR_PASS(_, nir, nir_lower_fragcolor,
+                  nir->info.fs.color_is_dual_source ? 1 : 8);
+      }
       so->fragcolor_lowered = true;
    }
 
    /* Then run the suite of lowering and optimization, including I/O lowering */
-   struct panfrost_device *dev = pan_device(pctx->screen);
    pan_preprocess_nir(nir, panfrost_device_gpu_id(dev));
 
-   NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
-            nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
-   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
-            glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
-   /* nir_lower_io just computes offsets based on the original deref and
-    * lower_indirect_derefs ensures that the array derefs have a constant
-    * index.  Constant-fold to get us actual constants in in load/store
-    * instructions.
-    */
-   NIR_PASS(_, nir, nir_opt_constant_folding);
+   /* Usually IO is lowered by gallium, but TTN doesn't */
+   if (!nir->info.io_lowered) {
+      NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
+               nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
+      NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
+               glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
+      /* nir_lower_io just computes offsets based on the original deref and
+       * lower_indirect_derefs ensures that the array derefs have a constant
+       * index.  Constant-fold to get us actual constants in in load/store
+       * instructions.
+       */
+      NIR_PASS(_, nir, nir_opt_constant_folding);
+   }
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       so->noperspective_varyings =
          pan_nir_collect_noperspective_varyings_fs(nir);
+
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+               lower_sample_mask_writes, nir_metadata_control_flow, NULL);
+
+      if (nir->info.fs.accesses_pixel_local_storage)
+         NIR_PASS(_, nir, panfrost_nir_lower_pls, pan_screen(pctx->screen));
+   }
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       struct pan_varying_layout *varying_layout = &so->vs_varying_layout;
       pan_varying_collect_formats(varying_layout, nir,
-                                  panfrost_device_gpu_id(dev),
-                                  false, /* trust_varying_flat_highp_types */
-                                  false /* lower_mediump */);
+                                  panfrost_device_gpu_id(dev));
       pan_build_varying_layout_compact(varying_layout, nir,
                                        panfrost_device_gpu_id(dev));
    }
@@ -609,7 +615,7 @@ panfrost_create_shader_state(struct pipe_context *pctx,
       /* Since transform feedback is handled via the transform
        * feedback program, the original program no longer uses XFB
        */
-      nir->info.has_transform_feedback_varyings = false;
+      pan_nir_remove_xfb(nir);
    }
 
    /* If we're not using separate shaders, the FS can use VS varying_layout to

@@ -135,3 +135,6 @@ spec@!opengl 1.1@getteximage-formats
 spec@!opengl 1.1@teximage-colors gl_r8_snorm
 spec@!opengl 1.2@tex3d
 spec@!opengl 2.0@tex3d-npot
+spec@arb_timer_query@timestamp-get
+glx@glx-multithread-texture
+glx@glx-make-current

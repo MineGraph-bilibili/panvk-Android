@@ -37,53 +37,6 @@
 
 #include "va_private.h"
 
-void
-vlVaSetSurfaceContext(vlVaDriver *drv, vlVaSurface *surf, vlVaContext *context)
-{
-   if (surf->ctx == context)
-      return;
-
-   if (surf->ctx) {
-      assert(_mesa_set_search(surf->ctx->surfaces, surf));
-      _mesa_set_remove_key(surf->ctx->surfaces, surf);
-
-      /* Only drivers supporting PIPE_VIDEO_ENTRYPOINT_PROCESSING will create
-       * decoder for postproc context and thus be able to wait on and destroy
-       * the surface fence. On other drivers we need to destroy the fence here
-       * otherwise vaQuerySurfaceStatus/vaSyncSurface will fail and we'll also
-       * potentially leak the fence.
-       */
-      if (surf->fence && !context->decoder &&
-          context->templat.entrypoint == PIPE_VIDEO_ENTRYPOINT_PROCESSING &&
-          surf->ctx->decoder && surf->ctx->decoder->destroy_fence &&
-          !drv->pipe->screen->get_video_param(drv->pipe->screen,
-                                              PIPE_VIDEO_PROFILE_UNKNOWN,
-                                              PIPE_VIDEO_ENTRYPOINT_PROCESSING,
-                                              PIPE_VIDEO_CAP_SUPPORTED)) {
-         surf->ctx->decoder->destroy_fence(surf->ctx->decoder, surf->fence);
-         surf->fence = NULL;
-      }
-   }
-
-   surf->ctx = context;
-   _mesa_set_add(surf->ctx->surfaces, surf);
-}
-
-static void
-vlVaSetBufferContext(vlVaDriver *drv, vlVaBuffer *buf, vlVaContext *context)
-{
-   if (buf->ctx == context)
-      return;
-
-   if (buf->ctx) {
-      assert(_mesa_set_search(buf->ctx->buffers, buf));
-      _mesa_set_remove_key(buf->ctx->buffers, buf);
-   }
-
-   buf->ctx = context;
-   _mesa_set_add(buf->ctx->buffers, buf);
-}
-
 VAStatus
 vlVaBeginPicture(VADriverContextP ctx, VAContextID context_id, VASurfaceID render_target)
 {
@@ -122,27 +75,17 @@ vlVaBeginPicture(VADriverContextP ctx, VAContextID context_id, VASurfaceID rende
       surf->coded_buf = NULL;
    }
 
-   /* Encode only reads from the surface and doesn't set surface fence. */
-   if (context->templat.entrypoint != PIPE_VIDEO_ENTRYPOINT_ENCODE)
-      vlVaSetSurfaceContext(drv, surf, context);
-
    context->target_id = render_target;
    context->target = surf->buffer;
 
    if (context->templat.entrypoint != PIPE_VIDEO_ENTRYPOINT_ENCODE)
       context->needs_begin_frame = true;
 
-   if (!context->decoder) {
-      mtx_unlock(&drv->mutex);
-      return VA_STATUS_SUCCESS;
-   }
-
    /* meta data and seis are per picture basis, it needs to be
     * cleared before rendering the picture. */
-   if (context->decoder->entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
+   if (context->templat.entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
       switch (u_reduce_video_profile(context->templat.profile)) {
          case PIPE_VIDEO_FORMAT_AV1:
-            context->desc.av1enc.metadata_flags.value = 0;
             context->desc.av1enc.roi.num = 0;
             context->desc.av1enc.intra_refresh.mode = INTRA_REFRESH_MODE_NONE;
             break;
@@ -303,7 +246,7 @@ vlVaEndPicture(VADriverContextP ctx, VAContextID context_id)
 
    mtx_lock(&drv->mutex);
    context = handle_table_get(drv->htab, context_id);
-   if (!context) {
+   if (!context || !context->decoder) {
       mtx_unlock(&drv->mutex);
       return VA_STATUS_ERROR_INVALID_CONTEXT;
    }
@@ -315,17 +258,6 @@ vlVaEndPicture(VADriverContextP ctx, VAContextID context_id)
 
    output_id = context->target_id;
    context->target_id = 0;
-
-   if (!context->decoder) {
-      if (context->templat.profile != PIPE_VIDEO_PROFILE_UNKNOWN) {
-         mtx_unlock(&drv->mutex);
-         return VA_STATUS_ERROR_INVALID_CONTEXT;
-      }
-
-      /* VPP */
-      mtx_unlock(&drv->mutex);
-      return VA_STATUS_SUCCESS;
-   }
 
    if (context->needs_begin_frame) {
       mtx_unlock(&drv->mutex);
@@ -342,10 +274,12 @@ vlVaEndPicture(VADriverContextP ctx, VAContextID context_id)
       return VA_STATUS_ERROR_INVALID_SURFACE;
    }
 
-   if (apply_av1_fg) {
-      vlVaSetSurfaceContext(drv, surf, context);
+   surf->entrypoint = context->decoder->entrypoint;
+   if (context->decoder->destroy_fence)
+      pipe_video_codec_reference(&surf->codec, context->decoder);
+
+   if (apply_av1_fg)
       *out_target = surf->buffer;
-   }
 
    if ((bool)(surf->templat.bind & PIPE_BIND_PROTECTED) != context->desc.base.protected_playback) {
       mtx_unlock(&drv->mutex);
@@ -361,7 +295,7 @@ vlVaEndPicture(VADriverContextP ctx, VAContextID context_id)
       if (coded_buf->coded_surf)
          coded_buf->coded_surf->coded_buf = NULL;
       vlVaGetBufferFeedback(coded_buf);
-      vlVaSetBufferContext(drv, coded_buf, context);
+      pipe_video_codec_reference(&coded_buf->codec, context->decoder);
 
       int driver_metadata_support = drv->pipe->screen->get_video_param(drv->pipe->screen,
                                                                        context->decoder->profile,

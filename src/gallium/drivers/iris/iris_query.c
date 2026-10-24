@@ -101,6 +101,7 @@ iris_is_query_pipelined(struct iris_query *q)
    case PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE:
    case PIPE_QUERY_TIMESTAMP:
    case PIPE_QUERY_TIMESTAMP_DISJOINT:
+   case PIPE_QUERY_TIMESTAMP_RAW:
    case PIPE_QUERY_TIME_ELAPSED:
       return true;
 
@@ -194,6 +195,7 @@ write_value(struct iris_context *ice, struct iris_query *q, unsigned offset)
    case PIPE_QUERY_TIME_ELAPSED:
    case PIPE_QUERY_TIMESTAMP:
    case PIPE_QUERY_TIMESTAMP_DISJOINT:
+   case PIPE_QUERY_TIMESTAMP_RAW:
       iris_pipelined_write(&ice->batches[IRIS_BATCH_RENDER], q,
                            PIPE_CONTROL_WRITE_TIMESTAMP,
                            offset);
@@ -290,6 +292,9 @@ calculate_result_on_cpu(const struct intel_device_info *devinfo,
    case PIPE_QUERY_TIMESTAMP_DISJOINT:
       /* The timestamp is the single starting snapshot. */
       q->result = intel_device_info_timebase_scale(devinfo, q->map->start);
+      break;
+   case PIPE_QUERY_TIMESTAMP_RAW:
+      q->result = q->map->start;
       break;
    case PIPE_QUERY_TIME_ELAPSED:
       q->result = iris_raw_timestamp_delta(q->map->start, q->map->end);
@@ -391,6 +396,9 @@ calculate_result_on_gpu(const struct intel_device_info *devinfo,
       break;
    case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
       result = calc_overflow_any_stream(b, q);
+      break;
+   case PIPE_QUERY_TIMESTAMP_RAW:
+      result = start_val;
       break;
    case PIPE_QUERY_TIMESTAMP: {
       /* TODO: This discards any fractional bits of the timebase scale.
@@ -552,7 +560,7 @@ iris_end_query(struct pipe_context *ctx, struct pipe_query *query)
 
    struct iris_batch *batch = &ice->batches[q->batch_idx];
 
-   if (q->type == PIPE_QUERY_TIMESTAMP) {
+   if ((q->type == PIPE_QUERY_TIMESTAMP) || (q->type == PIPE_QUERY_TIMESTAMP_RAW)) {
       iris_begin_query(ctx, query);
       iris_batch_reference_signal_syncobj(batch, &q->syncobj);
       mark_available(ice, q);

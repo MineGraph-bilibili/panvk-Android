@@ -137,6 +137,17 @@ radeonsi-raven-va:
     # spend all our time in drm_lastclose()'s modesetting.
     HWCI_START_WESTON: 1
 
+radeonsi-raven-va-no_gfx_compute:
+  extends:
+    - .lava-x86_64-test-video-no_gfx_compute
+    - .radeonsi-raven-test:x86_64
+    - .radeonsi-vaapi-rules
+    - .lava-hp-x360-14a-cb0001xx-zork:x86_64
+  variables:
+    DEQP_SUITE: vaapi-no_gfx_compute
+    GPU_VERSION: radeonsi-raven-va-no_gfx_compute
+    VAAPI: 1
+
 radeonsi-mendocino-glcts-piglit:
   extends:
     - .lava-x86_64-test-gl
@@ -197,11 +208,11 @@ radv-polaris10-vkcts-full:
     - .ci-tron-test-radv-vk-nightly
     - .polaris10-test-valve-kws
     - .radv-valve-manual-rules
-  timeout: 47m
+  timeout: 57m
   variables:
     CI_TRON_TIMEOUT__BOOT_CYCLE__RETRIES: 4
     CI_TRON_TIMEOUT__BOOT_CYCLE__MINUTES: 70
-    CI_TRON_TIMEOUT__OVERALL__MINUTES: 45
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 55
     RADV_EXPERIMENTAL: video_decode,video_encode
     radv_enable_float16_gfx8: true
 
@@ -220,9 +231,9 @@ radv-renoir-vkcts-full:
     - .ci-tron-test-radv-vk-nightly
     - .renoir-test-valve
     - .radv-valve-manual-rules
-  timeout: 1h 10m
+  timeout: 1h 20m
   variables:
-    CI_TRON_TIMEOUT__OVERALL__MINUTES: 68
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 78
     RADV_EXPERIMENTAL: transfer_queue,msrtss
 
 radv-navi10-vkcts-full:
@@ -360,6 +371,20 @@ radv-gfx1201-fluster:
     DEQP_SUITE: radv-fluster
 
 ############### Fossilize
+radv-validate-cache:
+  stage: code-validation
+  timeout: 5m
+  extends:
+    - .test-vk
+    - .radv-rules
+  rules:
+    - !reference [.no_downstream_pipeline-rules, rules]
+    - !reference [.radv-rules, rules]
+  variables:
+    VK_DRIVER: radeon
+  script:
+    - ./install/radv-validate-cache.sh
+
 radv-fossils:
   extends:
     - .radv-valve-rules

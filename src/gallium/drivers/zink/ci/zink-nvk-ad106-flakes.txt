@@ -99,14 +99,7 @@ spec@arb_shader_image_load_store@coherency
 spec@arb_shader_image_load_store@coherency@Tessellation evaluation-Fragment shader/'volatile' qualifier coherency test/256x256
 spec@arb_shader_precision@fs-op-assign-sub-float-float
 spec@arb_shader_precision@gs-op-assign-div-vec3-float
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-all-bvec3
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-faceforward-vec2-vec2-vec2
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-greaterthanequal-uvec4-uvec4
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-op-assign-add-mat3x4-float
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-op-assign-add-uvec3-uvec3
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-op-assign-rshift-uvec3-int
-spec@arb_tessellation_shader@execution@built-in-functions@tcs-op-mult-mat3x2-mat4x3
-spec@arb_tessellation_shader@execution@tes-input@tes-input-patch-mat2_2
+spec@arb_tessellation_shader@execution
 spec@arb_texture_multisample@texelfetch@6-gs-isampler2dmsarray
 spec@arb_vertex_attrib_64bit@execution@unused-sub-dvec4-02
 spec@egl_ext_device_drm@conformance

@@ -117,6 +117,7 @@ struct radv_shader_info {
    bool force_indirect_descriptors : 1;
    bool ngg_wave_id_en : 1;
    bool descriptor_heap : 1;
+   bool uses_sampler : 1;
 
    struct {
       uint64_t tcs_inputs_via_temp;
@@ -176,9 +177,8 @@ struct radv_shader_info {
       bool writes_z : 1;
       bool writes_stencil : 1;
       bool writes_sample_mask : 1;
-      bool writes_mrt0_alpha : 1;
+      bool writes_mrt0_alpha_to_mrtz : 1;
       bool mrt0_is_dual_src : 1;
-      bool exports_mrtz_via_epilog : 1;
       bool has_pcoord : 1;
       bool prim_id_input : 1;
       bool viewport_index_input : 1;
@@ -261,6 +261,12 @@ struct radv_shader_info {
       struct gfx10_ngg_info ngg_info;
    };
 };
+
+static inline bool
+radv_ps_writes_mrtz(const struct radv_shader_info *info)
+{
+   return info->ps.writes_z || info->ps.writes_stencil || info->ps.writes_sample_mask;
+}
 
 /* Precomputed register values. */
 struct radv_shader_regs {

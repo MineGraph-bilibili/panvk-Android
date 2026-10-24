@@ -177,6 +177,9 @@ fd6_launch_grid(struct fd_context *ctx, const struct pipe_grid_info *info) in_dt
             fd6_emit_shader<CHIP>(screen, cs, v);
 
             cp->v = v;
+
+            if (!v->pvtmem_per_wave)
+               perf_debug_ctx(ctx, "falling back to per-fiber pvtmem layout");
          }
       }
 

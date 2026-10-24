@@ -146,8 +146,6 @@ rebind_resource(struct fd_resource *rsc) assert_dt
 {
    struct fd_screen *screen = fd_screen(rsc->b.b.screen);
 
-   assert(!(rsc->b.b.bind & FD_BIND_GLOBAL_BUFFER));
-
    fd_screen_lock(screen);
    fd_resource_lock(rsc);
 
@@ -199,10 +197,8 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
       COND(prsc->bind & PIPE_BIND_SHARED, FD_BO_SHARED) |
       COND(prsc->bind & PIPE_BIND_SCANOUT, FD_BO_SCANOUT);
 
-   if (rsc->bo) {
-      assert(!(rsc->b.b.bind & FD_BIND_GLOBAL_BUFFER));
+   if (rsc->bo)
       fd_bo_del(rsc->bo);
-   }
 
    struct fd_bo *bo =
       fd_bo_new(screen->dev, size, flags, "%ux%ux%u@%u:%x", prsc->width0,
@@ -270,8 +266,6 @@ fd_replace_buffer_storage(struct pipe_context *pctx, struct pipe_resource *pdst,
    assert(src->track->batch_mask == 0);
    assert(src->track->write_batch == NULL);
    assert(memcmp(&dst->layout, &src->layout, sizeof(dst->layout)) == 0);
-   assert(!(psrc->bind & FD_BIND_GLOBAL_BUFFER));
-   assert(!(pdst->bind & FD_BIND_GLOBAL_BUFFER));
 
    /* get rid of any references that batch-cache might have to us (which
     * should empty/destroy rsc->batches hashset)
@@ -362,9 +356,6 @@ fd_try_shadow_resource(struct fd_context *ctx, struct fd_resource *rsc,
    bool fallback = false;
 
    if (prsc->next)
-      return false;
-
-   if (prsc->bind & FD_BIND_GLOBAL_BUFFER)
       return false;
 
    /* Flush any pending batches writing the resource before we go mucking around
@@ -471,6 +462,10 @@ fd_try_shadow_resource(struct fd_context *ctx, struct fd_resource *rsc,
    blit.src.format = pshadow->format;
    blit.mask = util_format_get_mask(prsc->format);
    blit.filter = PIPE_TEX_FILTER_NEAREST;
+
+   /* a separate stencil is not part of what was shadowed */
+   if (rsc->stencil)
+      blit.mask &= ~PIPE_MASK_S;
 
 #define set_box(field, val)                                                    \
    do {                                                                        \
@@ -1166,8 +1161,6 @@ fd_resource_get_param(struct pipe_screen *pscreen,
       return true;
    case PIPE_RESOURCE_PARAM_OFFSET:
       if (fd_resource_ubwc_enabled(rsc, level)) {
-         if (plane > 0)
-            debug_warning("Unsupported offset query!\n");
          *value = fd_resource_ubwc_offset(rsc, level, layer);
       } else {
          *value = fd_resource_offset(rsc, level, layer);
@@ -1439,6 +1432,29 @@ fd_resource_allocate_and_resolve(struct pipe_screen *pscreen,
 }
 
 /**
+ * A resource whose format has more than one plane must end up with one
+ * pipe_resource per plane, chained via ->next (see fd_resource_plane()).
+ * Check that once allocation is done, rather than assuming in advance which
+ * mechanism produced it: the dri frontend can build the chain itself
+ * (importing an EGLImage plane by plane), or a driver hook can self-allocate
+ * every plane in one call.  Either is fine; a resource left short a plane is
+ * not.
+ */
+static bool
+resource_missing_planes(struct pipe_resource *prsc)
+{
+   unsigned nplanes = util_format_get_num_planes(prsc->format);
+
+   if (util_resource_num(prsc) >= nplanes)
+      return false;
+
+   perf_debug("%" PRSC_FMT ": multi-planar resource is missing %u of %u planes",
+              PRSC_ARGS(prsc), nplanes - util_resource_num(prsc), nplanes);
+
+   return true;
+}
+
+/**
  * Create a new texture object, using the given template info.
  */
 static struct pipe_resource *
@@ -1479,6 +1495,11 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
       if (!rsc)
          return NULL;
 
+      if (resource_missing_planes(&rsc->b.b)) {
+         fd_resource_destroy(pscreen, &rsc->b.b);
+         return NULL;
+      }
+
       return &rsc->b.b;
    }
 
@@ -1488,8 +1509,38 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
       return NULL;
    rsc = fd_resource(prsc);
 
+   struct pipe_resource *uv_prsc = NULL;
+   struct fd_resource *uv_rsc = NULL;
+
+   if (screen->layout_multiplanar_resource &&
+       (tmpl->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
+        tmpl->format == PIPE_FORMAT_Y8_U8V8_420_UNORM)) {
+      struct pipe_resource uv_tmpl = *tmpl;
+      uv_tmpl.format = PIPE_FORMAT_R8G8_UNORM;
+      uv_tmpl.width0 = tmpl->width0 / 2;
+      uv_tmpl.height0 = tmpl->height0 / 2;
+
+      uint32_t uv_size = 0;
+      uv_prsc = fd_resource_allocate_and_resolve(pscreen, &uv_tmpl, modifiers, count, &uv_size);
+      if (!uv_prsc) {
+         fd_resource_destroy(pscreen, prsc);
+         return NULL;
+      }
+      uv_rsc = fd_resource(uv_prsc);
+
+      size = screen->layout_multiplanar_resource(rsc, uv_rsc);
+   }
+
    realloc_bo(rsc, size);
    if (!rsc->bo)
+      goto fail;
+
+   if (uv_prsc) {
+      uv_rsc->bo = fd_bo_ref(rsc->bo);
+      prsc->next = uv_prsc;
+   }
+
+   if (resource_missing_planes(prsc))
       goto fail;
 
    return prsc;
@@ -1750,6 +1801,11 @@ fd_resource_from_memobj(struct pipe_screen *pscreen,
     * gracefully.
     */
    if (fd_bo_size(memobj->bo) < size) {
+      fd_resource_destroy(pscreen, prsc);
+      return NULL;
+   }
+
+   if (resource_missing_planes(prsc)) {
       fd_resource_destroy(pscreen, prsc);
       return NULL;
    }

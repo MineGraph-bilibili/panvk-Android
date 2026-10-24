@@ -42,6 +42,8 @@
 
 #define CONV_FORMAT(f) [PIPE_FORMAT_##f] = VIRGL_FORMAT_##f,
 
+#define VIRGL_FORMAT_P210 VIRGL_FORMAT_X6Y10_X6U10X6V10_422_UNORM
+
 static const enum virgl_formats virgl_formats_conv_table[PIPE_FORMAT_COUNT] = {
    CONV_FORMAT(NONE)
    CONV_FORMAT(B8G8R8A8_UNORM)
@@ -347,6 +349,7 @@ static const enum virgl_formats virgl_formats_conv_table[PIPE_FORMAT_COUNT] = {
    CONV_FORMAT(P010)
    CONV_FORMAT(P012)
    CONV_FORMAT(P016)
+   CONV_FORMAT(P210)
    CONV_FORMAT(B8G8R8_UNORM)
    CONV_FORMAT(R3G3B2_UNORM)
    CONV_FORMAT(R4G4B4A4_UNORM)
@@ -1899,5 +1902,12 @@ void virgl_encoder_get_layout(struct virgl_context *ctx,
 {
    virgl_encoder_write_cmd_dword(ctx, VIRGL_CMD0(VIRGL_CCMD_GET_PIPE_RESOURCE_LAYOUT, 0, VIRGL_RESOURCE_LAYOUT_SIZE));
    virgl_encoder_write_res(ctx, out_res);
+   virgl_encoder_write_res(ctx, res);
+}
+
+void virgl_encoder_query_gbm_format_modifier(struct virgl_context *ctx,
+                                             struct virgl_resource *res)
+{
+   virgl_encoder_write_cmd_dword(ctx, VIRGL_CMD0(VIRGL_CCMD_QUERY_GBM_FORMAT_MODIFIER, 0, VIRGL_QUERY_FORMAT_MODIFIER_SIZE));
    virgl_encoder_write_res(ctx, res);
 }

@@ -75,6 +75,7 @@ etna_query_feature_db(struct etna_core_info *info)
    ETNA_FEATURE(REG_BugFixes8, BUG_FIXES8);
 
    ETNA_FEATURE(REG_BugFixes15, PE_DITHER_FIX);
+   ETNA_FEATURE(PE_32BPC_COLORMASK_FIX, PE_32BPC_COLORMASK_FIX);
    ETNA_FEATURE(REG_InstructionCache, INSTRUCTION_CACHE);
    ETNA_FEATURE(REG_ExtraShaderInstructions2, HAS_FAST_TRANSCENDENTALS);
 
@@ -115,6 +116,7 @@ etna_query_feature_db(struct etna_core_info *info)
    ETNA_FEATURE(BLT_64bpp_MASKED_CLEAR_FIX, BLT_64BPP_MASKED_CLEAR_FIX);
    ETNA_FEATURE(WIDELINE_TRIANGLE_EMU, WIDELINE_TRIANGLE_EMU);
    ETNA_FEATURE(REG_UnifiedSamplers, UNIFIED_SAMPLERS);
+   ETNA_FEATURE(PE_A8B8G8R8, PE_A8B8G8R8);
 
    /* Limits: */
    if (etna_core_has_feature(info, ETNA_FEATURE_CORE_GPU)) {

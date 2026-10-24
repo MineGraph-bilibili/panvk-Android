@@ -73,7 +73,8 @@ max_simd_width(const jay_shader *shader, const jay_inst *I)
       return 16;
    }
    jay_foreach_src(I, s) {
-      if (jay_src_type(I, s) == JAY_TYPE_BF16) return 16;
+      if (jay_src_type(I, s) == JAY_TYPE_BF16)
+         return 16;
    }
 
    return 32;

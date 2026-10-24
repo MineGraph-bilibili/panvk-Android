@@ -46,6 +46,7 @@
 #include <unistd.h>
 #endif
 
+#include "util/bitset.h"
 #include "util/os_misc.h"
 #include "util/u_atomic.h"
 #include "util/detect_os.h"
@@ -390,6 +391,15 @@ uint64_t
 debug_get_flags_option(const char *name,
                        const struct debug_named_value *flags,
                        uint64_t dfault);
+
+struct debug_control_bitset {
+   const char *string;
+   uint32_t range[2];
+};
+
+void
+parse_debug_bitset(const char *env, const struct debug_control_bitset *tbl,
+                   BITSET_WORD *result);
 
 #define DEBUG_GET_ONCE_OPTION(suffix, name, dfault) \
 static const char * \

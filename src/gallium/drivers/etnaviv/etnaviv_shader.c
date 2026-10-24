@@ -349,18 +349,26 @@ etna_shader_update_vs_inputs(struct compiled_shader_state *cs,
                              const struct etna_shader_variant *vs,
                              const struct compiled_vertex_elements_state *ves)
 {
-   unsigned num_temps, cur_temp, num_vs_inputs;
+   unsigned num_temps, cur_temp, num_vs_inputs, num_elements;
 
    if (!vs)
       return false;
 
+   /* The id pseudo-input takes a mapping slot of its own, so the dummy
+    * element is not needed then. Worse, its stride-0 fetch corrupts the ids
+    * the FE delivers.
+    */
+   num_elements = ves->num_elements;
+   if (ves->dummy_element && vs->vs_id_in_reg >= 0)
+      num_elements = 0;
+
    /* Number of vertex elements determines number of VS inputs. Otherwise,
     * the GPU crashes. Allocate any unused vertex elements to VS temporary
     * registers. */
-   num_vs_inputs = MAX2(ves->num_elements, vs->infile.num_reg);
-   if (num_vs_inputs != ves->num_elements) {
+   num_vs_inputs = MAX2(num_elements, vs->infile.num_reg);
+   if (num_vs_inputs != num_elements) {
       BUG("Number of elements %u does not match the number of VS inputs %zu",
-          ves->num_elements, vs->infile.num_reg);
+          num_elements, vs->infile.num_reg);
       return false;
    }
 

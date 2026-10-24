@@ -27,8 +27,28 @@ enum pan_mod_support {
    PAN_MOD_OPTIMAL,
 };
 
+enum pan_mod_format_caps {
+   PAN_MOD_FORMAT_CAP_DIM_1D = 1 << 0,
+   PAN_MOD_FORMAT_CAP_DIM_2D = 1 << 1,
+   PAN_MOD_FORMAT_CAP_DIM_3D = 1 << 2,
+   PAN_MOD_FORMAT_CAP_MSAA = 1 << 3,
+   PAN_MOD_FORMAT_CAP_STORAGE_IMAGE = 1 << 4,
+   PAN_MOD_FORMAT_CAP_DEPTH_STENCIL = 1 << 5,
+   PAN_MOD_FORMAT_CAP_DEPTH_STENCIL_INTERLEAVED = 1 << 6,
+   PAN_MOD_FORMAT_CAP_HOST_COPY = 1 << 7,
+   PAN_MOD_FORMAT_CAP_SPARSE_MAP = 1 << 8,
+   PAN_MOD_FORMAT_CAP_WSI = 1 << 9,
+};
+
 struct pan_mod_handler {
    bool (*match)(uint64_t mod);
+
+   /* Get the capabilities for a specific format/modifier pair. Returns 0
+    * if this combination is not valid on this platform, or a bitmask of
+    * PAN_MOD_FORMAT_CAP_* flags if valid.
+    */
+   uint32_t (*get_format_caps)(const struct pan_kmod_dev_props *dprops,
+                               enum pipe_format format, uint64_t modifier);
 
    /* Used to check if a set of image properties is valid. Passing a NULL iusage
     * is valid and means "optimal set of usage for this mod". This implies
@@ -38,6 +58,10 @@ struct pan_mod_handler {
    enum pan_mod_support (*test_props)(const struct pan_kmod_dev_props *dprops,
                                       const struct pan_image_props *iprops,
                                       const struct pan_image_usage *iusage);
+
+   /* Check if the writeback MSAA field of a render target supports the
+    * average MSAA value for a given format. */
+   bool (*supports_msaa_average)(enum pipe_format format);
 
    /* Optional method used to initialize modifier-specific per-plane layout
     * data. This is called before init_slice_layout().
@@ -82,6 +106,7 @@ const struct pan_mod_handler *pan_mod_get_handler_v6(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v7(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v9(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v10(uint64_t modifier);
+const struct pan_mod_handler *pan_mod_get_handler_v11(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v12(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v13(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v14(uint64_t modifier);
@@ -101,8 +126,9 @@ pan_mod_get_handler(unsigned arch, uint64_t modifier)
    case 9:
       return pan_mod_get_handler_v9(modifier);
    case 10:
-   case 11:
       return pan_mod_get_handler_v10(modifier);
+   case 11:
+      return pan_mod_get_handler_v11(modifier);
    case 12:
       return pan_mod_get_handler_v12(modifier);
    case 13:

@@ -1010,6 +1010,8 @@ struct pipe_caps {
    bool atomic_float_minmax;
    bool fragment_shader_texture_lod;
    bool fragment_shader_derivatives;
+   /** defaults to true; clearing it withdraws GL_EXT_frag_depth */
+   bool fragment_shader_depth;
    bool texture_shadow_lod;
    bool shader_samples_identical;
    bool image_atomic_inc_wrap;
@@ -1131,11 +1133,28 @@ struct pipe_caps {
    unsigned max_gs_invocations;
    unsigned max_shader_buffer_size;
    unsigned max_combined_shader_buffers;
+   unsigned max_combined_image_uniforms;
    unsigned max_combined_hw_atomic_counters;
    unsigned max_combined_hw_atomic_counter_buffers;
    unsigned max_texture_upload_memory_budget;
    unsigned max_vertex_element_src_offset;
    unsigned max_varyings;
+
+   /* Per-stage mask of VARYING_SLOT_* outputs that don't count against the
+    * stage's GL MAX_*_OUTPUT_COMPONENTS limit at link time.
+    *
+    * For the pre-rasterization stages this is the set consumed by
+    * fixed-function hardware rather than taking up varying storage, which is
+    * driver-dependent: drivers where every declared output consumes varying
+    * space (for example Vulkan, whose VUIDs count all of them) should set 0.
+    *
+    * MESA_SHADER_TESS_CTRL is not that.  Its entry is the per-patch built-ins,
+    * which land in nir_shader_info::outputs_written rather than
+    * patch_outputs_written because their slots are below VARYING_SLOT_VAR0.
+    * The limit they'd be checked against is per-vertex only, so they should
+    * stay masked off no matter what the hardware does.
+    */
+   uint64_t ignored_output_varyings[MESA_SHADER_MESH_STAGES];
    unsigned dmabuf;
    unsigned clip_planes;
    unsigned max_vertex_buffers;

@@ -360,6 +360,18 @@ DD_IMM_STATE(framebuffer_state, const struct pipe_framebuffer_state, *state, sta
 DD_IMM_STATE(polygon_stipple, const struct pipe_poly_stipple, *state, state)
 
 static void
+dd_context_set_sample_coverage(struct pipe_context *_pipe, float value,
+                               bool invert)
+{
+   struct dd_context *dctx = dd_context(_pipe);
+   struct pipe_context *pipe = dctx->pipe;
+
+   dctx->draw_state.sample_coverage = value;
+   dctx->draw_state.sample_coverage_invert = invert;
+   pipe->set_sample_coverage(pipe, value, invert);
+}
+
+static void
 dd_context_set_constant_buffer(struct pipe_context *_pipe,
                                mesa_shader_stage shader, uint index,
                                const struct pipe_constant_buffer *constant_buffer)
@@ -897,6 +909,7 @@ dd_context_create(struct dd_screen *dscreen, struct pipe_context *pipe)
    CTX_INIT(set_blend_color);
    CTX_INIT(set_stencil_ref);
    CTX_INIT(set_sample_mask);
+   CTX_INIT(set_sample_coverage);
    CTX_INIT(set_min_samples);
    CTX_INIT(set_clip_state);
    CTX_INIT(set_constant_buffer);
@@ -947,6 +960,7 @@ dd_context_create(struct dd_screen *dscreen, struct pipe_context *pipe)
       pipe->set_log_context(pipe, &dctx->log);
 
    dctx->draw_state.sample_mask = ~0;
+   dctx->draw_state.sample_coverage = 1.0f;
 
    list_inithead(&dctx->records);
    (void) mtx_init(&dctx->mutex, mtx_plain);

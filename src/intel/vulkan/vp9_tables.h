@@ -244,10 +244,6 @@ static const int16_t vp9_ac_qlookup[3][256] = {
 #define COEFF_PROB_SIZE 132
 #define COEFF_PROB_NUM 3
 
-#define INTER_MODE_PROBS_OFFSET 1667
-#define INTER_MODE_PROBS_SIZE 343
-#define SEG_PROBS_OFFSET 2010
-
 struct tx_probs {
     uint8_t p8x8[TX_SIZE_CONTEXTS][TX_SIZES - 3];
     uint8_t p16x16[TX_SIZE_CONTEXTS][TX_SIZES - 2];

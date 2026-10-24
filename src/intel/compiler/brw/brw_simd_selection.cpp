@@ -79,6 +79,7 @@ brw_simd_should_compile(brw_simd_selection_state &state, unsigned simd)
 {
    assert(simd < SIMD_COUNT);
    assert(!state.compiled[simd]);
+   assert(!state.failed[simd]);
 
    const auto cs_prog_data = get_cs_prog_data(state);
    const auto prog_data = get_prog_data(state);
@@ -93,6 +94,14 @@ brw_simd_should_compile(brw_simd_selection_state &state, unsigned simd)
    if (width == 32 && cs_prog_data && cs_prog_data->uses_btd_stack_ids) {
       state.error[simd] = "Bindless shader calls not supported";
       return false;
+   }
+
+   /* A wider width will fail if a narrower width failed, even when forced. */
+   for (unsigned i = 0; i < simd; i++) {
+      if (state.failed[i]) {
+         state.error[simd] = "Narrower SIMD width failed to compile";
+         return false;
+      }
    }
 
    if (state.required_width) {
@@ -182,6 +191,16 @@ brw_simd_mark_compiled(brw_simd_selection_state &state, unsigned simd, bool spil
             cs_prog_data->prog_spilled |= 1u << i;
       }
    }
+}
+
+void
+brw_simd_mark_failed(brw_simd_selection_state &state, unsigned simd, const char *error)
+{
+   assert(simd < SIMD_COUNT);
+   assert(!state.compiled[simd]);
+
+   state.error[simd] = error;
+   state.failed[simd] = true;
 }
 
 int

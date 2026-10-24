@@ -100,6 +100,8 @@ enum intel_debug_flag {
    DEBUG_NO_SEND_GATHER,
    DEBUG_NO_VRT,
    DEBUG_RT_NO_TRACE,
+   DEBUG_RT_NO_AHS,
+   DEBUG_RT_NO_CHS,
    DEBUG_SHADERS_LINENO,
    /* Keep the stages grouped */
    DEBUG_VS,
@@ -144,6 +146,8 @@ extern uint32_t intel_debug_bkp_after_dispatch_count;
 extern uint64_t intel_debug_batch_frame_start;
 extern uint64_t intel_debug_batch_frame_stop;
 extern uint64_t intel_shader_dump_filter;
+extern uint32_t intel_threads_per_eu_min;
+extern uint64_t intel_threads_per_eu_srchash;
 
 #define INTEL_SIMD(type, size)        (!!(intel_simd & (DEBUG_ ## type ## _SIMD ## size)))
 

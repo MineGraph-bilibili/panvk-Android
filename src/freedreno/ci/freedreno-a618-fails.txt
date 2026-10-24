@@ -64,10 +64,8 @@ spec@arb_vertex_type_2_10_10_10_rev@attrib-p-type-size-match,Fail
 spec@arb_indirect_parameters@tf-count-arrays,Fail
 spec@arb_indirect_parameters@tf-count-elements,Fail
 
-spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_chromium_sync_control@conformance@eglGetSyncValuesCHROMIUM_msc_and_sbc_test,Fail
 spec@egl_chromium_sync_control@conformance,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 
 # D32S8 skips (GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT), others fail.
@@ -116,9 +114,6 @@ spec@glsl-1.30@execution@texelfetch fs sampler3d 98x1x9-98x129x9,Fail
 
 spec@glsl-1.50@execution@primitive-id-no-gs-quads,Fail
 spec@glsl-1.50@execution@primitive-id-no-gs-quad-strip,Fail
-
-# "ir3_shader.h:923:ir3_link_add: Assertion `i < ARRAY_SIZE(l->var)' failed"
-spec@glsl-1.50@execution@variable-indexing@gs-output-array-vec4-index-wr,Crash
 
 spec@khr_texture_compression_astc@array-gl@12x12 Block Dim,Fail
 spec@khr_texture_compression_astc@array-gl@5x5 Block Dim,Fail
@@ -203,15 +198,12 @@ glx@glx-swap-pixmap-bad,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_ssbo,Fail
 spec@arb_occlusion_query@occlusion_query_order,Fail
 spec@arb_gpu_shader_fp64@execution@fs-indirect-temp-double-src,Crash
-spec@glsl-1.30@execution@fs-uint-to-float-of-extract-int16,Fail
-spec@glsl-1.30@execution@fs-uint-to-float-of-extract-int8,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp@sRGB decode full precision,Fail
 spec@arb_base_instance@arb_base_instance-baseinstance-doesnt-affect-gl-instance-id,Fail
 spec@arb_base_instance@arb_base_instance-drawarrays,Fail
 spec@ext_base_instance@arb_base_instance-baseinstance-doesnt-affect-gl-instance-id_gles3,Fail
 spec@ext_base_instance@arb_base_instance-drawarrays_gles3,Fail
-vulkan@shaders@cmat-uniform-ctor,Fail
 spec@!opengl 1.1@getteximage-depth@GL_TEXTURE_1D_ARRAY-GL_DEPTH_COMPONENT32,Fail
 
 # New failures appeared after Piglit uprev to 28d1349844eacda869f0f82f551bcd4ac0c4edfe
@@ -224,59 +216,6 @@ KHR-GL46.texture_lod_bias.texture_lod_bias_all,Fail
 
 # GL tests above, Vulkan tests below
 
-# New fails in 1.4.3.3
-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_508,Fail
-android-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
-asan-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_16,Fail
-asan-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
-gmem-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_16,Fail
-gmem-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_16,Fail
-gmem-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_508,Fail
-gmem-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_16,Fail
-nobin-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_16,Fail
-nobin-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_244,Fail
-nobin-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_508,Fail
-nobin-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_244,Fail
-nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_16,Fail
-nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_16,Fail
-nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_244,Fail
-nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_508,Fail
-nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_16,Fail
-nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_244,Fail
-nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_508,Fail
-nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_16,Fail
-nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_244,Fail
-
-# New failures with VKCTS 1.4.4.0
-dEQP-VK.tessellation.misc_draw.tess_factor_barrier_bug,Crash
-gmem-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_16,Fail
-gmem-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_508,Fail
-gmem-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
-gmem-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_508,Fail
-gmem-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_508,Fail
-nobin-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_16,Fail
-nobin-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_508,Fail
-nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
-nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_508,Fail
-nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_508,Fail
-
 #Unexpected CL error: CL_SUCCESS 0
 #Expected CL error: CL_INVALID_LINKER_OPTIONS -67
 #Failed (error code: CL_SUCCESS): Trigger CL_INVALID_LINKER_OPTIONS if the linker options specified by options are invalid.
@@ -286,10 +225,6 @@ nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_co
 #Unexpected CL error: CL_SUCCESS 0
 #Expected CL error: CL_LINK_PROGRAM_FAILURE -17
 api@cllinkprogram,Fail
-
-# https://gitlab.freedesktop.org/mesa/mesa/-/issues/8408
-program@execute@global-offset,Fail
-program@execute@global-offset@3d- input dependent,Fail
 
 #
 ## freedreno issues:
@@ -467,29 +402,27 @@ dEQP-VK.fragment_operations.early_fragment.sample_count_early_fragment_tests_dep
 angle-dEQP-GLES3.functional.fbo.msaa.2_samples.rg8,Fail
 angle-dEQP-GLES3.functional.fbo.msaa.4_samples.rg8,Fail
 
-# VKCTS 1.4.4.2 -> 1.4.5.3 uprev.
-# [  118.945672] *** gpu fault: ttbr0=00000001d0f38000 iova=00000000040ff000 dir=READ type=TRANSLATION source=TP|VFD (0,0,0,1)
-# Not entirely reliable -- which ones crash vs pass may flip around, so clear the flakes entry when it's fixed.
-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.fast_lib.fdm_subsampled_pre_resolve_info_frag_out_only_resolve_info_frag_shader_no_formats,Crash
-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.fast_lib.fdm_subsampled_resolve_info_frag_shader_no_formats,Crash
-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.fast_lib.fdm_subsampled,Crash
-dEQP-VK.renderpasses.renderpass1.custom_resolve.fast_lib.fdm_subsampled,Crash
-dEQP-VK.renderpasses.renderpass1.custom_resolve.monolithic.fdm_subsampled,Crash
-
 # uprev Piglit in Mesa
 spec@!opengl 1.1@large-tex,Fail
 spec@!opengl 1.1@large-tex@test_image_load_store,Fail
 
-# VKCTS 1.4.5.3 -> 1.4.6.1 uprev
-# [  254.112811] *** gpu fault: ttbr0=000000010778d000 iova=00000000040fff00 dir=READ type=TRANSLATION source=TP|VFD (0,0,0,1)
-# Not entirely reliable -- which ones crash vs pass may flip around, so clear the flakes entry when it's fixed.
-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.monolithic.fdm_nonsubsampled_large_fb_with_offset,Crash
-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.monolithic.fdm_nonsubsampled_multilayer_with_offset,Fail
-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.monolithic.fdm_nonsubsampled_with_offset,Fail
-dEQP-VK.renderpasses.renderpass2.custom_resolve.fast_lib.fdm_nonsubsampled_multilayer_large_fb_with_offset,Crash
-dEQP-VK.renderpasses.renderpass2.custom_resolve.fast_lib.fdm_nonsubsampled_multilayer_with_offset,Fail
-dEQP-VK.renderpasses.renderpass2.custom_resolve.fast_lib.fdm_nonsubsampled_multiview_large_fb_with_offset,Crash
-dEQP-VK.renderpasses.renderpass2.custom_resolve.monolithic.fdm_nonsubsampled_multiview_with_offset,Crash
-dEQP-VK.renderpasses.renderpass2.custom_resolve.monolithic.fdm_nonsubsampled_with_offset,Fail
-gmem-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.fast_lib.fdm_nonsubsampled_with_offset,Fail
-gmem-dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.custom_resolve.monolithic.fdm_nonsubsampled_multilayer_with_offset,Fail
+#
+# OpenCL-CTS
+#
+
+# Test bug, doesn't check for CL_FP_DENORM:
+SPIRV new,Fail
+SPIRV new@op_neg_half,Fail
+SPIRV new@op_spec_constant_half_simple,Fail
+
+# Test bug, doesn't properly compute wave divergence point with wave128:
+Subgroups,Fail
+Subgroups@subgroup_functions_ballot,Fail
+
+#
+# OpenCL-CTS uprev
+#
+
+# https://github.com/KhronosGroup/OpenCL-CTS/issues/2765
+Basic,Fail
+Basic@bufferreadwriterect,Fail

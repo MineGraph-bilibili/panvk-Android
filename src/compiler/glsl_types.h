@@ -74,6 +74,7 @@ enum glsl_base_type {
    GLSL_TYPE_UINT64,
    GLSL_TYPE_INT64,
    GLSL_TYPE_BOOL,
+   GLSL_TYPE_YUV_CSC_STANDARD_EXT,
    GLSL_TYPE_COOPERATIVE_MATRIX,
    GLSL_TYPE_SAMPLER,
    GLSL_TYPE_TEXTURE,
@@ -180,6 +181,7 @@ glsl_base_type_get_bit_size(const enum glsl_base_type base_type)
    case GLSL_TYPE_FLOAT: /* TODO handle mediump */
    case GLSL_TYPE_SUBROUTINE:
    case GLSL_TYPE_COOPERATIVE_MATRIX:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       return 32;
 
    case GLSL_TYPE_FLOAT16:
@@ -361,11 +363,15 @@ struct glsl_type {
    unsigned length;
 
    /**
-    * Identifier to the name of the data type
+    * Name of the data type.  Builtin types store an offset into
+    * glsl_type_builtin_names; other types store a direct pointer.
     *
     * Use glsl_get_type_name() to access the actual name.
     */
-   uintptr_t name_id;
+   union {
+      uintptr_t name_id;
+      const char *name_ptr;
+   };
 
    /**
     * Explicit array, matrix, or vector stride.  This is used to communicate
@@ -544,6 +550,7 @@ glsl_get_bit_size(const glsl_type *t)
 }
 
 static inline bool glsl_type_is_boolean(const glsl_type *t) { return t->base_type == GLSL_TYPE_BOOL; }
+static inline bool glsl_type_is_yuv_csc_standard_ext(const glsl_type *t) { return t->base_type == GLSL_TYPE_YUV_CSC_STANDARD_EXT; }
 static inline bool glsl_type_is_sampler(const glsl_type *t) { return t->base_type == GLSL_TYPE_SAMPLER; }
 static inline bool glsl_type_is_texture(const glsl_type *t) { return t->base_type == GLSL_TYPE_TEXTURE; }
 static inline bool glsl_type_is_image(const glsl_type *t) { return t->base_type == GLSL_TYPE_IMAGE; }

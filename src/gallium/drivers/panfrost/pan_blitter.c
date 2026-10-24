@@ -1,15 +1,28 @@
 /*
  * Copyright (C) 2014 Broadcom
  * Copyright (C) 2019 Collabora, Ltd.
+ * Copyright (C) 2026 NXP
  * SPDX-License-Identifier: MIT
  */
 
 #include "util/format/u_format.h"
+#include "util/u_gen_mipmap.h"
+#include "util/u_surface.h"
 #include "pan_blitter.h"
 #include "pan_context.h"
 #include "pan_resource.h"
 #include "pan_trace.h"
 #include "pan_util.h"
+
+/* Buffer copies smaller than this use the CPU memcpy fallback: below the
+ * crossover the fixed GPU dispatch/flush overhead outweighs the higher copy
+ * bandwidth. Measured on Mali-G310, the GPU path has a ~0.155 ms fixed
+ * per-copy overhead (compute dispatch + the two batch flushes) while the CPU
+ * memcpy fallback runs at ~0.145 GB/s; the two cross over at ~21-22 KB. 32 KB
+ * sits safely past the noisy tie band so the GPU path is only taken when it
+ * is reliably faster.
+ */
+#define PAN_COMPUTE_COPY_BUFFER_MIN_SIZE 32768
 
 enum pan_save_state {
    PAN_SAVE_TEXTURES = BITFIELD_BIT(0),
@@ -37,6 +50,9 @@ panfrost_blitter_draw_rectangle(struct blitter_context *blitter,
                                 enum blitter_attrib_type type,
                                 const struct blitter_attrib *attrib)
 {
+   PAN_TRACE_SCOPE(PAN_TRACE_GL_BLIT, "%s rect=((%d, %d), (%d, %d))",
+                   __func__, x1, y1, x2, y2);
+
    assert(num_instances);
 
    struct pipe_context *ctx = blitter->pipe;
@@ -208,10 +224,10 @@ panfrost_blitter_blit(struct pipe_context *pipe,
    if (!util_blitter_is_blit_supported(ctx->blitter, info))
       UNREACHABLE("Unsupported blit\n");
 
-   pan_legalize_format(ctx, pan_resource(info->src.resource),
-                       util_format_linear(info->src.format), false, false);
-   pan_legalize_format(ctx, pan_resource(info->dst.resource),
-                       util_format_linear(info->dst.format), true, false);
+   pan_resource_modifier_legalize(ctx, pan_resource(info->src.resource),
+                                  info->src.format, false, false);
+   pan_resource_modifier_legalize(ctx, pan_resource(info->dst.resource),
+                                  info->dst.format, true, false);
    panfrost_blitter_blit_legalized(pipe, info);
 }
 
@@ -283,8 +299,8 @@ panfrost_blitter_clear_depth_stencil(struct pipe_context *pipe,
    if (render_condition_enabled && !panfrost_render_condition_check(ctx))
       return;
 
-   pan_legalize_format(ctx, pan_resource(dst->texture),
-                       util_format_linear(dst->format), true, false);
+   pan_resource_modifier_legalize(ctx, pan_resource(dst->texture),
+                                  dst->format, true, false);
    panfrost_blitter_save(ctx, states);
    util_blitter_clear_depth_stencil(ctx->blitter, dst, clear_flags, depth,
                                     stencil, dstx, dsty, width, height);
@@ -308,9 +324,158 @@ panfrost_blitter_clear_render_target(struct pipe_context *pipe,
    if (render_condition_enabled && !panfrost_render_condition_check(ctx))
       return;
 
-   pan_legalize_format(ctx, pan_resource(dst->texture),
-                       util_format_linear(dst->format), true, false);
+   pan_resource_modifier_legalize(ctx, pan_resource(dst->texture),
+                                  dst->format, true, false);
    panfrost_blitter_save(ctx, states);
    util_blitter_clear_render_target(ctx->blitter, dst, color, dstx, dsty,
                                     width, height);
+}
+
+bool
+panfrost_blitter_generate_mipmap(struct pipe_context *pipe,
+                                 struct pipe_resource *tex,
+                                 enum pipe_format format, unsigned base_level,
+                                 unsigned last_level, unsigned first_layer,
+                                 unsigned last_layer)
+{
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BLIT);
+
+   struct panfrost_context *ctx = pan_context(pipe);
+   struct panfrost_screen *scr = pan_screen(pipe->screen);
+   const enum pan_save_state states =
+      PAN_SAVE_TEXTURES | PAN_SAVE_FRAMEBUFFER | PAN_SAVE_FRAGMENT_STATE |
+      PAN_SAVE_RENDER_COND;
+   const struct util_format_description *desc =
+      util_format_description(format);
+   unsigned levels_per_draw = 1;
+
+   if (tex->nr_samples > 1)
+      goto fallback;
+
+   if (util_format_has_stencil(desc) && !util_format_has_depth(desc))
+      goto fallback;
+
+   if (!util_blitter_is_copy_supported(ctx->blitter, tex, tex))
+      goto fallback;
+
+   /* Legalization of the destination resource might change the modifier so it
+    * must be done before checking if the writeback format supports MSAA
+    * averaging.
+    */
+   pan_resource_modifier_legalize(ctx, pan_resource(tex), format, true,
+                                  false);
+
+   /* Mali v10+ supports downscaling of the tile buffer content to output 2
+    * mipmap levels per draw. It's restricted to writeback formats supporting
+    * MSAA averaging and to the highest square effective tile sizes.
+    */
+   if (scr->dev.arch >= 10 &&
+       pan_resource(tex)->image.mod_handler->supports_msaa_average(format)) {
+      struct pan_image_view view = { .format = format, };
+      struct pan_fb_info fb = {
+         .nr_samples = 1,
+         .rt_count = 2,
+         .rts = { { .view = &view, }, { .view = &view, }, },
+         .tile_buf_budget = scr->dev.optimal_tib_size,
+         .z_tile_buf_budget = scr->dev.optimal_z_tib_size,
+         .downscale_rts = true,
+      };
+      scr->vtbl.select_tile_size(&fb);
+      if (fb.tile_size == 32 * 32 ||
+          (fb.tile_size == 64 * 64 && scr->dev.arch >= 12)) {
+         levels_per_draw = 2;
+      }
+   }
+
+   panfrost_blitter_save(ctx, states);
+   ctx->has_blit_loop = true;
+   util_blitter_generate_mipmap(ctx->blitter, tex, format, base_level,
+                                last_level, first_layer, last_layer,
+                                levels_per_draw);
+   ctx->has_blit_loop = false;
+   return true;
+
+ fallback:
+   perf_debug(ctx, "Software fallback for generate_mipmap()");
+   return util_gen_mipmap(pipe, tex, format, base_level, last_level,
+                          first_layer, last_layer, PIPE_TEX_FILTER_LINEAR);
+}
+
+void
+panfrost_blitter_resource_copy_region(struct pipe_context *pipe,
+                                      struct pipe_resource *dst,
+                                      unsigned dst_level, unsigned dst_x,
+                                      unsigned dst_y, unsigned dst_z,
+                                      struct pipe_resource *src,
+                                      unsigned src_level,
+                                      const struct pipe_box *src_box)
+{
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BLIT);
+
+   struct panfrost_context *ctx = pan_context(pipe);
+   const enum pan_save_state states =
+      PAN_SAVE_TEXTURES | PAN_SAVE_FRAMEBUFFER | PAN_SAVE_FRAGMENT_STATE |
+      PAN_SAVE_RENDER_COND;
+
+   /* Sufficiently large, 4-byte-aligned, contiguous buffer->buffer copies are
+    * done on the GPU via the libpan copy compute kernel. Small copies (below
+    * PAN_COMPUTE_COPY_BUFFER_MIN_SIZE) and anything not even 4-byte aligned
+    * (rare for OpenCL buffers) fall back to the software path.
+    */
+   if (src->target == PIPE_BUFFER && dst->target == PIPE_BUFFER) {
+      unsigned size = src_box->width;
+      struct panfrost_screen *scr = pan_screen(pipe->screen);
+      if (scr->vtbl.compute_copy_buffer &&
+          size >= PAN_COMPUTE_COPY_BUFFER_MIN_SIZE && (size % 4 == 0) &&
+          (dst_x % 4 == 0) && (src_box->x % 4 == 0)) {
+         struct panfrost_resource *pdst = pan_resource(dst);
+
+         scr->vtbl.compute_copy_buffer(pipe, pdst, dst_x, pan_resource(src),
+                                       src_box->x, size);
+
+         /* The GPU wrote [dst_x, dst_x + size) of the destination buffer, so
+          * mark that range valid for later reads.
+          */
+         util_range_add(dst, &pdst->valid_buffer_range, dst_x, dst_x + size);
+         return;
+      } else {
+         goto fallback;
+      }
+   }
+
+   /* XXX Some tests are failing with these formats:
+    * - dEQP-GLES31.functional.copy_image.mixed.viewclass_128_bits_mixed.rgba32f_rgba_astc_*
+    * - dEQP-GLES31.functional.copy_image.mixed.viewclass_128_bits_mixed.rgba32f_srgb8_alpha8_astc_*
+    * - dEQP-GLES31.functional.copy_image.non_compressed.viewclass_16_bits.rg8_snorm_*
+    * - dEQP-GLES31.functional.copy_image.non_compressed.viewclass_32_bits.rgba8_snorm_*
+    */
+   if (dst->format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
+       dst->format == PIPE_FORMAT_R8G8B8A8_SNORM ||
+       dst->format == PIPE_FORMAT_R8G8_SNORM)
+      goto fallback;
+
+   if (!util_blitter_is_copy_supported(ctx->blitter, dst, src))
+      goto fallback;
+
+   if (dst->format != src->format &&
+       !util_is_format_compatible(util_format_description(dst->format),
+                                  util_format_description(src->format)))
+      goto fallback;
+
+   pan_resource_modifier_legalize(ctx, pan_resource(dst), dst->format, true,
+                                  false);
+   pan_resource_modifier_legalize(ctx, pan_resource(src), src->format, false,
+                                  false);
+   panfrost_blitter_save(ctx, states);
+   ctx->has_blit_loop = dst == src;
+   util_blitter_copy_texture(ctx->blitter, dst, dst_level, dst_x, dst_y,
+                             dst_z, src, src_level, src_box);
+   ctx->has_blit_loop = false;
+   return;
+
+ fallback:
+   /* Map resources and memcpy() on the CPU. */
+   perf_debug(ctx, "Software fallback for resource_copy_region()");
+   util_resource_copy_region(pipe, dst, dst_level, dst_x, dst_y, dst_z, src,
+                             src_level, src_box);
 }

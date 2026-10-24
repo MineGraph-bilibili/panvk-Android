@@ -1,5 +1,0 @@
-Name: libdrm
-Description: libdrm
-Version: 2.5
-Libs: -ldrm
-Cflags:

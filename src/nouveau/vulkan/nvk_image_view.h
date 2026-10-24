@@ -30,7 +30,7 @@ struct nvk_image_view {
    struct {
       uint8_t image_plane;
 
-      enum nil_sample_layout sample_layout;
+      nil_sample_layout sample_layout;
 
       struct nvk_image_view_descriptor sampled;
       struct nvk_image_view_descriptor storage;

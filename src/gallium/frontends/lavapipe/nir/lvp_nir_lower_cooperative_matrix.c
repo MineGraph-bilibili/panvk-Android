@@ -170,10 +170,12 @@ lower_cmat_convert(nir_builder *b,
       src_use = GLSL_CMAT_USE_A;
 
    if (transpose) {
-      if (src_use == GLSL_CMAT_USE_A && dst_use == GLSL_CMAT_USE_B)
+      if ((src_use == GLSL_CMAT_USE_A && dst_use == GLSL_CMAT_USE_B) ||
+          (src_use == GLSL_CMAT_USE_B && dst_use == GLSL_CMAT_USE_A))
          src_use = dst_use;
-      if (src_use == GLSL_CMAT_USE_B && dst_use == GLSL_CMAT_USE_A)
-         src_use = dst_use;
+      else if ((src_use == GLSL_CMAT_USE_A && dst_use == GLSL_CMAT_USE_A) ||
+               (src_use == GLSL_CMAT_USE_B && dst_use == GLSL_CMAT_USE_B))
+         src_use = dst_use == GLSL_CMAT_USE_A ? GLSL_CMAT_USE_B : GLSL_CMAT_USE_A;
    }
 
    nir_def *ret = cmat;
@@ -446,6 +448,26 @@ lower_cmat_bitcast(nir_builder *b, nir_intrinsic_instr *intr)
    nir_def *src1 = load_cmat_src(b, intr->src[1]);
    nir_store_deref(b, nir_src_as_deref(intr->src[0]), src1, nir_component_mask(src1->num_components));
    nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static bool
+lower_cmat_get_coordinate(nir_builder *b,
+                          nir_intrinsic_instr *intr)
+{
+   struct glsl_cmat_description desc = nir_intrinsic_cmat_desc(intr);
+
+   nir_def *lane_id = nir_load_subgroup_invocation(b);
+   nir_def *comps[2];
+
+   comps[0] = intr->src[0].ssa;
+   comps[1] = lane_id;
+
+   if (desc.use == GLSL_CMAT_USE_B) {
+      SWAP(comps[0], comps[1]);
+   }
+   nir_def *val = nir_vec(b, comps, 2);
+   nir_def_replace(&intr->def, val);
    return true;
 }
 
@@ -811,6 +833,9 @@ lower_impl(nir_function_impl *impl,
                break;
             case nir_intrinsic_cmat_bitcast:
                progress |= lower_cmat_bitcast(&b, intr);
+               break;
+            case nir_intrinsic_cmat_get_coordinate:
+               progress |= lower_cmat_get_coordinate(&b, intr);
                break;
             default:
                break;

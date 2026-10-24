@@ -1350,7 +1350,7 @@ check_compatible(const struct gl_context *ctx,
 static void
 check_init_viewport(struct gl_context *ctx, GLuint width, GLuint height)
 {
-   if (!ctx->ViewportInitialized && width > 0 && height > 0) {
+   if (!ctx->ViewportInitialized) {
       unsigned i;
 
       /* Note: set flag here, before calling _mesa_set_viewport(), to prevent
@@ -1567,8 +1567,17 @@ _mesa_share_state(struct gl_context *ctx, struct gl_context *ctxToShare)
       /* save ref to old state to prevent it from being deleted immediately */
       _mesa_reference_shared_state(ctx, &oldShared, ctx->Shared);
 
+      /* Keep SharedLink consistent with ctx->Shared */
+      simple_mtx_lock(&oldShared->Mutex);
+      list_del(&ctx->SharedLink);
+      simple_mtx_unlock(&oldShared->Mutex);
+
       /* update ctx's Shared pointer */
       _mesa_reference_shared_state(ctx, &ctx->Shared, ctxToShare->Shared);
+
+      simple_mtx_lock(&ctx->Shared->Mutex);
+      list_addtail(&ctx->SharedLink, &ctx->Shared->Contexts);
+      simple_mtx_unlock(&ctx->Shared->Mutex);
 
       update_default_objects(ctx);
 

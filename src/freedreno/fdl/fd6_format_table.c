@@ -376,6 +376,13 @@ static const struct fd6_format formats[PIPE_FORMAT_COUNT] = {
    _T_(G8B8_G8R8_UNORM, R8G8R8B8_422_UNORM,     WZYX), /* YUYV */
    _T_(B8G8_R8G8_UNORM, G8R8B8R8_422_UNORM,     WZYX), /* UYVY */
 
+   /* FMT6_NV12_4R supports native texturing and rendering to YUV planar
+    * formats. This is required for the GL_EXT_YUV_target extension, where the
+    * fragment shader outputs yuv color and the hardware automatically handles
+    * writing to the separated planar memory layout of NV12.
+    */
+   _TC(NV12, NV12_4R, WZYX),  /* YUV planar formats */
+   _TC(YUYV, R8G8R8B8_422_UNORM, WZYX),
    _T_(R8_G8B8_420_UNORM, R8_G8B8_2PLANE_420_UNORM, WZYX), /* Gallium NV12 */
    _T_(G8_B8R8_420_UNORM, R8_G8B8_2PLANE_420_UNORM, WZYX), /* Vulkan NV12 */
    _T_(G8_B8_R8_420_UNORM, R8_G8_B8_3PLANE_420_UNORM, WZYX),

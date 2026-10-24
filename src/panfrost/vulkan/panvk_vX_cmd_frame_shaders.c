@@ -16,6 +16,8 @@
 #include "pan_shader.h"
 #include "pan_nir.h"
 
+#include "util/u_debug.h"
+
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct panvk_frame_shader_key {
@@ -164,11 +166,13 @@ lower_sysval(nir_builder *b, nir_intrinsic_instr *intr,
       break;
    case nir_intrinsic_load_layer_id:
       /* On v9+, we have real layered rendering */
-      if (PAN_ARCH >= 9)
-         return false;
-
-      offset = offsetof(struct panvk_fb_sysvals, layer_id);
-      val = nir_u2u32(b, load_sysval(b, 1, 16, offset));
+      if (PAN_ARCH >= 9) {
+         val = nir_load_frame_arg_pan(b);
+         val = nir_extract_u8_imm(b, nir_u2u32(b, val), 0);
+      } else {
+         offset = offsetof(struct panvk_fb_sysvals, layer_id);
+         val = nir_u2u32(b, load_sysval(b, 1, 16, offset));
+      }
       break;
    default:
       return false;
@@ -357,6 +361,8 @@ fill_textures(struct panvk_cmd_buffer *cmdbuf,
       }
 
       struct pan_image_view pview = *iview;
+      if (pview.dim == MALI_TEXTURE_DIMENSION_CUBE)
+         pview.dim = MALI_TEXTURE_DIMENSION_2D;
       if (loc == FRAG_RESULT_DEPTH)
          pview.format = util_format_get_depth_only(pview.format);
       else if (loc == FRAG_RESULT_STENCIL)
@@ -749,12 +755,20 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
       cfg.maximum_z = 1.0;
       cfg.shader.resources = res_table.gpu | res_table_size;
       cfg.shader.shader = panvk_priv_mem_dev_addr(shader->spd);
+#if PAN_ARCH >= 10
       cfg.shader.thread_storage = cmdbuf->state.gfx.tsd;
+#else
+      cfg.shader.thread_storage = 0;
+#endif
       cfg.shader.fau_count = sizeof(struct panvk_fb_sysvals) / FAU_WORD_SIZE;
       cfg.shader.fau = faus.gpu;
 #endif
+#if PAN_ARCH >= 10
       cfg.flags_2.write_mask = rt_written;
       cfg.flags_2.read_mask = rt_read;
+#else
+      cfg.flags_1.render_target_mask |= rt_written | rt_read;
+#endif
 #if PAN_ARCH >= 11
       cfg.flags_2.no_shader_depth_read =
          !(locations_read & BITFIELD_BIT(FRAG_RESULT_DEPTH));
@@ -780,6 +794,10 @@ always_load(const struct pan_fb_load *load,
    return (pan_fb_shader_key_target_written(&key->key.z) && load->z.always) ||
           (pan_fb_shader_key_target_written(&key->key.s) && load->s.always);
 }
+
+#if PAN_ARCH == 11
+DEBUG_GET_ONCE_BOOL_OPTION(zs_preload_always, "PANVK_ZS_PRELOAD_ALWAYS", false)
+#endif
 
 static VkResult
 cmd_preload_zs_attachments(struct panvk_cmd_buffer *cmdbuf,
@@ -816,6 +834,11 @@ cmd_preload_zs_attachments(struct panvk_cmd_buffer *cmdbuf,
     */
 #if PAN_ARCH >= 13
    fs->modes[dcd_idx] = MALI_PRE_POST_FRAME_SHADER_MODE_PREPASS_ALWAYS;
+#elif PAN_ARCH == 11
+   fs->modes[dcd_idx] = (always_load(load, &key) ||
+                         debug_get_option_zs_preload_always())
+                        ? MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS
+                        : MALI_PRE_POST_FRAME_SHADER_MODE_INTERSECT;
 #elif PAN_ARCH >= 9
    fs->modes[dcd_idx] = MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS;
 #else

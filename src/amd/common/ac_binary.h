@@ -30,6 +30,7 @@ struct ac_shader_config {
    unsigned float_mode;
    unsigned scratch_bytes_per_wave;
    bool wgp_mode;
+   bool mem_ordered;
    unsigned rsrc1;
    unsigned rsrc2;
    unsigned rsrc3;

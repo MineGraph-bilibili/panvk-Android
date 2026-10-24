@@ -19,6 +19,7 @@
 struct panvk_device_memory;
 struct panvk_physical_device;
 
+
 /* Right now, planar YUV images are treated as N different images, hence the 1:1
  * association between pan_image and pan_image_plane, but this can be optimized
  * once planar YUV support is hooked up. */
@@ -45,14 +46,31 @@ struct panvk_image {
    /* One image each for 2x 4x 8x 16x. We don't support more than 16x. */
    VkImage ms_imgs[4];
 
+   /* If an image can track validity of CRC even when external access is
+    * possible. */
+   bool crc_safe_external;
+
    /* BCn on HW without BC texturing: planes[0] keeps the raw blocks (linear),
-    * bc_decoded holds GPU-decoded texels (linear) used by sampled views. */
+    * bc_decoded holds GPU-decoded texels used by sampled views, placed
+    * bc_decoded_offset bytes after the image base.
+    *
+    * bc_afrc: BC2/BC3 decode into the internal RGBA8 image bc_shadow, which
+    * shares bc_decoded's memory and is AFRC compressed; a fragment pass
+    * writes it. Otherwise bc_decoded is a LINEAR plane written by compute. */
    bool bc_emul;
+   bool bc_afrc;
+   /* bc_emul without the raw plane: uploads decode straight from the copy
+    * source and BC copies move decoded blocks, so only bc_decoded is
+    * allocated. Set for images nothing can read as raw BC data. */
+   bool bc_noraw;
    struct panvk_image_plane bc_decoded;
+   uint64_t bc_decoded_offset;
+   VkImage bc_shadow;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_image, vk.base, VkImage,
                                VK_OBJECT_TYPE_IMAGE)
+
 
 static inline void
 panvk_image_set_compression_props(VkImageCompressionPropertiesEXT *props,
@@ -68,15 +86,6 @@ panvk_image_set_compression_props(VkImageCompressionPropertiesEXT *props,
       VK_IMAGE_COMPRESSION_FIXED_RATE_NONE_EXT;
 }
 
-/* Check whether it is possible that images in a given configuration may use
- * AFBC tiling. This function does not have access to all of the relevant
- * image configuration, and returns true if any images with the specified
- * configuration subset may use AFBC. */
-bool panvk_image_can_use_afbc(
-   struct panvk_physical_device *phys_dev, VkFormat fmt,
-   VkImageUsageFlags usage, VkImageType type, VkImageTiling tiling,
-   VkImageCreateFlags flags);
-
 static inline bool
 panvk_format_is_bc(VkFormat format)
 {
@@ -84,36 +93,135 @@ panvk_format_is_bc(VkFormat format)
           format <= VK_FORMAT_BC7_SRGB_BLOCK;
 }
 
-/* Storage format of the decoded plane. BC4/BC5 use 16-bit RG to keep the
- * interpolation precision; BC1-3/7 decode to RGBA8, BC6H to RGBA16F. */
+/* BC4/BC5 transcode to EAC R11/RG11, which has the BC4/BC5 block size;
+ * PANVK_BC_EAC=0 decodes them exactly to R8/RG8 at twice the memory. */
+bool panvk_bc_eac_enabled(void);
+
+/* BC1 transcodes to ETC2 RGB8 / RGB8A1 and BC2/BC3 to ETC2 RGBA8, which
+ * have the BC block sizes; PANVK_BC_ETC=0 keeps the ASTC 4x4 (BC1) and AFRC
+ * (BC2/BC3) transcodes. */
+bool panvk_bc_etc_enabled(void);
+const uint32_t *panvk_bc_eac_lut_data(void);
+size_t panvk_bc_eac_lut_size(void);
+
+/* Storage format of the decoded plane. BCn is transcoded to ASTC 4x4
+ * (16 B per 4x4 block): LDR for BC1-BC3/BC7, HDR for BC6H. BC1 transcodes
+ * to ETC2 (see panvk_bc_etc_enabled()) and BC4/BC5 to EAC R11/RG11 (see
+ * panvk_bc_eac_enabled()). */
 static inline VkFormat
 panvk_bc_decoded_format(VkFormat format)
 {
+   if (panvk_bc_etc_enabled()) {
+      switch (format) {
+      case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+         return VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+      case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+         return VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK;
+      case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+         return VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
+      case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+         return VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK;
+      case VK_FORMAT_BC2_UNORM_BLOCK:
+      case VK_FORMAT_BC3_UNORM_BLOCK:
+         return VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
+      case VK_FORMAT_BC2_SRGB_BLOCK:
+      case VK_FORMAT_BC3_SRGB_BLOCK:
+         return VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK;
+      default:
+         break;
+      }
+   }
+
    switch (format) {
    case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
    case VK_FORMAT_BC2_UNORM_BLOCK:
    case VK_FORMAT_BC3_UNORM_BLOCK:
    case VK_FORMAT_BC7_UNORM_BLOCK:
-      return VK_FORMAT_R8G8B8A8_UNORM;
+      return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
    case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
    case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
    case VK_FORMAT_BC2_SRGB_BLOCK:
    case VK_FORMAT_BC3_SRGB_BLOCK:
    case VK_FORMAT_BC7_SRGB_BLOCK:
-      return VK_FORMAT_R8G8B8A8_SRGB;
-   case VK_FORMAT_BC4_UNORM_BLOCK:
-   case VK_FORMAT_BC5_UNORM_BLOCK:
-      return VK_FORMAT_R16G16_UNORM;
-   case VK_FORMAT_BC4_SNORM_BLOCK:
-   case VK_FORMAT_BC5_SNORM_BLOCK:
-      return VK_FORMAT_R16G16_SNORM;
+      return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
    case VK_FORMAT_BC6H_UFLOAT_BLOCK:
    case VK_FORMAT_BC6H_SFLOAT_BLOCK:
-      return VK_FORMAT_R16G16B16A16_SFLOAT;
+      return VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK;
+   case VK_FORMAT_BC4_UNORM_BLOCK:
+      return panvk_bc_eac_enabled() ? VK_FORMAT_EAC_R11_UNORM_BLOCK
+                                    : VK_FORMAT_R8_UNORM;
+   case VK_FORMAT_BC5_UNORM_BLOCK:
+      return panvk_bc_eac_enabled() ? VK_FORMAT_EAC_R11G11_UNORM_BLOCK
+                                    : VK_FORMAT_R8G8_UNORM;
+   case VK_FORMAT_BC4_SNORM_BLOCK:
+      return panvk_bc_eac_enabled() ? VK_FORMAT_EAC_R11_SNORM_BLOCK
+                                    : VK_FORMAT_R8_SNORM;
+   case VK_FORMAT_BC5_SNORM_BLOCK:
+      return panvk_bc_eac_enabled() ? VK_FORMAT_EAC_R11G11_SNORM_BLOCK
+                                    : VK_FORMAT_R8G8_SNORM;
    default:
       return VK_FORMAT_UNDEFINED;
    }
+}
+
+/* BC2/BC3 are the formats whose AFRC shadow beats the ASTC transcode
+ * (3-5x faster uploads, +5-12 dB on real textures) for 12/16 bpp instead
+ * of 8. BC1 (mostly opaque) keeps ASTC: AFRC there is larger and lossier. */
+static inline bool
+panvk_bc_afrc_candidate(VkFormat format)
+{
+   return format >= VK_FORMAT_BC2_UNORM_BLOCK &&
+          format <= VK_FORMAT_BC3_SRGB_BLOCK;
+}
+
+/* Format a view of a BC-emulated image samples. The plane's encoding is
+ * fixed by the image format; a mutable view may only change sRGB-ness. */
+static inline VkFormat
+panvk_bc_decoded_view_format(VkFormat image_format, VkFormat view_format)
+{
+   const VkFormat dec = panvk_bc_decoded_format(image_format);
+   const bool view_srgb = vk_format_is_srgb(view_format);
+
+   switch (dec) {
+   case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+   case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+      return view_srgb ? VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK
+                       : VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+   case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+   case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+      return view_srgb ? VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK
+                       : VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
+   case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+   case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+      return view_srgb ? VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
+                       : VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
+   default:
+      break;
+   }
+
+   if (dec != VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+       dec != VK_FORMAT_ASTC_4x4_SRGB_BLOCK)
+      return dec;
+
+   return panvk_bc_decoded_format(view_format) == VK_FORMAT_ASTC_4x4_SRGB_BLOCK
+             ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK
+             : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+}
+
+/* Swizzle that turns the decoded plane back into the BC format's channels
+ * (applied before the view's own swizzle). Returns false for identity. */
+static inline bool
+panvk_bc_decoded_swizzle(VkFormat image_format, VkFormat view_format,
+                         unsigned char swz[4])
+{
+   if (view_format == VK_FORMAT_BC1_RGB_UNORM_BLOCK ||
+       view_format == VK_FORMAT_BC1_RGB_SRGB_BLOCK) {
+      swz[0] = PIPE_SWIZZLE_X; swz[1] = PIPE_SWIZZLE_Y;
+      swz[2] = PIPE_SWIZZLE_Z; swz[3] = PIPE_SWIZZLE_1;
+      return true;
+   }
+   return false;
 }
 
 static inline unsigned
@@ -218,5 +326,17 @@ static inline bool
 panvk_sparse_block_is_valid(struct panvk_sparse_block_desc desc) { return desc.size_B > 0; }
 
 VkSparseImageFormatProperties panvk_get_sparse_image_fmt_props(VkImageType type, VkFormat format);
+
+static inline uint64_t
+panvk_image_plane_crc_header_addr(const struct panvk_image *image)
+{
+   const struct panvk_image_plane *img_plane = &image->planes[0];
+
+   if (!img_plane->image.props.crc || !img_plane->plane.base)
+      return 0;
+
+   return img_plane->plane.base +
+          img_plane->plane.layout.slices[0].crc.header_offset_B;
+}
 
 #endif

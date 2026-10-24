@@ -85,3 +85,4 @@ dEQP-VK.graphicsfuzz.spv-composites
 
 # Sometimes times out
 spec@egl_ext_surface_compression@create
+spec@arb_framebuffer_object@framebuffer-blit-oblong wide

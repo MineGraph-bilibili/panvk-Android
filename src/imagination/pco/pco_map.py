@@ -821,10 +821,10 @@ def group_map(op, hdr, enc_ops, srcs=[], iss=[], dests=[]):
       phase = OP_PHASE.enum.elems[_phase].cname
       io = IO.enum.elems[_io]
 
-      if not io.string.startswith('s'):
-         continue
+      val = int(src[2]) + 1
 
-      val = int(io.string[1:]) + 1
+      if io.string.startswith('s'):
+         assert val == (int(io.string[1:]) + 1)
 
       if is_self:
          if origin.type == 'dest':
@@ -2637,7 +2637,7 @@ group_map(O_FCEIL,
    ]),
    enc_ops=[
       ('0', O_FADD, ['ft0'], [SRC(0, [RM_FLR]), 'pco_fone']),
-      ('1', O_FADD, ['ft1'], [SRC(0, [RM_FLR]), 'pco_zero']),
+      ('1', O_FADD, ['ft1'], [SRC(0, [RM_FLR]), 'pco_nzero']),
       ('2_tst', O_TST, ['ftt', '_'], ['is1', 'is2'], [(OM_TST_OP_MAIN, 'equal'), (OM_TST_TYPE_MAIN, 'f32'), (OM_PHASE2END, True)]),
       ('2_mov', O_MOVC, [DEST(0), '_'], ['ftt', 'ft1', 'is4', '_', '_'])
    ],

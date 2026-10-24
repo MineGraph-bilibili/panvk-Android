@@ -110,7 +110,7 @@ static bool radeon_init_cs_context(struct radeon_cs_context *csc,
 {
    int i;
 
-   csc->fd = ws->fd;
+   csc->fd = ws->ioctl_fd;
 
    csc->chunks[0].chunk_id = RADEON_CHUNK_ID_IB;
    csc->chunks[0].length_dw = 0;

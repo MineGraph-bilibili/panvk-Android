@@ -31,6 +31,7 @@
 #include <stdint.h>
 
 #include "etnaviv_resource.h"
+#include "etnaviv_shader.h"
 #include "etnaviv_tiling.h"
 #include "etnaviv_yuv.h"
 #include "pipe/p_context.h"
@@ -91,6 +92,7 @@ struct etna_vertexbuf_state {
 struct etna_shader_state {
    void *bind_vs, *bind_fs;
    struct etna_shader_variant *vs, *fs;
+   struct etna_shader_key key;
 };
 
 enum etna_xfb_hw_state {
@@ -195,10 +197,13 @@ struct etna_context {
 
    /* compiled bindable state */
    unsigned sample_mask;
+   float sample_coverage;
+   bool sample_coverage_invert;
    struct pipe_blend_state *blend;
    unsigned num_fragment_samplers;
    uint32_t active_samplers;
    uint32_t prev_active_samplers;
+   unsigned prev_vs_sampler_base;
    struct pipe_sampler_state *sampler[PIPE_MAX_SAMPLERS];
    struct pipe_rasterizer_state *rasterizer;
    struct pipe_depth_stencil_alpha_state *zsa;
@@ -215,6 +220,7 @@ struct etna_context {
    unsigned num_fragment_sampler_views;
    uint32_t active_sampler_views;
    uint32_t dirty_sampler_views;
+   uint32_t dirty_samplers;
    struct pipe_sampler_view *sampler_view[PIPE_MAX_SAMPLERS];
    struct etna_constbuf_state constant_buffer[MESA_SHADER_STAGES];
    struct etna_vertexbuf_state vertex_buffer;
@@ -251,7 +257,7 @@ struct etna_context {
    bool is_noop;
 
    bool compute_only;
-   bool in_draw_vbo;
+   bool in_atomic_emit;
    bool in_transfer_blit;
 
    /* Set by etna_copy_resource/etna_copy_resource_box when the caller
@@ -303,5 +309,17 @@ etna_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
 
 bool
 etna_render_condition_check(struct pipe_context *pctx);
+
+#ifndef NDEBUG
+static inline void clear_atomic_emit_flag(struct etna_context **ctx_ptr) {
+   (*ctx_ptr)->in_atomic_emit = false;
+}
+
+#define ETNA_CONTEXT_ATOMIC_EMIT(_ctx) \
+   struct etna_context *_atomic_emit_cleanup __attribute__((cleanup(clear_atomic_emit_flag))) = (_ctx); \
+   (_ctx)->in_atomic_emit = true
+#else
+#define ETNA_CONTEXT_ATOMIC_EMIT(_ctx)
+#endif
 
 #endif

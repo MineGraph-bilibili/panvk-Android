@@ -25,6 +25,7 @@
 #define LP_SAMPLER_MATRIX
 
 #include "util/bitset.h"
+#include "gallivm/lp_bld.h"
 #include "util/u_atomic.h"
 #include "util/u_dynarray.h"
 #include "util/format/u_format.h"
@@ -34,7 +35,12 @@
 
 struct lp_function_cache {
    p_atomic_uint64_t latest_cache;
-   struct util_dynarray trash_caches;
+};
+
+struct lp_trash_entry {
+   uint64_t update_count;
+   void (*destroy)(void *ptr);
+   void *ptr;
 };
 
 enum lp_function_cache_type {
@@ -43,6 +49,9 @@ enum lp_function_cache_type {
    LP_FUNCTION_CACHE_SIZE,
    LP_FUNCTION_CACHE_COUNT,
 };
+
+struct llvmpipe_context;
+struct llvmpipe_screen;
 
 struct lp_sampler_matrix {
    struct lp_texture_functions **textures;
@@ -65,17 +74,30 @@ struct lp_sampler_matrix {
 
    simple_mtx_t lock;
 
-   struct llvmpipe_context *ctx;
+   struct llvmpipe_screen *screen;
 
    /* Use a separate LLVMContext since it is not thread safe but can be accessed by shaders. */
    lp_context_ref context;
 
    struct util_dynarray gallivms;
+
+   p_atomic_uint64_t update_count;
+
+   /* struct lp_trash_entry, in update_count order. */
+   struct util_dynarray trash;
 };
 
-void llvmpipe_init_sampler_matrix(struct llvmpipe_context *ctx);
+struct lp_texture_handle *llvmpipe_create_texture_handle(struct pipe_screen *pscreen, struct pipe_sampler_view *view, const struct pipe_sampler_state *sampler);
 
-void llvmpipe_sampler_matrix_destroy(struct llvmpipe_context *ctx);
+void llvmpipe_delete_texture_handle(struct pipe_screen *pscreen, struct lp_texture_handle *handle);
+
+struct lp_texture_handle *llvmpipe_create_image_handle(struct pipe_screen *pscreen, const struct pipe_image_view *view);
+
+void llvmpipe_delete_image_handle(struct pipe_screen *pscreen, struct lp_texture_handle *handle);
+
+void llvmpipe_init_sampler_matrix(struct llvmpipe_screen *screen);
+
+void llvmpipe_sampler_matrix_destroy(struct llvmpipe_screen *screen);
 
 void llvmpipe_register_shader(struct pipe_context *ctx, const struct pipe_shader_state *shader);
 

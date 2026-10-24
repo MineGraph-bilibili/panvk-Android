@@ -1,4 +1,5 @@
 # Copyright © 2026 Collabora, Ltd.
+# Copyright © 2026 Arm Ltd.
 # SPDX-License-Identifier: MIT
 
 dep_bitflags = dependency('bitflags',
@@ -46,6 +47,7 @@ _kraid_bindings_rs = rust.bindgen(
     '--allowlist-type', 'pan_.*',
     '--allowlist-function', 'pan_.*',
     '--allowlist-function', 'kraid_.*',
+    '--allowlist-function', 'val_.*',
     '--allowlist-var', 'BI_VA_LOD_MODE_.*',
     '--no-prepend-enum-name',
     '--with-derive-default',
@@ -113,8 +115,29 @@ libpanfrost_kraid = static_library(
   rust_args : [
     panfrost_rust_args,
     '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
-    # Disable dead code warnings for now
-    '-A', 'dead_code',
+    # Otherwise, rustc trips up on -pthread
+    '-Clink-arg=-Wno-unused-command-line-argument',
+  ],
+  dependencies : [
+    dep_bitflags,
+    dep_paste,
+    dep_rustc_hash,
+    idep_compiler_rs,
+  ],
+  link_with : [
+    _libkraid_bindings_rs,
+    _libkraid_proc_macros_rs,
+  ],
+)
+
+libpanfrost_kraid_rs = static_library(
+  'kraid_rs',
+  files('lib.rs'),
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'rust',
+  rust_args : [
+    panfrost_rust_args,
+    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
     # Otherwise, rustc trips up on -pthread
     '-Clink-arg=-Wno-unused-command-line-argument',
   ],
@@ -138,6 +161,14 @@ if with_tools.contains('panfrost')
       _libkraid_proc_rs,
     ],
     native : true,
+  )
+
+  executable(
+    'pan-dis',
+    files('tools/disassembler.rs'),
+    link_with : [
+      libpanfrost_kraid_rs,
+    ],
   )
 endif
 

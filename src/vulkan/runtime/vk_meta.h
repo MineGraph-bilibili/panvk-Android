@@ -381,14 +381,29 @@ VkDeviceAddress vk_meta_buffer_address(struct vk_device *device,
                                        VkBuffer buffer, uint64_t offset,
                                        uint64_t range);
 
+void vk_meta_copy_memory(struct vk_command_buffer *cmd,
+                         struct vk_meta_device *meta,
+                         const VkCopyDeviceMemoryInfoKHR *info);
+
 void vk_meta_copy_buffer(struct vk_command_buffer *cmd,
                          struct vk_meta_device *meta,
                          const VkCopyBufferInfo2 *info);
+
+void vk_meta_copy_image_to_memory(
+   struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+   const VkCopyDeviceMemoryImageInfoKHR *info,
+   const struct vk_meta_copy_image_properties *img_props);
 
 void vk_meta_copy_image_to_buffer(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    const VkCopyImageToBufferInfo2 *info,
    const struct vk_meta_copy_image_properties *img_props);
+
+void vk_meta_copy_memory_to_image(
+   struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+   const VkCopyDeviceMemoryImageInfoKHR *info,
+   const struct vk_meta_copy_image_properties *img_props,
+   VkPipelineBindPoint bind_point);
 
 void vk_meta_copy_buffer_to_image(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
@@ -408,9 +423,17 @@ void vk_meta_update_buffer(struct vk_command_buffer *cmd,
                            VkDeviceSize offset, VkDeviceSize size,
                            const void *data);
 
-void vk_meta_fill_buffer(struct vk_command_buffer *cmd,
-                         struct vk_meta_device *meta, VkBuffer buffer,
-                         VkDeviceSize offset, VkDeviceSize size, uint32_t data);
+void vk_meta_update_memory(struct vk_command_buffer *cmd,
+                           struct vk_meta_device *meta,
+                           const VkDeviceAddressRangeKHR* dst_range,
+                           const VkAddressCommandFlagsKHR dstFlags,
+                           VkDeviceSize dataSize, const void *data);
+
+void vk_meta_fill_memory(struct vk_command_buffer *cmd,
+                         struct vk_meta_device *meta,
+                         const VkDeviceAddressRangeKHR* dst_range,
+                         const VkAddressCommandFlagsKHR dstFlags,
+                         const uint32_t data);
 
 static inline enum glsl_sampler_dim
 vk_image_view_type_to_sampler_dim(VkImageViewType view_type)

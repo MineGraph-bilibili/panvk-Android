@@ -337,25 +337,65 @@ nv30_screen_is_format_supported(struct pipe_screen *pscreen,
    return (nv30_format_info(pscreen, format)->bindings & bindings) == bindings;
 }
 
-static const nir_shader_compiler_options nv30_base_compiler_options = {
-   .float_mul_add32 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,
-   .lower_bitops = true,
-   .lower_extract_byte = true,
-   .lower_extract_word = true,
-   .lower_fdiv = true,
+// todo:
+// reordering for better results?
+// lower_ftrunc, regression: dEQP-GLES2.functional.shaders.conversions.matrix_combine.float_ivec3_bvec3_vec4_ivec2_float_vec2_to_mat4_fragment
+// lower cmp (deeper changes needed),
+// lower DP2 (const or uninitialized tmp could be used for 0 to convert into dp3/dp4),
+// lower RSQ on nv40 (currently it's using scale that it not implemented outside),
+// cmp could be expressed as 2 instructions instead of three (moving conditionally first variable in spot of second or SLT + LRP on nv30)
+// fragment shader can use byte/word,
+// hardware allows for long shaders, figure out unrolling value,
+// hardware has opcodes that could be generated like lit/dst,
+// merging add/mov/mul into mad,
+// after isolating gallivm prepare separate config for it (for now speed of gpu is more important, as long as it works)
+
+#define NIR_OPTIONS_COMMONS \
+   .float_mul_add32 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,\
+   .lower_bitops = true,\
+   .lower_extract_byte = true,\
+   .lower_extract_word = true,\
+   .lower_fdiv = true,\
+   .lower_insert_byte = true,\
+   .lower_insert_word = true,\
+   .lower_fdph = true,\
+   .lower_flrp64 = true,\
+   .lower_fmod = true, \
+   .lower_fceil = true, \
+   .lower_uniforms_to_ubo = true,\
+   .force_indirect_unrolling = nir_var_all,\
+   .force_indirect_unrolling_sampler = true,\
+   .max_unroll_iterations = 32,\
+   .no_integers = true, \
+   .fdot_replicates = true
+
+// VERTEX
+
+static const nir_shader_compiler_options nv30_vs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
    .lower_fsat = true,
-   .lower_insert_byte = true,
-   .lower_insert_word = true,
-   .lower_fdph = true,
+   .lower_fpow = true,
    .lower_flrp32 = true,
-   .lower_flrp64 = true,
-   .lower_fmod = true,
-   .lower_fpow = true, /* In hardware as of nv40 FS */
-   .lower_uniforms_to_ubo = true,
-   .force_indirect_unrolling = nir_var_all,
-   .force_indirect_unrolling_sampler = true,
-   .max_unroll_iterations = 32,
-   .no_integers = true,
+};
+
+static const nir_shader_compiler_options nv40_vs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
+   .lower_fpow = true,
+   .lower_flrp32 = true,
+};
+
+// FRAGMENT
+
+static const nir_shader_compiler_options nv30_fs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
+   .lower_fsign = true,
+};
+
+static const nir_shader_compiler_options nv40_fs_compiler_options = {
+   NIR_OPTIONS_COMMONS,
+   .lower_fpow = true,
+   .lower_flrp32 = true,
+   .lower_fsign = true,
 };
 
 static void
@@ -490,8 +530,8 @@ nv30_screen_create(struct nouveau_device *dev)
    pscreen->context_create = nv30_context_create;
    pscreen->is_format_supported = nv30_screen_is_format_supported;
 
-   pscreen->nir_options[MESA_SHADER_VERTEX] = &nv30_base_compiler_options;
-   pscreen->nir_options[MESA_SHADER_FRAGMENT] = &screen->fs_compiler_options;
+   pscreen->nir_options[MESA_SHADER_VERTEX] = oclass < NV40_3D_CLASS ? &nv30_vs_compiler_options : &nv40_vs_compiler_options;
+   pscreen->nir_options[MESA_SHADER_FRAGMENT] = oclass < NV40_3D_CLASS ? &nv30_fs_compiler_options : &nv40_fs_compiler_options;
 
    nv30_resource_screen_init(pscreen);
    nouveau_screen_init_vdec(&screen->base);
@@ -509,11 +549,6 @@ nv30_screen_create(struct nouveau_device *dev)
       screen->base.vidmem_bindings |= PIPE_BIND_INDEX_BUFFER;
       screen->base.sysmem_bindings |= PIPE_BIND_INDEX_BUFFER;
    }
-
-   screen->fs_compiler_options = nv30_base_compiler_options;
-   screen->fs_compiler_options.lower_fsat = false;
-   if (oclass >= NV40_3D_CLASS)
-      screen->fs_compiler_options.lower_fpow = false;
 
    fifo = screen->base.channel->data;
    push = screen->base.pushbuf;

@@ -101,7 +101,7 @@ pvr_submit_info_stream_init(struct pvr_compute_ctx *ctx,
 
    if (PVR_HAS_FEATURE(dev_info, compute_morton_capable)) {
       pvr_csb_pack (stream_ptr, CR_CDM_ITEM, value) {
-         value.mode = 0;
+         value.mode = ROGUE_CR_CDM_ITEM_MODE_FORCE_LINEAR;
       }
       stream_ptr += pvr_cmd_length(CR_CDM_ITEM);
    }

@@ -49,6 +49,9 @@ struct r300_fragment_shader {
     /* Parent class */
     struct pipe_shader_state state;
 
+    /* Samplers used by 2D texture instructions. */
+    unsigned samplers_2d;
+
     /* Currently-bound fragment shader. */
     struct r300_fragment_shader_code* shader;
 

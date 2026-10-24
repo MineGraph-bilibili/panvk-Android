@@ -293,7 +293,8 @@ brw_get_lowered_simd_width(const brw_shader *shader, const brw_inst *inst)
    case SHADER_OPCODE_EXP2:
    case SHADER_OPCODE_LOG2:
    case SHADER_OPCODE_SIN:
-   case SHADER_OPCODE_COS: {
+   case SHADER_OPCODE_COS:
+   case SHADER_OPCODE_TANH: {
       /* Xe2+: BSpec 56797
        *
        * Math operation rules when half-floats are used on both source and

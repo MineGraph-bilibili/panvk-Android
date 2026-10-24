@@ -416,20 +416,16 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    case nir_intrinsic_load_num_vertices_per_primitive_amd:
       replacement = get_num_vertices_per_prim(b, s);
       break;
-   case nir_intrinsic_load_cull_ccw_amd:
-      /* radeonsi embed cw/ccw info into front/back face enabled */
-      replacement = nir_imm_false(b);
-      break;
    case nir_intrinsic_load_cull_any_enabled_amd:
       /* If culling is enabled at compile time, it's always enabled at runtime. */
       assert(si_shader_culling_enabled(shader));
       replacement = nir_imm_true(b);
       break;
-   case nir_intrinsic_load_cull_back_face_enabled_amd:
-      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_BACK));
+   case nir_intrinsic_load_cull_face_positive_determinant_enabled_amd:
+      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_POSITIVE_DETERMINANT));
       break;
-   case nir_intrinsic_load_cull_front_face_enabled_amd:
-      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_FRONT));
+   case nir_intrinsic_load_cull_face_negative_determinant_enabled_amd:
+      replacement = nir_i2b(b, GET_FIELD_NIR(GS_STATE_CULL_FACE_NEGATIVE_DETERMINANT));
       break;
    case nir_intrinsic_load_cull_small_triangle_precision_amd:
       replacement = get_small_prim_precision(b, s, false);
@@ -593,9 +589,16 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    case nir_intrinsic_load_point_coord_maybe_flipped: {
       /* Load point coordinates (x, y) which are written by the hw after the interpolated inputs */
       nir_def *baryc = intrin->src[0].ssa;
-      replacement = nir_load_interpolated_input(b, 2, 32, baryc, nir_imm_int(b, 0),
-                                                .component = 2,
-                                                .io_semantics.location = VARYING_SLOT_PARAM_GEN_AMD);
+      unsigned base = ac_nir_get_io_driver_location(b->shader, VARYING_SLOT_PARAM_GEN_AMD, true);
+      nir_def *comp[2];
+
+      for (unsigned i = 0; i < 2; i++) {
+         comp[i] = nir_load_interpolated_input_amd(b, 32, baryc,
+                                                   ac_nir_load_arg(b, &args->ac, args->ac.prim_mask),
+                                                   .ps_input_info_amd.slot = base,
+                                                   .ps_input_info_amd.component = 2 + i);
+      }
+      replacement = nir_vec(b, comp, 2);
       break;
    }
    case nir_intrinsic_load_poly_line_smooth_enabled:

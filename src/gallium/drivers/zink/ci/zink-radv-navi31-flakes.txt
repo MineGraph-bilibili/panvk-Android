@@ -55,6 +55,7 @@ spec@!opengl 1.1@draw-pixels
 spec@!opengl 1.1@draw-sync
 spec@!opengl 1.1@getteximage-formats
 spec@!opengl 2.0@tex3d-npot
+spec@arb_timer_query@timestamp-get
 
 asan-KHR-GL46.packed_pixels.pbo_rectangle.*
 asan-KHR-GL46.packed_pixels.rectangle.*

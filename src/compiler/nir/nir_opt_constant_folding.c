@@ -129,7 +129,7 @@ nir_try_constant_fold_alu(nir_builder *b, nir_alu_instr *alu)
       if (should_fold_bcsel(alu) && is_bcsel_with_two_constants(bcsel_alu)) {
          /* If there is multiple bcsel sources, they must use the same condition. */
          if (bcsel && bcsel_alu->src[0].src.ssa != bcsel)
-            return false;
+            return NULL;
 
          bcsel = bcsel_alu->src[0].src.ssa;
 

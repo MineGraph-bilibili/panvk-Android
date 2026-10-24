@@ -13,52 +13,6 @@
 #include <inttypes.h>
 #include <stdio.h>
 
-#ifdef _WIN32
-/* The CRT narrow argv is decoded with the ANSI code page, which mangles
- * non-ASCII paths (e.g. UTF-8 build directories) into garbage, breaking
- * every -I path. Rebuild the argv from the true wide command line as
- * UTF-8, which is what LLVM/clang expect. */
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <shellapi.h>
-
-static char **
-utf8_argv(int *argc_ptr)
-{
-   int argc = 0;
-   LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
-   if (wargv == NULL)
-      return NULL;
-
-   char **new_argv = (char **)malloc((argc + 1) * sizeof(char *));
-   if (new_argv == NULL) {
-      LocalFree(wargv);
-      return NULL;
-   }
-
-   for (int i = 0; i < argc; i++) {
-      int size = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0,
-                                     NULL, NULL);
-      new_argv[i] = (char *)malloc(size);
-      if (new_argv[i] == NULL) {
-         for (int j = 0; j < i; j++)
-            free(new_argv[j]);
-         free(new_argv);
-         LocalFree(wargv);
-         return NULL;
-      }
-      WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, new_argv[i], size,
-                          NULL, NULL);
-   }
-   new_argv[argc] = NULL;
-
-   LocalFree(wargv);
-   *argc_ptr = argc;
-   return new_argv;
-}
-#endif
-
 static void
 msg_callback(void *priv, const char *msg)
 {
@@ -80,8 +34,8 @@ print_usage(char *exec_name, FILE *f)
       exec_name);
 }
 
-static int
-mesa_clc_main(int argc, char **argv)
+int
+main(int argc, char **argv)
 {
    int address_bits = 64;
    struct option long_options[] = {
@@ -176,7 +130,12 @@ mesa_clc_main(int argc, char **argv)
          return 1;
       }
 
-      fread(map, 1, len, fp);
+      if (fread(map, 1, len, fp) != len) {
+         fprintf(stderr, "Failed to read map buffer\n");
+         ralloc_free(mem_ctx);
+         fclose(fp);
+         return 1;
+      }
       map[len] = 0;
       fclose(fp);
 
@@ -226,10 +185,7 @@ mesa_clc_main(int argc, char **argv)
       return 1;
    }
 
-   /* SPIR-V is a binary format. On Windows the default text mode would turn
-    * every 0x0a byte into 0x0d 0x0a, producing a corrupt, non-word-aligned
-    * file that vtn_bindgen2 then rejects. */
-   FILE *fp = fopen(outfile, "wb");
+   FILE *fp = fopen(outfile, "w");
    fwrite(final_spirv.data, final_spirv.size, 1, fp);
    fclose(fp);
 
@@ -252,29 +208,3 @@ mesa_clc_main(int argc, char **argv)
 
    return 0;
 }
-
-#ifdef _WIN32
-int
-main(int argc, char **argv)
-{
-   int ret;
-   char **utf8_args = utf8_argv(&argc);
-
-   if (utf8_args != NULL) {
-      ret = mesa_clc_main(argc, utf8_args);
-      for (char **a = utf8_args; *a != NULL; a++)
-         free(*a);
-      free(utf8_args);
-   } else {
-      ret = mesa_clc_main(argc, argv);
-   }
-
-   return ret;
-}
-#else
-int
-main(int argc, char **argv)
-{
-   return mesa_clc_main(argc, argv);
-}
-#endif

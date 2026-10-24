@@ -30,13 +30,47 @@
 extern DWORD
 CalculateQualityFromQP( DWORD QP );
 
+// utility to convert from pipe_h2645_enc_picture_type to string description
+static const char *
+ConvertPipeH2645FrameTypeToString( pipe_h2645_enc_picture_type picType )
+{
+   switch( picType )
+   {
+      case PIPE_H2645_ENC_PICTURE_TYPE_P:
+      {
+         return "H264_P_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_B:
+      {
+         return "H264_B_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_I:
+      {
+         return "H264_I_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_IDR:
+      {
+         return "H264_IDR_FRAME";
+      }
+      break;
+      default:
+      {
+         UNREACHABLE( "Unsupported pipe_h2645_enc_picture_type" );
+      }
+      break;
+   }
+}
+
 // utility function to compute the cropping rectangle given texture and output dimensions
 static void
 ComputeCroppingRect( const UINT32 textureWidth,
                      const UINT32 textureHeight,
                      const UINT uiOutputWidth,
                      const UINT uiOutputHeight,
-                     const enum pipe_video_profile outputPipeProfile,
+                     const eAVEncH264VProfile avcProfile,
                      BOOL &bFrameCroppingFlag,
                      UINT32 &uiFrameCropRightOffset,
                      UINT32 &uiFrameCropBottomOffset )
@@ -46,7 +80,7 @@ ComputeCroppingRect( const UINT32 textureWidth,
 
    if( iCropRight || iCropBottom )
    {
-      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertProfileToFormat( outputPipeProfile ) );
+      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertAVEncVProfileToPipeFormat( avcProfile ) );
       UINT32 cropUnitX = 1;
       UINT32 cropUnitY = 1;
       switch( chromaFormatIdc )
@@ -740,7 +774,7 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
                         alignedHeight,
                         m_uiOutputWidth,
                         m_uiOutputHeight,
-                        m_outputPipeProfile,
+                        m_uiProfile,
                         m_bFrameCroppingFlag,
                         m_uiFrameCropRightOffset,
                         m_uiFrameCropBottomOffset );
@@ -1200,7 +1234,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
          m_pPipeVideoCodec,
          static_cast<unsigned>( std::ceil( textureWidth / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
          static_cast<unsigned>( std::ceil( textureHeight / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
-         ConvertProfileToFormat( m_pPipeVideoCodec->profile ),
+         ConvertAVEncVProfileToPipeFormat( m_uiProfile),
          m_pPipeVideoCodec->max_references + 1 /*curr pic*/ +
             ( m_bLowLatency ? 0 : MFT_INPUT_QUEUE_DEPTH ), /*MFT process input queue depth for delayed in flight recon pic release*/
          hr );
@@ -1209,6 +1243,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
 
    m_pGOPTracker = new reference_frames_tracker_h264( this,
                                                       m_pPipeVideoCodec,
+                                                      m_uiProfile,
                                                       textureWidth,
                                                       textureHeight,
                                                       m_uiGopSize,

@@ -1,11 +1,3 @@
-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component24,Fail
-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_short_depth_component16,Fail
-KHR-GLES2.core.internalformat.texture2d.rgb_float_rgb32f,Fail
-KHR-GLES2.core.internalformat.texture2d.rgb_float_rgb32f_linear,Fail
-KHR-GLES2.core.internalformat.texture2d.rgba_float_rgba32f,Fail
-KHR-GLES2.core.internalformat.texture2d.rgba_float_rgba32f_linear,Fail
-
 # Missing the red triangle
 dEQP-GLES2.functional.clip_control.depth_mode_zero_to_one,Fail
 
@@ -19,9 +11,6 @@ dEQP-GLES2.functional.clipping.point.wide_point_clip_viewport_corner,Fail
 # Bad slope of clipped triangles
 dEQP-GLES2.functional.clipping.triangle_vertex.clip_two.clip_neg_x_pos_z_and_neg_x_neg_y_neg_z,Fail
 dEQP-GLES2.functional.clipping.triangle_vertex.clip_two.clip_neg_y_neg_z_and_neg_x_neg_y_pos_z,Fail
-
-# RGB/RGBA half float should be incomplete, tested as complete.
-dEQP-GLES2.functional.fbo.completeness.renderable.texture.color0.rgb_half_float_oes,Fail
 
 dEQP-GLES2.functional.shaders.texture_functions.vertex.texturecubelod,Fail
 

@@ -30,6 +30,7 @@
  */
 
 #include "util/os_misc.h"
+#include "util/u_string.h"
 
 #include "util/glheader.h"
 
@@ -173,13 +174,15 @@ _mesa_one_time_init_extension_overrides(const char *override)
       return;
    }
 
-   /* Copy 'override' because strtok() is destructive. */
+   /* Copy 'override' because strtok_r() is destructive. */
    env = strdup(override);
 
    if (env == NULL)
       return;
 
-   for (ext = strtok(env, " "); ext != NULL; ext = strtok(NULL, " ")) {
+   char *saveptr;
+   for (ext = strtok_r(env, " ", &saveptr); ext != NULL;
+        ext = strtok_r(NULL, " ", &saveptr)) {
       int enable;
       int i;
       bool recognized;

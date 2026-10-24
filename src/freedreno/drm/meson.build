@@ -44,6 +44,7 @@ libfreedreno_drm_msm_files = files(
   'msm/msm_priv.h',
   'msm/msm_ringbuffer.c',
   'msm/msm_ringbuffer_sp.c',
+  'msm/msm_common.h',
 )
 libfreedreno_drm_files += libfreedreno_drm_msm_files
 

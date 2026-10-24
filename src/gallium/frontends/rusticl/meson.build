@@ -321,6 +321,7 @@ rusticl_mesa_bindings = rust.bindgen(
     '--allowlist-var',          'PIPE_.*',
     '--allowlist-type',         'pipe_endian',
     '--bitfield-enum',          'pipe_map_flags',
+    '--bitfield-enum',          'pipe_query_flags',
     '--allowlist-type',         'pipe_query_type',
     '--constified-enum-module', 'pipe_query_type',
     '--allowlist-type',         'pipe_resource_usage',

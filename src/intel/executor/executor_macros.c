@@ -62,6 +62,18 @@ parse_int64(slice s, int64_t *value)
 }
 
 static unsigned
+reserved_grf_start(const executor_run *run)
+{
+   return run->hw_regs - 4;
+}
+
+static unsigned
+reserved_grf_end(const executor_run *run)
+{
+   return run->hw_regs;
+}
+
+static unsigned
 slots_per_grf(const executor_run *run)
 {
    executor_context *ec = run->ec;
@@ -89,7 +101,7 @@ parse_macro_grf(const executor_run *run, slice reg)
                SLICE_FMT(reg));
 
       const unsigned digit = reg.data[i] - '0';
-      if (nr > (EXECUTOR_GRF_COUNT - 1 - digit) / 10)
+      if (nr > (run->hw_regs - 1 - digit) / 10)
          failf("operand %.*s must be a non-reserved valid register",
                SLICE_FMT(reg));
 
@@ -97,12 +109,13 @@ parse_macro_grf(const executor_run *run, slice reg)
    }
 
    const unsigned operand_grfs = grfs_per_macro_operand(run);
-   if (nr < 2 || operand_grfs == 0 || nr + operand_grfs > EXECUTOR_GRF_COUNT)
+   if (nr < 2 || operand_grfs == 0 ||
+       nr + operand_grfs > run->hw_regs)
       failf("operand %.*s must be a non-reserved valid register",
             SLICE_FMT(reg));
 
-   if (MAX2(nr, EXECUTOR_RESERVED_GRF_START) <
-       MIN2(nr + operand_grfs, EXECUTOR_RESERVED_GRF_END))
+   if (MAX2(nr, reserved_grf_start(run)) <
+       MIN2(nr + operand_grfs, reserved_grf_end(run)))
       failf("operand %.*s must be a non-reserved valid register",
             SLICE_FMT(reg));
 
@@ -245,20 +258,23 @@ static void
 executor_macro_eot(executor_run *run, char **src, slice line)
 {
    executor_context *ec = run->ec;
+   const unsigned rsvd_base = reserved_grf_start(run);
 
    switch (ec->devinfo->verx10) {
    case 90:
    case 110: {
-      ralloc_strcat(src,
-         "(W) mov (8) r127 r0\n"
-         "(W) sends.ts (1) null r127:1 null:0 0x00000000 0x82000010 {EOT}\n");
+      ralloc_asprintf_append(src,
+         "(W) mov (8) r%u r0\n"
+         "(W) sends.ts (1) null r%u:1 null:0 0x00000000 0x82000010 {EOT}\n",
+         rsvd_base, rsvd_base);
       break;
    }
 
    case 120: {
-      ralloc_strcat(src,
-         "(W) mov (8) r127 r0\n"
-         "(W) send.ts (1) null r127:1 null:0 0x00000000 0x02000000 {@1,EOT}\n");
+      ralloc_asprintf_append(src,
+         "(W) mov (8) r%u r0\n"
+         "(W) send.ts (1) null r%u:1 null:0 0x00000000 0x02000000 {@1,EOT}\n",
+         rsvd_base, rsvd_base);
       break;
    }
 
@@ -268,9 +284,9 @@ executor_macro_eot(executor_run *run, char **src, slice line)
    case 350: {
       const unsigned slots = ec->devinfo->verx10 >= 200 ? 16 : 8;
       ralloc_asprintf_append(src,
-         "(W) mov (%u) r127 r0\n"
-         "(W) send.gtwy (1) null r127:1 null:0 0x00000000 0x02000000 {A@1,EOT}\n",
-         slots);
+         "(W) mov (%u) r%u r0\n"
+         "(W) send.gtwy (1) null r%u:1 null:0 0x00000000 0x02000000 {A@1,EOT}\n",
+         slots, rsvd_base, rsvd_base);
       break;
    }
 
@@ -292,6 +308,8 @@ executor_macro_barrier(executor_run *run,
    if (run->hw_threads <= 1)
       return;
 
+   const unsigned rsvd_base = reserved_grf_start(run);
+
    switch (ec->devinfo->verx10) {
    case 90:
    case 110: {
@@ -299,63 +317,70 @@ executor_macro_barrier(executor_run *run,
          ec->devinfo->ver == 9 ? 0x8f000000u : 0x7f000000u;
 
       if (run->slm_size != 0) {
-         ralloc_strcat(src,
-            "(W) send.hdc0 (1) r126:1 r0:1 0x00000000 0x0211e0fe\n"
-            "(W) mov (1) r126 r126<0;1,0>:ud\n");
+         ralloc_asprintf_append(src,
+            "(W) send.hdc0 (1) r%u:1 r0:1 0x00000000 0x0211e0fe\n"
+            "(W) mov (1) r%u r%u<0;1,0>:ud\n",
+            rsvd_base, rsvd_base, rsvd_base);
       }
 
       ralloc_asprintf_append(src,
-         "(W) mov (8) r127 0x0\n"
-         "(W) and (1) r127.2 r0.2<0>:ud 0x%08x:ud\n"
-         "(W) sends.gtwy (1) null r127:1 null:0 0x00000000 0x02000004\n"
+         "(W) mov (8) r%u 0x0\n"
+         "(W) and (1) r%u.2 r0.2<0>:ud 0x%08x:ud\n"
+         "(W) sends.gtwy (1) null r%u:1 null:0 0x00000000 0x02000004\n"
          "(W) wait (1) n0\n",
-         barrier_id_mask);
+         rsvd_base, rsvd_base, barrier_id_mask, rsvd_base);
       break;
    }
 
    case 120:
       if (run->slm_size != 0) {
-         ralloc_strcat(src,
-            "(W) send.hdc0 (1) r126:1 r0:1 0x00000000 0x0211e0fe {@1,$1}\n");
+         ralloc_asprintf_append(src,
+            "(W) send.hdc0 (1) r%u:1 r0:1 0x00000000 0x0211e0fe {@1,$1}\n",
+            rsvd_base);
          executor_emit_syncnop(ec, src);
       }
 
-      ralloc_strcat(src,
-         "(W) mov (8) r127 0x0 {@1}\n"
-         "(W) and (1) r127.2 r0.2<0>:ud 0x7f000000:ud {@1}\n"
-         "(W) send.gtwy (1) null r127:1 null:0 0x00000000 0x02000004 {@1,$1}\n"
-         "(W) sync.bar (1) null\n");
+      ralloc_asprintf_append(src,
+         "(W) mov (8) r%u 0x0 {@1}\n"
+         "(W) and (1) r%u.2 r0.2<0>:ud 0x7f000000:ud {@1}\n"
+         "(W) send.gtwy (1) null r%u:1 null:0 0x00000000 0x02000004 {@1,$1}\n"
+         "(W) sync.bar (1) null\n",
+         rsvd_base, rsvd_base, rsvd_base);
       break;
 
    case 125:
       if (run->slm_size != 0) {
-         ralloc_strcat(src,
-            "(W) fence.slm.threadgroup.none (1) r126:1 r0:1 {A@1,$1}\n");
+         ralloc_asprintf_append(src,
+            "(W) fence.slm.threadgroup.none (1) r%u:1 r0:1 {A@1,$1}\n",
+            rsvd_base);
          executor_emit_syncnop(ec, src);
       }
 
-      ralloc_strcat(src,
-         "(W) mov (8) r127 0x0 {A@1}\n"
-         "(W) mov (2) r127.10:ub r0.11<0;1,0>:ub {A@1}\n"
-         "(W) send.gtwy (1) null r127:1 null:0 0x00000000 0x02000004 {A@1,$1}\n"
-         "(W) sync.bar (1) null\n");
+      ralloc_asprintf_append(src,
+         "(W) mov (8) r%u 0x0 {A@1}\n"
+         "(W) mov (2) r%u.10:ub r0.11<0;1,0>:ub {A@1}\n"
+         "(W) send.gtwy (1) null r%u:1 null:0 0x00000000 0x02000004 {A@1,$1}\n"
+         "(W) sync.bar (1) null\n",
+         rsvd_base, rsvd_base, rsvd_base);
       break;
 
    case 200:
    case 300:
    case 350:
       if (run->slm_size != 0) {
-         ralloc_strcat(src,
-            "(W) fence.slm.threadgroup.none (1) r126:1 r0:1 {A@1,$1}\n");
+         ralloc_asprintf_append(src,
+            "(W) fence.slm.threadgroup.none (1) r%u:1 r0:1 {A@1,$1}\n",
+            rsvd_base);
          executor_emit_syncnop(ec, src);
       }
 
-      ralloc_strcat(src,
-         "(W) mov (16) r127 0x0 {A@1}\n"
-         "(W) mov (2) r127.10:ub r0.11<0;1,0>:ub {A@1}\n"
-         "(W) or (1) r127.2 r127.2<0> 0x100 {A@1}\n"
-         "(W) send.gtwy (1) null r127:1 null:0 0x00000000 0x02000004 {A@1,$1}\n"
-         "(W) sync.bar (1) null\n");
+      ralloc_asprintf_append(src,
+         "(W) mov (16) r%u 0x0 {A@1}\n"
+         "(W) mov (2) r%u.10:ub r0.11<0;1,0>:ub {A@1}\n"
+         "(W) or (1) r%u.2 r%u.2<0> 0x100 {A@1}\n"
+         "(W) send.gtwy (1) null r%u:1 null:0 0x00000000 0x02000004 {A@1,$1}\n"
+         "(W) sync.bar (1) null\n",
+         rsvd_base, rsvd_base, rsvd_base, rsvd_base, rsvd_base);
       break;
 
    default:
@@ -369,14 +394,17 @@ emit_local_id(executor_run *run, char **src, unsigned nr)
    const unsigned slots = slots_per_grf(run);
    const unsigned operand_grfs = grfs_per_macro_operand(run);
    const char *swsb = executor_macro_swsb(run);
+   const unsigned rsvd_base = reserved_grf_start(run);
 
-   ralloc_asprintf_append(src, "(W) mov (8) r127:uw 0x76543210:v {%s}\n", swsb);
+   ralloc_asprintf_append(src, "(W) mov (8) r%u:uw 0x76543210:v {%s}\n",
+                          rsvd_base, swsb);
    if (slots > 8)
-      ralloc_asprintf_append(src, "(W) add (8) r127.8:uw r127:uw 8:uw {%s}\n", swsb);
+      ralloc_asprintf_append(src, "(W) add (8) r%u.8:uw r%u:uw 8:uw {%s}\n",
+                             rsvd_base, rsvd_base, swsb);
 
    for (unsigned i = 0; i < operand_grfs; i++) {
-      ralloc_asprintf_append(src, "(W) mov (%u) r%u r127:uw {%s}\n",
-                             slots, nr + i, swsb);
+      ralloc_asprintf_append(src, "(W) mov (%u) r%u r%u:uw {%s}\n",
+                             slots, nr + i, rsvd_base, swsb);
       if (i > 0)
          ralloc_asprintf_append(src, "(W) add (%u) r%u r%u 0x%x:ud {%s}\n",
                                 slots, nr + i, nr + i, i * slots, swsb);
@@ -387,13 +415,13 @@ emit_local_id(executor_run *run, char **src, unsigned nr)
 
    const unsigned shift = run->simd == 32 ? 5 : run->simd == 16 ? 4 : 3;
    ralloc_asprintf_append(src,
-      "(W) and (8) r126 %s 0xff:ud {%s}\n"
-      "(W) shl (8) r126 r126 %u:ud {%s}\n",
-      hw_thread_id_reg(run), swsb, shift, swsb);
+      "(W) and (8) r%u %s 0xff:ud {%s}\n"
+      "(W) shl (8) r%u r%u %u:ud {%s}\n",
+      rsvd_base, hw_thread_id_reg(run), swsb, rsvd_base, rsvd_base, shift, swsb);
 
    for (unsigned i = 0; i < operand_grfs; i++)
-      ralloc_asprintf_append(src, "(W) add (%u) r%u r%u r126.0<0>:ud {%s}\n",
-                             slots, nr + i, nr + i, swsb);
+      ralloc_asprintf_append(src, "(W) add (%u) r%u r%u r%u.0<0>:ud {%s}\n",
+                             slots, nr + i, nr + i, rsvd_base, swsb);
 }
 
 static void
@@ -446,13 +474,14 @@ executor_macro_globalid(executor_run *run,
    const unsigned operand_grfs = grfs_per_macro_operand(run);
    const char *swsb = executor_macro_swsb(run);
    const uint32_t group_size = run->hw_threads * run->simd;
+   const unsigned rsvd_base = reserved_grf_start(run);
 
-   ralloc_asprintf_append(src, "(W) mul (8) r126 r0.1<0>:ud 0x%x:ud {%s}\n",
-                          group_size, swsb);
+   ralloc_asprintf_append(src, "(W) mul (8) r%u r0.1<0>:ud 0x%x:ud {%s}\n",
+                          rsvd_base, group_size, swsb);
 
    for (unsigned i = 0; i < operand_grfs; i++)
-      ralloc_asprintf_append(src, "(W) add (%u) r%u r%u r126.0<0>:ud {%s}\n",
-                             slots, nr + i, nr + i, swsb);
+      ralloc_asprintf_append(src, "(W) add (%u) r%u r%u r%u.0<0>:ud {%s}\n",
+                             slots, nr + i, nr + i, rsvd_base, swsb);
 }
 
 static void
@@ -617,16 +646,17 @@ executor_macro_addr(executor_run *run, char **src, slice args)
                                       offset_slice, offset_nr);
 
    /* Broadcast the uniform buffer base address into r127.0 once. */
-   ralloc_asprintf_append(src, "mov (8) r127 0x%08x {%s}\n",
-                          (uint32_t)base_addr, swsb);
+   const unsigned rsvd_base = reserved_grf_start(run);
+   ralloc_asprintf_append(src, "mov (8) r%u 0x%08x {%s}\n",
+                          rsvd_base, (uint32_t)base_addr, swsb);
 
    /* addr[lane] = base + index[lane] * 4, one GRF at a time. */
    for (unsigned i = 0; i < operand_grfs; i++)
       ralloc_asprintf_append(src,
          "mul (%u) r%u r%u 0x4:uw {%s}\n"
-         "add (%u) r%u r%u r127.0<0>:ud {%s}\n",
+         "add (%u) r%u r%u r%u.0<0>:ud {%s}\n",
          exec_size, dst_nr + i, offset_nr + i, swsb,
-         exec_size, dst_nr + i, dst_nr + i, swsb);
+         exec_size, dst_nr + i, dst_nr + i, rsvd_base, swsb);
 }
 
 static slice

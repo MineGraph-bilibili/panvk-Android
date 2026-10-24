@@ -804,6 +804,9 @@ llvmpipe_destroy_screen(struct pipe_screen *_screen)
     */
    llvmpipe_screen_destroy_setup_cache(screen);
 
+   if (screen->late_init_done)
+      llvmpipe_sampler_matrix_destroy(screen);
+
    lp_jit_screen_cleanup(screen);
 
    lp_context_destroy(&screen->llvm_context);
@@ -1001,6 +1004,9 @@ llvmpipe_screen_late_init(struct llvmpipe_screen *screen)
    lp_build_init(); /* get lp_native_vector_width initialised */
 
    lp_disk_cache_create(screen);
+
+   llvmpipe_init_sampler_matrix(screen);
+
    screen->late_init_done = true;
 out:
    mtx_unlock(&screen->late_mutex);

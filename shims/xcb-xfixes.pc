@@ -1,5 +1,0 @@
-Name: xcb-xfixes
-Description: xcb-xfixes
-Version: 1.15
-Libs: -lxcb-xfixes
-Cflags:

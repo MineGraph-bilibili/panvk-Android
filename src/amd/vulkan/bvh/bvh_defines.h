@@ -45,6 +45,7 @@
 #include <vulkan/vulkan.h>
 typedef uint16_t float16_t;
 typedef struct radv_aabb16 radv_aabb16;
+typedef struct radv_accel_struct_header radv_accel_struct_header;
 #endif
 
 struct radv_accel_struct_serialization_header {
@@ -61,32 +62,6 @@ struct radv_accel_struct_serialization_header {
 struct radv_accel_struct_geometry_info {
    uint32_t primitive_count;
    uint32_t flags;
-   uint32_t type;
-};
-
-struct radv_accel_struct_header {
-   uint32_t bvh_offset;
-   /* Copy of the root node's box flags for quicker access (no indirection through bvh_offset) */
-   uint32_t root_flags;
-   vk_aabb aabb;
-
-   /* GFX12 */
-   uint32_t update_dispatch_size[3];
-
-   /* Everything after this gets either updated/copied from the CPU or written by header.comp. */
-   uint64_t compacted_size;
-   uint64_t serialization_size;
-   uint32_t copy_dispatch_size[3];
-   uint64_t size;
-
-   /* Everything after this gets updated/copied from the CPU. */
-   uint32_t geometry_type;
-   uint32_t geometry_count;
-   uint64_t leaf_nodes_offset;
-   uint64_t primitive_count;
-   uint64_t instance_count;
-   uint32_t leaf_node_offsets_offset;
-   uint32_t build_flags;
    uint32_t type;
 };
 
@@ -226,9 +201,47 @@ struct radv_triangle_encode_task {
    uint32_t pair_index_node_index[RADV_TRIANGLE_ENCODE_TASK_TRIANGLE_COUNT];
 };
 
+struct radv_accel_struct_header {
+   uint32_t bvh_offset;
+   /* Copy of the root node's box flags for quicker access (no indirection through bvh_offset) */
+   uint32_t root_flags;
+   vk_aabb aabb;
+
+   /* Everything after this gets either updated/copied from the CPU or written by header.comp. */
+   uint64_t compacted_size;
+   uint64_t serialization_size;
+   uint32_t copy_dispatch_size[3];
+   uint32_t padding1;
+   uint64_t size;
+
+   /* Everything after this gets updated/copied from the CPU. */
+   uint32_t geometry_type;
+   uint32_t geometry_count;
+   uint64_t leaf_nodes_offset;
+   uint64_t primitive_count;
+   uint64_t instance_count;
+   uint32_t leaf_node_offsets_offset;
+   uint32_t build_flags;
+   uint32_t type;
+
+   /* Padd the struct to a multiple of 8 bytes so member offsets match between C and GLSL if radv_accel_struct_header is
+    * nested.
+    */
+   uint32_t padding2;
+};
+
+struct radv_accel_struct_header_gfx12 {
+   radv_accel_struct_header base;
+
+   uint32_t update_dispatch_size[3];
+   uint32_t instance_child_count_exponents;
+   radv_gfx12_box_child instance_children[4];
+};
+
 #ifdef VULKAN
 TYPE(radv_accel_struct_serialization_header, 8);
 TYPE(radv_accel_struct_header, 8);
+TYPE(radv_accel_struct_header_gfx12, 8);
 TYPE(radv_bvh_triangle_node, 4);
 TYPE(radv_bvh_aabb_node, 4);
 TYPE(radv_bvh_instance_node, 8);
@@ -290,7 +303,7 @@ struct encode_triangles_gfx12_args {
    uint32_t batches_size;
 };
 
-#define RADV_HEADER_BUILD_FLAGS (0)
+#define RADV_HEADER_BUILD_FLAGS (RADV_BUILD_FLAG_BVH8)
 
 struct header_args {
    REF(vk_ir_header) src;
@@ -316,8 +329,8 @@ struct update_args {
    (VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | RADV_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY | RADV_BUILD_FLAG_UPDATE_IN_PLACE)
 
 struct update_gfx12_args {
-   REF(radv_accel_struct_header) src;
-   REF(radv_accel_struct_header) dst;
+   REF(radv_accel_struct_header_gfx12) src;
+   REF(radv_accel_struct_header_gfx12) dst;
    REF(vk_bvh_geometry_data) geom_data;
    REF(vk_aabb) bounds;
    REF(uint32_t) internal_ready_count;

@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2026 NXP
  * Copyright (C) 2019-2022 Collabora, Ltd.
  * Copyright (C) 2018-2019 Alyssa Rosenzweig
  * SPDX-License-Identifier: MIT
@@ -41,8 +42,9 @@ init_slice_crc_info(unsigned arch, struct pan_image_slice_layout *slice,
    unsigned tile_count_y = checksum_y_tile_per_region *
                            DIV_ROUND_UP(height_px, checksum_region_size_px);
 
-   slice->crc.offset_B = offset_B;
-   slice->crc.stride_B = tile_count_x * CHECKSUM_BYTES_PER_TILE;
+   slice->crc.header_offset_B = offset_B;
+   slice->crc.offset_B = offset_B + PAN_CRC_HEADER_SIZE_B;
+   slice->crc.stride_B = ALIGN_POT(tile_count_x * CHECKSUM_BYTES_PER_TILE, 64);
    slice->crc.size_B = slice->crc.stride_B * tile_count_y;
 }
 
@@ -82,12 +84,13 @@ pan_image_layout_init(
 
    const bool use_explicit_layout = layout_constraints.wsi_row_pitch_B != 0;
 
-   /* Explicit stride only work with non-mipmap, non-array, single-sample
-    * 2D image without CRC.
+   /* Explicit stride only works with non-mipmap, single-sample 2D image
+    * without CRC. Array images are allowed when an explicit array pitch
+    * is provided.
     */
    if (use_explicit_layout &&
        (props->extent_px.depth > 1 || props->nr_samples > 1 ||
-        props->array_size > 1 || props->dim != MALI_TEXTURE_DIMENSION_2D ||
+        props->dim != MALI_TEXTURE_DIMENSION_2D ||
         props->nr_slices > 1 || props->crc))
       return false;
 
@@ -127,10 +130,17 @@ pan_image_layout_init(
 
       /* Add a CRC buffer at level 0 if necessary */
       if (l == 0 && props->crc) {
+         uint64_t crc_start_B = ALIGN_POT(layout_constraints.offset_B, 64);
+         uint64_t crc_padding_B = crc_start_B - layout_constraints.offset_B;
+         layout_constraints.offset_B = crc_start_B;
+
          init_slice_crc_info(arch, slayout, mip_extent_px.width,
                              mip_extent_px.height, layout_constraints.offset_B);
-         layout_constraints.offset_B += slayout->crc.size_B;
-         slayout->size_B += slayout->crc.size_B;
+
+         uint64_t crc_alloc_size_B =
+            PAN_CRC_HEADER_SIZE_B + slayout->crc.size_B;
+         layout_constraints.offset_B += crc_alloc_size_B;
+         slayout->size_B += crc_padding_B + crc_alloc_size_B;
       }
 
       mip_extent_px.width = u_minify(mip_extent_px.width, 1);
@@ -143,8 +153,23 @@ pan_image_layout_init(
       ALIGN_POT(layout_constraints.offset_B - layout->slices[0].offset_B, 64);
 
    if (use_explicit_layout) {
-      layout->data_size_B =
-         layout_constraints.offset_B - explicit_layout_constraints->offset_B;
+      if (props->array_size > 1) {
+         if (layout_constraints.wsi_array_pitch_B < layout->array_stride_B ||
+             (layout_constraints.wsi_array_pitch_B & 63))
+            return false;
+
+         layout->array_stride_B = layout_constraints.wsi_array_pitch_B;
+      }
+
+      if (props->array_size == 1) {
+         layout->data_size_B =
+            layout_constraints.offset_B -
+            explicit_layout_constraints->offset_B;
+      } else {
+         layout->data_size_B =
+            (uint64_t)layout->array_stride_B *
+            (uint64_t)props->array_size;
+      }
    } else {
       /* Native images start from offset 0, and the planar plane offset has
        * been at least 4K page aligned below. So the base level slice offset

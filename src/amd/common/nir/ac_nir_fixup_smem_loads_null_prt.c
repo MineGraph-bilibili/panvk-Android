@@ -30,7 +30,6 @@ typedef struct {
 static uint64_t bits_may_be_1(nir_scalar scalar, unsigned depth)
 {
    assert(scalar.def->bit_size == 64);
-   scalar = nir_scalar_chase_movs(scalar);
 
    if (nir_scalar_is_const(scalar))
       return nir_scalar_as_uint(scalar);
@@ -42,7 +41,7 @@ static uint64_t bits_may_be_1(nir_scalar scalar, unsigned depth)
    case nir_op_u2u64:
       return UINT32_MAX;
    case nir_op_pack_64_2x32_split: {
-      nir_scalar src1 = nir_scalar_chase_movs(nir_scalar_chase_alu_src(scalar, 1));
+      nir_scalar src1 = nir_scalar_chase_alu_src(scalar, 1);
       if (nir_scalar_is_const(src1))
          return nir_scalar_as_uint(src1) << 32 | UINT32_MAX;
       break;
@@ -95,7 +94,7 @@ fixup_smem_loads_null_prt(nir_builder *b, nir_intrinsic_instr *intrin, void *dat
        * Usually, this check is unnecessary and the mask is later optimized out, but that doesn't
        * happen if the pack is followed by an addition.
        */
-      uint64_t may_be_1 = bits_may_be_1(nir_get_scalar(src, 0), 0);
+      uint64_t may_be_1 = bits_may_be_1(nir_scalar_resolved(src, 0), 0);
       uint64_t bit = (1ull << state->control_bit);
       if (!(may_be_1 & bit))
          return false;

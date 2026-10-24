@@ -105,13 +105,6 @@ fn swap_regs(b: &mut impl Builder, dst_b: Range<u16>, src_b: Range<u16>) {
     xor_regs(b, dst_b.clone(), src_b.clone());
 }
 
-fn tls_ptr(b: &impl Builder) -> FAURef {
-    b.model()
-        .fau()
-        .special(SpecialFAU::ThreadLocalPointer)
-        .unwrap()
-}
-
 fn copy_mem<A: AllocSSA>(
     b: &mut impl Builder,
     ssa_alloc: &mut A,
@@ -174,10 +167,6 @@ impl ByteCopy {
     fn byte_count(&self) -> u16 {
         debug_assert!(self.dst_b.len() == self.src_b.len());
         self.dst_b.end - self.dst_b.start
-    }
-
-    fn is_empty(&self) -> bool {
-        self.byte_count() == 0
     }
 
     fn is_trivial(&self) -> bool {

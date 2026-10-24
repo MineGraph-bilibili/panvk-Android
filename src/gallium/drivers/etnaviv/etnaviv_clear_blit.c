@@ -64,6 +64,8 @@ etna_blit_save_state(struct etna_context *ctx, bool render_cond)
    util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
    util_blitter_save_stencil_ref(ctx->blitter, &ctx->stencil_ref_s);
    util_blitter_save_sample_mask(ctx->blitter, ctx->sample_mask, 0);
+   util_blitter_save_sample_coverage(ctx->blitter, ctx->sample_coverage,
+                                     ctx->sample_coverage_invert);
 
    /* Save the framebuffer without the appended 128-bit companion slots, the
     * restore goes through etna_set_framebuffer_state(..) which appends them
@@ -88,11 +90,11 @@ etna_blit_save_state(struct etna_context *ctx, bool render_cond)
 }
 
 uint64_t
-etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union *color)
+etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union *color, const struct etna_screen *screen)
 {
    union util_color uc;
 
-   format = translate_pe_internal_format(format);
+   format = translate_pe_internal_format(format, screen);
    util_pack_color_union(format, &uc, color);
 
    switch (util_format_get_blocksize(format)) {
@@ -110,12 +112,22 @@ etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union 
    }
 }
 
-static void
+static bool
 etna_blit_stencil_fallback(struct pipe_context *pctx,
                            const struct pipe_blit_info *info)
 {
+   enum pipe_format stencil_format = util_format_stencil_only(info->src.format);
    struct etna_context *ctx = etna_context(pctx);
+   struct pipe_screen *screen = pctx->screen;
    struct pipe_surface dst_templ;
+
+   if (stencil_format == PIPE_FORMAT_NONE ||
+       !screen->is_format_supported(screen, stencil_format,
+                                    info->src.resource->target,
+                                    info->src.resource->nr_samples,
+                                    info->src.resource->nr_storage_samples,
+                                    PIPE_BIND_SAMPLER_VIEW))
+      return false;
 
    util_blitter_default_dst_texture(&dst_templ, info->dst.resource,
                                     info->dst.level, info->dst.box.z);
@@ -135,6 +147,8 @@ etna_blit_stencil_fallback(struct pipe_context *pctx,
                                  &info->src.box,
                                  info->scissor_enable ? &info->scissor
                                                       : NULL);
+
+   return true;
 }
 
 static void
@@ -189,22 +203,12 @@ etna_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
       goto success;
 
    if (info.mask & PIPE_MASK_S) {
-      enum pipe_format stencil_format = util_format_stencil_only(info.src.format);
-      struct pipe_screen *screen = pctx->screen;
-
-      if (stencil_format != PIPE_FORMAT_NONE &&
-          screen->is_format_supported(screen, stencil_format,
-                                      info.src.resource->target,
-                                      info.src.resource->nr_samples,
-                                      info.src.resource->nr_storage_samples,
-                                      PIPE_BIND_SAMPLER_VIEW)) {
-         etna_blit_stencil_fallback(pctx, &info);
-         info.mask &= ~PIPE_MASK_S;
-         if (!info.mask)
-            goto success;
-      } else {
+      if (!etna_blit_stencil_fallback(pctx, &info))
          DBG("cannot blit stencil, skipping");
-      }
+
+      info.mask &= ~PIPE_MASK_S;
+      if (!info.mask)
+         goto success;
    }
 
    if (!util_blitter_is_blit_supported(ctx->blitter, &info)) {
@@ -277,11 +281,7 @@ etna_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
    struct etna_context *ctx = etna_context(pctx);
    struct etna_resource *rsc = etna_resource(prsc);
 
-   /* When flushing a shared resource with an RB_SWAP format, the PE has
-    * written BGRA bytes internally. Convert to RGBA during the flush copy
-    * so the shared buffer has the correct byte order for external consumers. */
-   const bool flush_rb_swap = rsc->shared &&
-                              translate_pe_format_rb_swap(prsc->format);
+   const bool flush_rb_swap = etna_resource_needs_rb_swap(ctx->screen, rsc);
 
    if (rsc->render) {
       if (etna_resource_older(rsc, etna_resource(rsc->render))) {
@@ -305,9 +305,8 @@ etna_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
          etna_resource_level_mark_changed(&rsc->levels[0]);
       }
    } else if (flush_rb_swap) {
-      /* No render shadow and no TS — PE rendered directly into the shared
-       * buffer. If the fragment shader already swapped R/B (LINEAR_PE),
-       * bytes are already correct. Otherwise we need to swap here. */
+      /* No render shadow and no TS. The PE rendered directly into the shared
+       * buffer in its own byte order, so swap R/B here. */
       if (!rsc->shared_native_order) {
          assert(prsc->last_level == 0);
          struct etna_resource_level *lev = &rsc->levels[0];

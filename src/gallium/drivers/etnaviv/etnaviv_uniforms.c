@@ -113,13 +113,15 @@ get_sampler_lod(const struct etna_context *ctx, bool frag,
 {
    unsigned index = get_const_idx(ctx, frag, data);
    const struct pipe_sampler_state *sampler = ctx->sampler[index];
+   const struct pipe_sampler_view *view = ctx->sampler_view[index];
    const bool mipmap = sampler->min_mip_filter != PIPE_TEX_MIPFILTER_NONE;
+   const float max_level = view->u.tex.last_level - view->u.tex.first_level;
 
    switch (contents) {
    case ETNA_UNIFORM_SAMPLER_LOD_MIN:
-      return mipmap ? fui(sampler->min_lod) : fui(0.0f);
+      return mipmap ? fui(CLAMP(sampler->min_lod, 0.0f, max_level)) : fui(0.0f);
    case ETNA_UNIFORM_SAMPLER_LOD_MAX:
-      return mipmap ? fui(sampler->max_lod) : fui(0.0f);
+      return mipmap ? fui(CLAMP(sampler->max_lod, 0.0f, max_level)) : fui(0.0f);
    case ETNA_UNIFORM_SAMPLER_LOD_BIAS:
       return fui(sampler->lod_bias);
    default:
@@ -219,7 +221,7 @@ etna_set_shader_uniforms_dirty_flags(struct etna_shader_variant *sobj)
       case ETNA_UNIFORM_SAMPLER_LOD_MIN:
       case ETNA_UNIFORM_SAMPLER_LOD_MAX:
       case ETNA_UNIFORM_SAMPLER_LOD_BIAS:
-         dirty |= ETNA_DIRTY_SAMPLERS;
+         dirty |= ETNA_DIRTY_SAMPLERS | ETNA_DIRTY_SAMPLER_VIEWS;
          break;
       }
    }

@@ -155,8 +155,6 @@ void
 pandecode_inject_mmap(struct pandecode_context *ctx, uint64_t gpu_va, void *cpu,
                       unsigned sz, const char *name)
 {
-   fprintf(stderr, "%s: gpu_va=%" PRIx64 " cpu=%p sz=%u name=%s\n",
-           __func__, gpu_va, cpu, sz, name ? name : "N/A");
    simple_mtx_lock(&ctx->lock);
 
    /* First, search if we already mapped this and are just updating an address */
@@ -241,14 +239,14 @@ pandecode_dump_file_open(struct pandecode_context *ctx)
    if (!strcmp(dump_file_base, "stderr"))
       ctx->dump_stream = stderr;
    else if (!ctx->dump_stream) {
-      // char buffer[1024];
-      // snprintf(buffer, sizeof(buffer), "%s.%s.ctx-%d.%04d", dump_file_base,
-      //          util_get_process_name(), ctx->id, ctx->dump_frame_count);
-      // mesa_logd("pandecode: dump command stream to file %s", buffer);
-      // ctx->dump_stream = fopen(buffer, "w");
+      char buffer[1024];
+      snprintf(buffer, sizeof(buffer), "%s.%s.ctx-%d.%04d", dump_file_base,
+               util_get_process_name(), ctx->id, ctx->dump_frame_count);
+      mesa_logd("pandecode: dump command stream to file %s", buffer);
+      ctx->dump_stream = fopen(buffer, "w");
       if (!ctx->dump_stream) {
-         // mesa_loge("pandecode: failed to open command stream log file %s",
-         //           buffer);
+         mesa_loge("pandecode: failed to open command stream log file %s",
+                   buffer);
 
          /* Storage access on Android is quite restricted and varies across
           * different processes. Meanwhile, PANDECODE_DUMP_FILE option is

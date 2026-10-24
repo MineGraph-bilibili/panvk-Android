@@ -156,6 +156,17 @@ enum mtl_store_action {
    MTL_STORE_ACTION_CUSTOM_SAMPLE_DEPTH_STORE = 5u,
 };
 
+enum mtl_depth_resolve_filter {
+   MTL_DEPTH_RESOLVE_FILTER_SAMPLE_0 = 0u,
+   MTL_DEPTH_RESOLVE_FILTER_MIN = 1u,
+   MTL_DEPTH_RESOLVE_FILTER_MAX = 2u,
+};
+
+enum mtl_stencil_resolve_filter {
+   MTL_STENCIL_RESOLVE_FILTER_SAMPLE_0 = 0u,
+   MTL_STENCIL_RESOLVE_FILTER_DEPTH_RESOLVED_SAMPLE = 1u,
+};
+
 enum mtl_texture_swizzle {
    MTL_TEXTURE_SWIZZLE_ZERO = 0,
    MTL_TEXTURE_SWIZZLE_ONE = 1,
@@ -194,6 +205,12 @@ enum mtl_sampler_mip_filter {
    MTL_SAMPLER_MIP_FILTER_NOT_MIP_MAPPED = 0,
    MTL_SAMPLER_MIP_FILTER_NEAREST = 1,
    MTL_SAMPLER_MIP_FILTER_LINEAR = 2,
+};
+
+enum mtl_sampler_reduction_mode {
+   MTL_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE = 0,
+   MTL_SAMPLER_REDUCTION_MODE_MINIMUM = 1,
+   MTL_SAMPLER_REDUCTION_MODE_MAXIMUM = 2,
 };
 
 enum mtl_compare_function {
@@ -300,6 +317,11 @@ enum mtl_math_mode {
 enum mtl_math_floating_point_functions {
    MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST = 0,
    MTL_MATH_FLOATING_POINT_FUNCTIONS_PRECISE = 1,
+};
+
+enum mtl_language_version {
+   MTL_LANGUAGE_VERSION_4_0 = 0x40000,
+   MTL_LANGUAGE_VERSION_4_1 = 0x40001,
 };
 
 /** STRUCTURES */

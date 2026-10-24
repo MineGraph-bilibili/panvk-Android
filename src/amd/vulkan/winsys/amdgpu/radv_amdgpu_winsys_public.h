@@ -15,9 +15,10 @@
 #include "ac_gpu_info.h"
 #include "ac_linux_drm.h"
 
+#include "util/bitset.h"
 #include "vk_sync.h"
 
-VkResult radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, uint64_t debug_flags,
+VkResult radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_WORD *debug_flags,
                                    uint64_t perftest_flags, bool is_virtio, struct radeon_winsys **winsys);
 
 struct radeon_winsys_info {
@@ -26,7 +27,8 @@ struct radeon_winsys_info {
    uint32_t global_priority_mask;
 };
 
-VkResult radv_amdgpu_winsys_query_info(int fd, uint64_t debug_flags, bool is_virtio, struct radeon_winsys_info *info);
+VkResult radv_amdgpu_winsys_query_info(int fd, const BITSET_WORD *debug_flags, bool is_virtio,
+                                       struct radeon_winsys_info *info);
 
 struct radeon_winsys_heap_info {
    uint64_t allocated_vram;

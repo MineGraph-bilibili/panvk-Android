@@ -129,7 +129,7 @@ brw_compile_cs(const struct brw_compiler *compiler,
    const bool debug_enabled =
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_CS,
-                                   params->base.source_hash);
+                                   prog_data->base.source_hash);
 
    brw_prog_data_init(&prog_data->base, &params->base);
 
@@ -193,6 +193,7 @@ brw_compile_cs(const struct brw_compiler *compiler,
          .nir = shader,
          .dispatch_width = dispatch_width,
          .compiler = compiler,
+         .key = &key->base,
          .archiver = params->base.archiver,
       };
 
@@ -234,7 +235,9 @@ brw_compile_cs(const struct brw_compiler *compiler,
              !nir->info.workgroup_size_variable)
             break;
       } else {
-         simd_state.error[simd] = ralloc_strdup(params->base.mem_ctx, v[simd]->fail_msg);
+         brw_simd_mark_failed(simd_state, simd,
+                              ralloc_strdup(params->base.mem_ctx,
+                                            v[simd]->fail_msg));
          if (simd > 0) {
             brw_shader_perf_log(compiler, params->base.log_data,
                                 "SIMD%u shader failed to compile: %s\n",

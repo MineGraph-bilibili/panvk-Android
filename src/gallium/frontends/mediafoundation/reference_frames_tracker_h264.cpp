@@ -34,6 +34,7 @@
 
 reference_frames_tracker_h264::reference_frames_tracker_h264( void *logId,
                                                               struct pipe_video_codec *codec,
+                                                              eAVEncH264VProfile avcProfile,
                                                               uint32_t textureWidth,
                                                               uint32_t textureHeight,
                                                               uint32_t gopLength,
@@ -59,7 +60,7 @@ reference_frames_tracker_h264::reference_frames_tracker_h264( void *logId,
         m_codec,
         textureWidth,
         textureHeight,
-        ConvertProfileToFormat( m_codec->profile ),
+        ConvertAVEncVProfileToPipeFormat( avcProfile ),
         m_codec->max_references + 1 /*curr pic*/ +
            ( bLowLatency ? 0 : MFT_INPUT_QUEUE_DEPTH ), /*MFT process input queue depth for delayed in flight recon pic release*/
         hr ),

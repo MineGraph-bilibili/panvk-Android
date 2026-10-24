@@ -519,7 +519,8 @@ void ir_print_visitor::visit(ir_constant *ir)
          case GLSL_TYPE_UINT16:fprintf(f, "%u", ir->value.u16[i]); break;
 	 case GLSL_TYPE_INT16: fprintf(f, "%d", ir->value.i16[i]); break;
 	 case GLSL_TYPE_UINT:  fprintf(f, "%u", ir->value.u[i]); break;
-	 case GLSL_TYPE_INT:   fprintf(f, "%d", ir->value.i[i]); break;
+	 case GLSL_TYPE_INT:
+	 case GLSL_TYPE_YUV_CSC_STANDARD_EXT: fprintf(f, "%d", ir->value.i[i]); break;
 	 case GLSL_TYPE_FLOAT:
             print_float_constant(f, ir->value.f[i]);
             break;

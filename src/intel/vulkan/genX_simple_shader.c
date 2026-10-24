@@ -44,7 +44,7 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
 
    struct anv_batch *batch = state->batch;
    struct anv_device *device = state->device;
-   const struct anv_instance *instance = device->physical->instance;
+   const struct anv_physical_device *pdevice = device->physical;
    const struct brw_fs_prog_data *prog_data =
       brw_fs_prog_data_const(state->kernel->prog_data);
 
@@ -88,8 +88,7 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
       /* Simple shaders have no requirement that we need to disable geometry
        * distribution.
        */
-      vf.GeometryDistributionEnable =
-         instance->drirc.debug.vf_distribution;
+      vf.GeometryDistributionEnable = pdevice->drirc.debug.vf_distribution;
 #endif
    }
    anv_batch_emit(batch, GENX(3DSTATE_VF_SGVS), sgvs) {
@@ -218,18 +217,21 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
          brw_fs_prog_data_dispatch_grf_start_reg(prog_data, ps, 2);
 #endif
 
-      ps.KernelStartPointer0 = state->kernel->kernel.offset +
+      ps.KernelStartPointer0 =
+         anv_shader_internal_get_pointer(device, state->kernel) +
          brw_fs_prog_data_prog_offset(prog_data, ps, 0);
-      ps.KernelStartPointer1 = state->kernel->kernel.offset +
+      ps.KernelStartPointer1 =
+         anv_shader_internal_get_pointer(device, state->kernel) +
          brw_fs_prog_data_prog_offset(prog_data, ps, 1);
 #if GFX_VER < 20
-      ps.KernelStartPointer2 = state->kernel->kernel.offset +
+      ps.KernelStartPointer2 =
+         anv_shader_internal_get_pointer(device, state->kernel) +
          brw_fs_prog_data_prog_offset(prog_data, ps, 2);
 #endif
 
 #if GFX_VER >= 30
       ps.RegistersPerThread =
-         brw_register_blocks(device->info, prog_data->base.grf_used);
+         intel_register_blocks(device->info, prog_data->base.grf_used);
 #endif
 
       ps.MaximumNumberofThreadsPerPSD = device->info->max_threads_per_psd - 1;
@@ -253,21 +255,35 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
 #if INTEL_WA_18038825448_GFX_VER
       psx.EnablePSDependencyOnCPsizeChange = needs_ps_dependency;
 #endif
+
+#if INTEL_WA_16030144090_GFX_VER
+      assert(!prog_data->persample_dispatch);
+#endif
    }
 
-   anv_batch_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
-      struct anv_state cc_state =
-         anv_state_stream_alloc(state->dynamic_state_stream,
-                                4 * GENX(CC_VIEWPORT_length), 32);
-      if (cc_state.map == NULL)
-         return;
+   struct anv_state cc_state =
+      anv_state_stream_alloc(state->dynamic_state_stream,
+                             4 * GENX(CC_VIEWPORT_length), 32);
+   if (cc_state.map == NULL)
+      return;
 
-      struct GENX(CC_VIEWPORT) cc_viewport = {
-         .MinimumDepth = 0.0f,
-         .MaximumDepth = 1.0f,
-      };
-      GENX(CC_VIEWPORT_pack)(NULL, cc_state.map, &cc_viewport);
-      cc.CCViewportPointer = cc_state.offset;
+   struct GENX(CC_VIEWPORT) cc_viewport = {
+      .MinimumDepth = 0.0f,
+      .MaximumDepth = 1.0f,
+   };
+   GENX(CC_VIEWPORT_pack)(NULL, cc_state.map, &cc_viewport);
+
+   if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+      anv_batch_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), cc) {
+         cc.CCViewportPointer = anv_state_pool_state_address(
+            anv_device_get_dynamic_state_pool(device), cc_state);
+      }
+#endif
+   } else {
+      anv_batch_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
+         cc.CCViewportPointer = cc_state.offset;
+      }
    }
 
 #if GFX_VER >= 12
@@ -275,7 +291,7 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
    anv_batch_emit(batch, GENX(3DSTATE_PRIMITIVE_REPLICATION), pr);
 #endif
 
-   if (!instance->drirc.perf.disable_push_const_alloc) {
+   if (!pdevice->drirc.perf.disable_push_const_alloc) {
       VkShaderStageFlags push_stages =
          genX(push_constant_alloc_stages)(VK_SHADER_STAGE_FRAGMENT_BIT);
       genX(batch_emit_push_constants_alloc)(batch, device, push_stages);
@@ -432,9 +448,7 @@ genX(simple_shader_alloc_push)(struct anv_simple_shader *state, uint32_t size)
       s = anv_state_stream_alloc(state->dynamic_state_stream,
                                  size, ANV_UBO_ALIGNMENT);
    } else {
-      s = anv_state_stream_alloc(GFX_VERx10 >= 125 ?
-                                 state->general_state_stream :
-                                 state->dynamic_state_stream,
+      s = anv_state_stream_alloc(state->dynamic_state_stream,
                                  align(size, 64), 64);
    }
 
@@ -451,18 +465,8 @@ struct anv_address
 genX(simple_shader_push_state_address)(struct anv_simple_shader *state,
                                        struct anv_state push_state)
 {
-   if (state->kernel->stage == MESA_SHADER_FRAGMENT) {
-      return anv_state_pool_state_address(
-         anv_device_get_dynamic_state_pool(state->device), push_state);
-   } else {
-#if GFX_VERx10 >= 125
-      return anv_state_pool_state_address(
-         anv_device_get_general_state_pool(state->device), push_state);
-#else
-      return anv_state_pool_state_address(
-         anv_device_get_dynamic_state_pool(state->device), push_state);
-#endif
-   }
+   return anv_state_pool_state_address(
+      anv_device_get_dynamic_state_pool(state->device), push_state);
 }
 
 /** Emit a simple shader dispatch */
@@ -472,6 +476,7 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
                                   struct anv_state push_state)
 {
    struct anv_device *device = state->device;
+   const struct intel_device_info *devinfo = device->info;
    struct anv_batch *batch = state->batch;
    struct anv_address push_addr =
       anv_state_pool_state_address(anv_device_get_dynamic_state_pool(device), push_state);
@@ -568,197 +573,272 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
       genX(batch_emit_post_3dprimitive_was)(batch, device, _3DPRIM_RECTLIST, 3);
       genX(emit_breakpoint)(batch, device, false);
    } else {
-      const struct intel_device_info *devinfo = device->info;
+      UNUSED const uint64_t push_addr64 = anv_address_physical(push_addr);
       const struct brw_cs_prog_data *prog_data =
          (const struct brw_cs_prog_data *) state->kernel->prog_data;
       const struct intel_cs_dispatch_info dispatch =
          brw_cs_get_dispatch_info(devinfo, prog_data, NULL);
 
-#if GFX_VERx10 >= 125
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         uint8_t pixel_async_compute_thread_limit;
+         uint8_t z_pass_async_compute_thread_limit;
+         uint8_t np_z_async_throttle_settings;
+         const bool slm_or_barrier_enabled =
+            prog_data->base.total_shared != 0 ||
+            prog_data->uses_barrier;
 
-/* Not need with VRT enabled */
-#if GFX_VERx10 < 300
-      uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
-              np_z_async_throttle_settings;
-      bool slm_or_barrier_enabled = prog_data->base.total_shared != 0 || prog_data->uses_barrier;
+         intel_compute_engine_async_threads_limit(device->info, dispatch.threads,
+                                                  slm_or_barrier_enabled,
+                                                  prog_data->uses_fence,
+                                                  &pixel_async_compute_thread_limit,
+                                                  &z_pass_async_compute_thread_limit,
+                                                  &np_z_async_throttle_settings);
 
-      intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
-                                               slm_or_barrier_enabled,
-                                               prog_data->uses_fence,
-                                               &pixel_async_compute_thread_limit,
-                                               &z_pass_async_compute_thread_limit,
-                                               &np_z_async_throttle_settings);
-      anv_batch_emit(batch, GENX(STATE_COMPUTE_MODE), cm) {
-   #if GFX_VER >= 20
-         cm.AsyncComputeThreadLimit = pixel_async_compute_thread_limit;
-         cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
-         cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
-         cm.AsyncComputeThreadLimitMask = 0x7;
-         cm.ZPassAsyncComputeThreadLimitMask = 0x7;
-         cm.ZAsyncThrottlesettingsMask = 0x3;
-   #else
-         cm.PixelAsyncComputeThreadLimit = pixel_async_compute_thread_limit;
-         cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
-         cm.PixelAsyncComputeThreadLimitMask = 0x7;
-         cm.ZPassAsyncComputeThreadLimitMask = 0x7;
-         if (intel_device_info_is_mtl_or_arl(devinfo)) {
-            cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
-            cm.ZAsyncThrottlesettingsMask = 0x3;
+         struct GENX(COMPUTE_WALKER_BODY_2) body = {
+            .MaximumNumberofThreads    = device->info->max_cs_threads * device->info->subslice_total,
+            .StackIDControl            = genX(compute_walker2_get_stack_id_control_value)(device),
+            .SIMDSize                  = dispatch.simd_size / 16,
+            .MessageSIMD               = dispatch.simd_size / 16,
+            .GenerateLocalID           = prog_data->generate_local_id != 0,
+            .EmitLocal                 = prog_data->generate_local_id,
+            .EmitInlineParameter       = true,
+            .WalkOrder                 = prog_data->walk_order,
+            .TileLayout                = prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
+                                         TileY32bpe : Linear,
+            .StatCountDisable          = true,
+            .DispatchWalkOrder         = prog_data->uses_sampler ? DWO_Morton2x2XYWalk : DWO_LinearWalk,
+            .ThreadGroupBatchSize      = prog_data->uses_sampler ? TGBS_TG_BATCH_4 : TGBS_TG_BATCH_1,
+            .ExecutionMask             = dispatch.right_mask,
+            .LocalXMaximum             = prog_data->local_size[0] - 1,
+            .LocalYMaximum             = prog_data->local_size[1] - 1,
+            .LocalZMaximum             = prog_data->local_size[2] - 1,
+            .ThreadGroupIDXDimension   = DIV_ROUND_UP(num_threads, dispatch.simd_size),
+            .ThreadGroupIDYDimension   = 1,
+            .ThreadGroupIDZDimension   = 1,
+            .Post_sync_opn0.MOCS       = anv_mocs(device, NULL, 0),
+            .Post_sync_opn1.MOCS       = anv_mocs(device, NULL, 0),
+            .Post_sync_opn2.MOCS       = anv_mocs(device, NULL, 0),
+            .Post_sync_opn3.MOCS       = anv_mocs(device, NULL, 0),
+            .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
+               .KernelStartPointer                 =
+                  anv_shader_internal_get_pointer(device, state->kernel) +
+                  brw_cs_prog_data_prog_offset(prog_data, dispatch.simd_size),
+               .RegistersPerThread                 = intel_register_blocks(
+                  devinfo, prog_data->base.grf_used),
+               .NumberOfBarriers                   = prog_data->uses_barrier,
+               .NumberofThreadsinGPGPUThreadGroup  = dispatch.threads,
+               .ThreadGroupDispatchSize            = intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
+               .PreferredSLMAllocationSize         = SLM_ENCODES_0K,
+               .SharedLocalMemorySize              = intel_compute_slm_encode_size(GFX_VER, prog_data->base.total_shared),
+               .PSAsyncThreadLimit                 = pixel_async_compute_thread_limit,
+               .ZPassAsyncComputeThreadLimit       = z_pass_async_compute_thread_limit,
+               .NP_ZAsyncThrottlesettings          = np_z_async_throttle_settings,
+            },
+            .InlineData = {
+               [0] = push_addr64 & 0xffffffff,
+               [1] = push_addr64 >> 32,
+            },
+         };
+
+         anv_batch_emit(batch, GENX(COMPUTE_WALKER_2), cw) {
+            cw.body = body;
          }
-   #endif
-      }
-#endif /* GFX_VERx10 < 300 */
-
-      struct GENX(COMPUTE_WALKER_BODY) body = {
-         .SIMDSize                       = dispatch.simd_size / 16,
-         .MessageSIMD                    = dispatch.simd_size / 16,
-         .IndirectDataStartAddress       = push_state.offset,
-         .IndirectDataLength             = push_state.alloc_size,
-         .LocalXMaximum                  = prog_data->local_size[0] - 1,
-         .LocalYMaximum                  = prog_data->local_size[1] - 1,
-         .LocalZMaximum                  = prog_data->local_size[2] - 1,
-         .ThreadGroupIDXDimension        = DIV_ROUND_UP(num_threads,
-                                                        dispatch.simd_size),
-         .ThreadGroupIDYDimension        = 1,
-         .ThreadGroupIDZDimension        = 1,
-         .ExecutionMask                  = dispatch.right_mask,
-         .PostSync.MOCS                  = anv_mocs(device, NULL, 0),
-         .GenerateLocalID                = prog_data->generate_local_id != 0,
-         .EmitLocal                      = prog_data->generate_local_id,
-         .WalkOrder                      = prog_data->walk_order,
-         .TileLayout = prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
-                       TileY32bpe : Linear,
-
-         .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
-            .KernelStartPointer                = state->kernel->kernel.offset +
-                                                 brw_cs_prog_data_prog_offset(prog_data,
-                                                                              dispatch.simd_size),
-            .SamplerStatePointer               = 0,
-            .BindingTablePointer               = 0,
-            .BindingTableEntryCount            = 0,
-            .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
-            .ThreadGroupDispatchSize           = intel_compute_threads_group_dispatch_size(dispatch.threads),
-            .SharedLocalMemorySize             = intel_compute_slm_encode_size(GFX_VER,
-                                                                               prog_data->base.total_shared),
-            .NumberOfBarriers                  = prog_data->uses_barrier,
-#if GFX_VER >= 30
-            .RegistersPerThread =
-               brw_register_blocks(devinfo, prog_data->base.grf_used),
-#endif
-         },
-      };
-
-      anv_batch_emit(batch, GENX(COMPUTE_WALKER), cw) {
-         cw.body = body;
-      }
-
-      if (state->cmd_buffer) {
-         genX(cmd_buffer_post_dispatch_wa)(state->cmd_buffer);
+#endif /* GFX_VERx10 >= 350 */
       } else {
-         genX(batch_emit_post_dispatch_wa)(batch);
-      }
+#if GFX_VERx10 >= 125
+         const bool has_vrt = devinfo->verx10 >= 300 && !INTEL_DEBUG(DEBUG_NO_VRT);
+         if (!has_vrt) {
+            uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
+               np_z_async_throttle_settings;
+            bool slm_or_barrier_enabled = prog_data->base.total_shared != 0 || prog_data->uses_barrier;
 
-#else /* GFX_VERx10 < 125 */
-      const uint32_t vfe_curbe_allocation =
-         align(prog_data->push.per_thread.regs * dispatch.threads +
-               prog_data->push.cross_thread.regs, 2);
-
-      /* From the Sky Lake PRM Vol 2a, MEDIA_VFE_STATE:
-       *
-       *    "A stalling PIPE_CONTROL is required before MEDIA_VFE_STATE unless
-       *     the only bits that are changed are scoreboard related: Scoreboard
-       *     Enable, Scoreboard Type, Scoreboard Mask, Scoreboard * Delta. For
-       *     these scoreboard related states, a MEDIA_STATE_FLUSH is
-       *     sufficient."
-       */
-      genX(batch_emit_pipe_control)(batch, devinfo, GPGPU,
-                                    ANV_PIPE_CS_STALL_BIT,
-                                    "pre MEDIA_VFE_STATE");
-
-      anv_batch_emit(batch, GENX(MEDIA_VFE_STATE), vfe) {
-         vfe.StackSize              = 0;
-         vfe.MaximumNumberofThreads =
-            devinfo->max_cs_threads * devinfo->subslice_total - 1;
-         vfe.NumberofURBEntries     = 2;
-#if GFX_VER < 11
-         vfe.ResetGatewayTimer      = true;
+            intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
+                                                     slm_or_barrier_enabled,
+                                                     prog_data->uses_fence,
+                                                     &pixel_async_compute_thread_limit,
+                                                     &z_pass_async_compute_thread_limit,
+                                                     &np_z_async_throttle_settings);
+            anv_batch_emit(batch, GENX(STATE_COMPUTE_MODE), cm) {
+#if GFX_VER >= 20
+               cm.AsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+               cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+               cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+               cm.AsyncComputeThreadLimitMask = 0x7;
+               cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+               cm.ZAsyncThrottlesettingsMask = 0x3;
+#else
+               cm.PixelAsyncComputeThreadLimit = pixel_async_compute_thread_limit;
+               cm.ZPassAsyncComputeThreadLimit = z_pass_async_compute_thread_limit;
+               cm.PixelAsyncComputeThreadLimitMask = 0x7;
+               cm.ZPassAsyncComputeThreadLimitMask = 0x7;
+               if (intel_device_info_is_mtl_or_arl(devinfo)) {
+                  cm.ZAsyncThrottlesettings = np_z_async_throttle_settings;
+                  cm.ZAsyncThrottlesettingsMask = 0x3;
+               }
 #endif
-         vfe.URBEntryAllocationSize = 2;
-         vfe.CURBEAllocationSize    = vfe_curbe_allocation;
-
-         if (prog_data->base.total_scratch) {
-            /* Broadwell's Per Thread Scratch Space is in the range [0, 11]
-             * where 0 = 1k, 1 = 2k, 2 = 4k, ..., 11 = 2M.
-             */
-            vfe.PerThreadScratchSpace =
-               ffs(prog_data->base.total_scratch) - 11;
-            vfe.ScratchSpaceBasePointer =
-               (struct anv_address) {
-               .bo = anv_scratch_pool_alloc(device,
-                                            &device->scratch_pool,
-                                            MESA_SHADER_COMPUTE,
-                                            prog_data->base.total_scratch),
-               .offset = 0,
-            };
+            }
          }
-      }
-      struct anv_state iface_desc_state =
-         anv_state_stream_alloc(state->dynamic_state_stream,
-                                GENX(INTERFACE_DESCRIPTOR_DATA_length) * 4, 64);
-      if (iface_desc_state.map == NULL)
-         return;
 
-      struct GENX(INTERFACE_DESCRIPTOR_DATA) iface_desc = {
-         .KernelStartPointer                    = state->kernel->kernel.offset +
-                                                  brw_cs_prog_data_prog_offset(prog_data,
-                                                                               dispatch.simd_size),
+         struct GENX(COMPUTE_WALKER_BODY) body = {
+            .SIMDSize                       = dispatch.simd_size / 16,
+            .MessageSIMD                    = dispatch.simd_size / 16,
+            .LocalXMaximum                  = prog_data->local_size[0] - 1,
+            .LocalYMaximum                  = prog_data->local_size[1] - 1,
+            .LocalZMaximum                  = prog_data->local_size[2] - 1,
+            .ThreadGroupIDXDimension        = DIV_ROUND_UP(num_threads,
+                                                           dispatch.simd_size),
+            .ThreadGroupIDYDimension        = 1,
+            .ThreadGroupIDZDimension        = 1,
+            .ExecutionMask                  = dispatch.right_mask,
+            .PostSync.MOCS                  = anv_mocs(device, NULL, 0),
+            .GenerateLocalID                = prog_data->generate_local_id != 0,
+            .EmitLocal                      = prog_data->generate_local_id,
+            .WalkOrder                      = prog_data->walk_order,
+            .TileLayout = prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
+            TileY32bpe : Linear,
 
-         .SamplerCount                          = 0,
-         .BindingTableEntryCount                = 0,
-         .BarrierEnable                         = prog_data->uses_barrier,
-         .SharedLocalMemorySize                 = intel_compute_slm_encode_size(GFX_VER,
-                                                                                prog_data->base.total_shared),
+            .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
+               .KernelStartPointer                = state->kernel->kernel.offset +
+               brw_cs_prog_data_prog_offset(prog_data,
+                                            dispatch.simd_size),
+               .SamplerStatePointer               = 0,
+               .BindingTablePointer               = 0,
+               .BindingTableEntryCount            = 0,
+               .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
+               .ThreadGroupDispatchSize           = intel_compute_threads_group_dispatch_size(dispatch.threads),
+               .SharedLocalMemorySize             = intel_compute_slm_encode_size(GFX_VER,
+                                                                                  prog_data->base.total_shared),
+               .NumberOfBarriers                  = prog_data->uses_barrier,
+#if GFX_VER >= 30
+               .RegistersPerThread =
+               intel_register_blocks(devinfo, prog_data->base.grf_used),
+#endif
+            },
+            .EmitInlineParameter            = true,
+            .InlineData                     = {
+               [0] = push_addr64 & 0xffffffff,
+               [1] = push_addr64 >> 32,
+            },
+         };
 
-         .ConstantURBEntryReadOffset            = 0,
-         .ConstantURBEntryReadLength            = prog_data->push.per_thread.regs,
-         .CrossThreadConstantDataReadLength     = prog_data->push.cross_thread.regs,
-#if GFX_VER >= 12
-         /* TODO: Check if we are missing workarounds and enable mid-thread
-          * preemption.
+         anv_batch_emit(batch, GENX(COMPUTE_WALKER), cw) {
+            cw.body = body;
+         }
+#else /* GFX_VERx10 < 125 */
+         const uint32_t vfe_curbe_allocation =
+            align(prog_data->push.per_thread.regs * dispatch.threads +
+                  prog_data->push.cross_thread.regs, 2);
+
+         /* From the Sky Lake PRM Vol 2a, MEDIA_VFE_STATE:
           *
-          * We still have issues with mid-thread preemption (it was already
-          * disabled by the kernel on gfx11, due to missing workarounds). It's
-          * possible that we are just missing some workarounds, and could
-          * enable it later, but for now let's disable it to fix a GPU in
-          * compute in Car Chase (and possibly more).
+          *    "A stalling PIPE_CONTROL is required before MEDIA_VFE_STATE unless
+          *     the only bits that are changed are scoreboard related: Scoreboard
+          *     Enable, Scoreboard Type, Scoreboard Mask, Scoreboard * Delta. For
+          *     these scoreboard related states, a MEDIA_STATE_FLUSH is
+          *     sufficient."
           */
-         .ThreadPreemptionDisable               = true,
+         genX(batch_emit_pipe_control)(batch, devinfo, GPGPU,
+                                       ANV_PIPE_CS_STALL_BIT,
+                                       "pre MEDIA_VFE_STATE");
+
+         anv_batch_emit(batch, GENX(MEDIA_VFE_STATE), vfe) {
+            vfe.StackSize              = 0;
+            vfe.MaximumNumberofThreads =
+               devinfo->max_cs_threads * devinfo->subslice_total - 1;
+            vfe.NumberofURBEntries     = 2;
+#if GFX_VER < 11
+            vfe.ResetGatewayTimer      = true;
 #endif
-         .NumberofThreadsinGPGPUThreadGroup     = dispatch.threads,
-      };
-      GENX(INTERFACE_DESCRIPTOR_DATA_pack)(batch, iface_desc_state.map, &iface_desc);
-      anv_batch_emit(batch, GENX(MEDIA_INTERFACE_DESCRIPTOR_LOAD), mid) {
-         mid.InterfaceDescriptorTotalLength        = iface_desc_state.alloc_size;
-         mid.InterfaceDescriptorDataStartAddress   = iface_desc_state.offset;
-      }
-      anv_batch_emit(batch, GENX(MEDIA_CURBE_LOAD), curbe) {
-         curbe.CURBEDataStartAddress = push_state.offset;
-         curbe.CURBETotalDataLength  = push_state.alloc_size;
-      }
-      anv_batch_emit(batch, GENX(GPGPU_WALKER), ggw) {
-         ggw.SIMDSize                     = dispatch.simd_size / 16;
-         ggw.ThreadDepthCounterMaximum    = 0;
-         ggw.ThreadHeightCounterMaximum   = 0;
-         ggw.ThreadWidthCounterMaximum    = dispatch.threads - 1;
-         ggw.ThreadGroupIDXDimension      = DIV_ROUND_UP(num_threads,
-                                                         dispatch.simd_size);
-         ggw.ThreadGroupIDYDimension      = 1;
-         ggw.ThreadGroupIDZDimension      = 1;
-         ggw.RightExecutionMask           = dispatch.right_mask;
-         ggw.BottomExecutionMask          = 0xffffffff;
-      }
-      anv_batch_emit(batch, GENX(MEDIA_STATE_FLUSH), msf);
+            vfe.URBEntryAllocationSize = 2;
+            vfe.CURBEAllocationSize    = vfe_curbe_allocation;
+
+            if (prog_data->base.total_scratch) {
+               /* Broadwell's Per Thread Scratch Space is in the range [0, 11]
+                * where 0 = 1k, 1 = 2k, 2 = 4k, ..., 11 = 2M.
+                */
+               vfe.PerThreadScratchSpace =
+                  ffs(prog_data->base.total_scratch) - 11;
+               vfe.ScratchSpaceBasePointer =
+                  (struct anv_address) {
+                  .bo = anv_scratch_pool_alloc(device,
+                                               &device->scratch_pool,
+                                               MESA_SHADER_COMPUTE,
+                                               prog_data->base.total_scratch),
+                  .offset = 0,
+               };
+            }
+         }
+         struct anv_state iface_desc_state =
+            anv_state_stream_alloc(state->dynamic_state_stream,
+                                   GENX(INTERFACE_DESCRIPTOR_DATA_length) * 4, 64);
+         if (iface_desc_state.map == NULL)
+            return;
+
+         struct GENX(INTERFACE_DESCRIPTOR_DATA) iface_desc = {
+            .KernelStartPointer                    = state->kernel->kernel.offset +
+            brw_cs_prog_data_prog_offset(prog_data,
+                                         dispatch.simd_size),
+
+            .SamplerCount                          = 0,
+            .BindingTableEntryCount                = 0,
+            .BarrierEnable                         = prog_data->uses_barrier,
+            .SharedLocalMemorySize                 = intel_compute_slm_encode_size(GFX_VER,
+                                                                                   prog_data->base.total_shared),
+
+            .ConstantURBEntryReadOffset            = 0,
+            .ConstantURBEntryReadLength            = prog_data->push.per_thread.regs,
+            .CrossThreadConstantDataReadLength     = prog_data->push.cross_thread.regs,
+#if GFX_VER >= 12
+            /* TODO: Check if we are missing workarounds and enable mid-thread
+             * preemption.
+             *
+             * We still have issues with mid-thread preemption (it was already
+             * disabled by the kernel on gfx11, due to missing workarounds). It's
+             * possible that we are just missing some workarounds, and could
+             * enable it later, but for now let's disable it to fix a GPU in
+             * compute in Car Chase (and possibly more).
+             */
+            .ThreadPreemptionDisable               = true,
 #endif
+            .NumberofThreadsinGPGPUThreadGroup     = dispatch.threads,
+         };
+         GENX(INTERFACE_DESCRIPTOR_DATA_pack)(batch, iface_desc_state.map, &iface_desc);
+         anv_batch_emit(batch, GENX(MEDIA_INTERFACE_DESCRIPTOR_LOAD), mid) {
+            mid.InterfaceDescriptorTotalLength        = iface_desc_state.alloc_size;
+            mid.InterfaceDescriptorDataStartAddress   = iface_desc_state.offset;
+         }
+         anv_batch_emit(batch, GENX(MEDIA_CURBE_LOAD), curbe) {
+            curbe.CURBEDataStartAddress = push_state.offset;
+            curbe.CURBETotalDataLength  = push_state.alloc_size;
+         }
+         anv_batch_emit(batch, GENX(GPGPU_WALKER), ggw) {
+            ggw.SIMDSize                     = dispatch.simd_size / 16;
+            ggw.ThreadDepthCounterMaximum    = 0;
+            ggw.ThreadHeightCounterMaximum   = 0;
+            ggw.ThreadWidthCounterMaximum    = dispatch.threads - 1;
+            ggw.ThreadGroupIDXDimension      = DIV_ROUND_UP(num_threads,
+                                                            dispatch.simd_size);
+            ggw.ThreadGroupIDYDimension      = 1;
+            ggw.ThreadGroupIDZDimension      = 1;
+            ggw.RightExecutionMask           = dispatch.right_mask;
+            ggw.BottomExecutionMask          = 0xffffffff;
+         }
+         anv_batch_emit(batch, GENX(MEDIA_STATE_FLUSH), msf);
+#endif
+      }
+   }
+
+   if (state->cmd_buffer) {
+      genX(cmd_buffer_post_dispatch_wa)(state->cmd_buffer);
+   } else {
+      /* TODO: switch to use INTEL_NEEDS_WA_14025112257 */
+      if (device->info->ver >= 20 &&
+          batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
+         genX(batch_emit_pipe_control)(batch, devinfo, GPGPU,
+                                       ANV_PIPE_STATE_CACHE_INVALIDATE_BIT,
+                                       "Wa_14025112257");
+      }
    }
 }
 

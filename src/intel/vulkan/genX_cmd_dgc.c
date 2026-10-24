@@ -95,7 +95,6 @@ preprocess_gfx_sequences(struct anv_cmd_buffer *cmd_buffer,
       .device               = device,
       .cmd_buffer           = cmd_buffer,
       .dynamic_state_stream = &cmd_buffer->dynamic_state_stream,
-      .general_state_stream = &cmd_buffer->general_state_stream,
       .batch                = &cmd_buffer->batch,
       .kernel               = generate_kernel,
    };
@@ -301,7 +300,6 @@ preprocess_cs_sequences(struct anv_cmd_buffer *cmd_buffer,
       .device               = device,
       .cmd_buffer           = cmd_buffer,
       .dynamic_state_stream = &cmd_buffer->dynamic_state_stream,
-      .general_state_stream = &cmd_buffer->general_state_stream,
       .batch                = &cmd_buffer->batch,
       .kernel               = generate_kernel,
    };
@@ -425,7 +423,6 @@ postprocess_cs_sequences(struct anv_cmd_buffer *cmd_buffer,
       .device               = device,
       .cmd_buffer           = cmd_buffer,
       .dynamic_state_stream = &cmd_buffer->dynamic_state_stream,
-      .general_state_stream = &cmd_buffer->general_state_stream,
       .batch                = &cmd_buffer->batch,
       .kernel               = generate_kernel,
    };
@@ -555,8 +552,8 @@ preprocess_rt_sequences(struct anv_cmd_buffer *cmd_buffer,
 #endif
 #if GFX_VER >= 30
             .RegistersPerThread =
-               brw_register_blocks(device->info,
-                                   cs_prog_data->base.grf_used),
+               intel_register_blocks(device->info,
+                                     cs_prog_data->base.grf_used),
 #endif
          },
       },
@@ -576,7 +573,6 @@ preprocess_rt_sequences(struct anv_cmd_buffer *cmd_buffer,
       .device               = device,
       .cmd_buffer           = cmd_buffer,
       .dynamic_state_stream = &cmd_buffer->dynamic_state_stream,
-      .general_state_stream = &cmd_buffer->general_state_stream,
       .batch                = &cmd_buffer->batch,
       .kernel               = generate_kernel,
    };
@@ -670,7 +666,7 @@ void genX(CmdPreprocessGeneratedCommandsEXT)(
 
    /* Add the indirect set to the relocation list. */
    if (indirect_set) {
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs, indirect_set->bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, indirect_set->bo);
       anv_reloc_list_append(cmd_buffer->batch.relocs, &indirect_set->relocs);
    }
 
@@ -740,7 +736,7 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
 
    /* Add the indirect set to the relocation list. */
    if (indirect_set) {
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs, indirect_set->bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, indirect_set->bo);
       anv_reloc_list_append(cmd_buffer->batch.relocs, &indirect_set->relocs);
    }
 
@@ -821,6 +817,7 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
                                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR,
                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                    ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                                   ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
                                    ANV_PIPE_CS_STALL_BIT,
                                    "after generated commands");
          genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
@@ -952,6 +949,7 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT_KHR,
                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                    ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                                   ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
                                    ANV_PIPE_CS_STALL_BIT,
                                    "after generated commands");
          genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
@@ -1021,7 +1019,7 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
 
       genX(flush_pipeline_select_gpgpu)(cmd_buffer, false);
 
-      genX(flush_descriptor_buffers)(cmd_buffer, bind_state, ANV_RT_STAGE_BITS);
+      genX(flush_binding_mode)(cmd_buffer, bind_state, ANV_RT_STAGE_BITS);
 
       genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
@@ -1073,6 +1071,7 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT_KHR,
                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                    ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                                   ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
                                    ANV_PIPE_CS_STALL_BIT,
                                    "after generated commands");
          genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);

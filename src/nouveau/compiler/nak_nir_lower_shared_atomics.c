@@ -142,11 +142,14 @@ build_mesh_atomic(nir_builder *b, nir_intrinsic_instr *intrin)
       nir_if *if_body =
          nir_push_if(b, nir_ieq(b, elected_thread, current_invocation));
       {
-         current_value = nir_load_shared(b, intrin->def.num_components, intrin->def.bit_size, offset,
-                                         .base = nir_intrinsic_base(intrin));
+         current_value = nir_load_shared(b, intrin->def.num_components,
+                                         intrin->def.bit_size, offset,
+                                         .base = nir_intrinsic_base(intrin),
+                                         .access = nir_intrinsic_access(intrin));
          nir_def *new_value = lower_atomic_op(b, intrin, current_value);
          nir_store_shared(b, new_value, offset,
-                          .base = nir_intrinsic_base(intrin));
+                          .base = nir_intrinsic_base(intrin),
+                          .access = nir_intrinsic_access(intrin));
          nir_jump(b, nir_jump_break);
       }
       nir_pop_if(b, if_body);
@@ -203,13 +206,15 @@ build_f16vec2_cas_atomic(nir_builder *b, nir_intrinsic_instr *intr)
    if (atomic_op == nir_atomic_op_xchg) {
       nir_def *packed_data = nir_pack_bits(b, data, bit_size);
       nir_def *res = nir_shared_atomic(b, bit_size, addr, packed_data,
-                                       .atomic_op = nir_atomic_op_xchg);
+                                       .atomic_op = nir_atomic_op_xchg,
+                                       .access = nir_intrinsic_access(intr));
       return nir_unpack_bits(b, res, 16);
    }
 
    nir_def *initial_val = nir_load_shared(b, 1, bit_size, addr,
                                           .align_mul = 4,
-                                          .access = ACCESS_ATOMIC);
+                                          .access = nir_intrinsic_access(intr) |
+                                                    ACCESS_ATOMIC);
 
    nir_loop *loop = nir_push_loop(b);
    {
@@ -249,7 +254,8 @@ build_f16vec2_cas_atomic(nir_builder *b, nir_intrinsic_instr *intr)
 
       /* attempt CAS: shared_atomic_swap with cmpxchg */
       nir_def *cas_val = nir_shared_atomic_swap(b, bit_size, addr, before, new_val,
-                                                .atomic_op = nir_atomic_op_cmpxchg);
+                                                .atomic_op = nir_atomic_op_cmpxchg,
+                                                .access = nir_intrinsic_access(intr));
 
       nir_break_if(b, nir_ieq(b, cas_val, before));
 

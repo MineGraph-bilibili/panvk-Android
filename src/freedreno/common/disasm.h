@@ -47,11 +47,11 @@ struct shader_stats {
    int constlen;
    int halfreg;
    int fullreg;
-   uint16_t sstall;
-   uint16_t mov_count;
-   uint16_t cov_count;
-   uint16_t last_baryf;
-   uint16_t instrs_per_cat[8];
+   uint32_t sstall;
+   uint32_t mov_count;
+   uint32_t cov_count;
+   uint32_t last_baryf;
+   uint32_t instrs_per_cat[8];
 };
 
 int disasm_a2xx(const uint32_t *dwords, int sizedwords, int level,

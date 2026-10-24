@@ -57,7 +57,7 @@ chirp(struct validate_state *validate, const char *fmt, ...)
    if (validate->I) {
       fprintf(stderr,
               "   invalid instruction in block %d: ", validate->block->index);
-      jay_print_inst(stderr, validate->block, validate->I, NULL);
+      jay_print_inst(stderr, validate->func, validate->I);
    }
    fprintf(stderr, "   ");
    vfprintf(stderr, fmt, args);
@@ -269,18 +269,21 @@ validate_inst(struct validate_state *validate, jay_inst *I)
          (!jay_is_null(I->cond_flag) && opinfo->cmod));
 
    /* We should not be clobbering multiple flags in SIMD16 with a mov.u32 */
-   CHECK(!(I->dst.file == FLAG && jay_type_size_bits(I->type) >
-                                     validate->func->shader->dispatch_width));
+   CHECK(!(I->dst.file == FLAG &&
+           jay_type_size_bits(I->type) >
+              jay_type_size_bits(jay_flag_type(validate->func))));
 
    unsigned num_srcs = I->num_srcs;
 
    if (I->predication) {
       CHECK(num_srcs >= I->predication);
 
-      if (jay_inst_has_default(I)) {
-         jay_def dst = jay_is_null(I->dst) ? I->cond_flag : I->dst;
-         CHECK(jay_normalize_uflag(jay_inst_get_default(I)->file) ==
-               jay_normalize_uflag(dst.file));
+      jay_def dsts[] = { jay_is_null(I->dst) ? I->cond_flag : I->dst,
+                         I->cond_flag };
+      for (unsigned i = 1; i < I->predication; ++i) {
+         jay_def def = I->src[I->num_srcs - I->predication + i];
+         CHECK(jay_normalize_uflag(def.file) ==
+               jay_normalize_uflag(dsts[i - 1].file));
       }
 
       CHECK(jay_is_flag(*jay_inst_get_predicate(I)));
@@ -362,12 +365,18 @@ jay_validate_function(struct validate_state *validate)
       validate->block = block;
       validate->I = NULL;
 
-      CHECK(block->logical_succs[0] || !block->logical_succs[1]);
       CHECK(block->index < validate->func->num_blocks);
 
-      /* Post-RA we can remove physical jumps though they exist logically */
-      if (block->logical_succs[1] && !validate->post_ra) {
-         CHECK(jay_block_ending_jump(block) != NULL);
+      /* If the block has a fall-through edge, it must be the first block in
+       * the successors list.
+       */
+      jay_block *next_block = jay_next_block(block);
+      for (enum jay_file file = GPR; file <= UGPR; ++file) {
+         bool is_first_successor = true;
+         jay_foreach_successor(block, succ, file) {
+            CHECK(*succ != next_block || is_first_successor);
+            is_first_successor = false;
+         }
       }
 
       /* Loop headers have a single forward edge and a single back edge. There
@@ -406,10 +415,10 @@ jay_validate_function(struct validate_state *validate)
            ++file) {
          if (jay_num_successors(block, file) > 1 && !validate->post_ra) {
             jay_foreach_successor(block, succ, file) {
-               if (jay_num_predecessors(succ, file) > 1) {
+               if (jay_num_predecessors(*succ, file) > 1) {
                   chirp(validate, "%s critical edge (B%u -> B%u)",
                         file == GPR ? "Logical" : "Physical", block->index,
-                        succ->index);
+                        (*succ)->index);
                }
             }
          }

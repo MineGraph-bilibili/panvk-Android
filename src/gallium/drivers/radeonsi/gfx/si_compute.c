@@ -45,7 +45,7 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
    program->shader.wave_size = si_determine_wave_size(sscreen, &program->shader);
 
    unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN];
-   si_get_ir_cache_key(sel, false, false, shader->wave_size, ir_blake3_cache_key);
+   si_get_ir_cache_key(shader, ir_blake3_cache_key);
 
    /* Try to load the shader from the shader cache. */
    simple_mtx_lock(&sscreen->shader_cache_mutex);
@@ -71,7 +71,7 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
       shader->config.rsrc1 = S_00B848_VGPRS(si_shader_encode_vgprs(shader)) |
                              S_00B848_SGPRS(si_shader_encode_sgprs(shader)) |
                              S_00B848_DX10_CLAMP(sscreen->info.gfx_level < GFX12) |
-                             S_00B848_MEM_ORDERED(si_shader_mem_ordered(shader)) |
+                             S_00B848_MEM_ORDERED(shader->config.mem_ordered) |
                              S_00B848_FLOAT_MODE(shader->config.float_mode) |
                              /* This is needed for CWSR, but it causes halts to work differently. */
                              S_00B848_PRIV(sscreen->info.gfx_level == GFX11);
@@ -110,7 +110,12 @@ void *si_create_compute_state_for_nir(struct pipe_context *ctx, nir_shader *nir,
    struct si_context *sctx = (struct si_context *)ctx;
    struct si_screen *sscreen = (struct si_screen *)ctx->screen;
    struct si_compute *program = CALLOC_STRUCT(si_compute);
-   struct si_shader_selector *sel = &program->sel;
+   struct si_shader_selector *sel;
+
+   if (!program)
+      return NULL;
+
+   sel = &program->sel;
 
    pipe_reference_init(&sel->base.reference, 1);
    sel->stage = stage;
@@ -210,14 +215,17 @@ static void si_set_global_binding(struct pipe_context *ctx, unsigned first, unsi
    struct si_context *sctx = (struct si_context *)ctx;
 
    if (first + n > sctx->max_global_buffers) {
+      struct pipe_resource **new_global_buffers;
       unsigned old_max = sctx->max_global_buffers;
       sctx->max_global_buffers = first + n;
-      sctx->global_buffers = realloc(
+      new_global_buffers = realloc(
          sctx->global_buffers, sctx->max_global_buffers * sizeof(sctx->global_buffers[0]));
-      if (!sctx->global_buffers) {
+      if (!new_global_buffers) {
          mesa_loge("failed to allocate compute global_buffers");
+         sctx->max_global_buffers = old_max;
          return;
       }
+      sctx->global_buffers = new_global_buffers;
 
       memset(&sctx->global_buffers[old_max], 0,
              (sctx->max_global_buffers - old_max) * sizeof(sctx->global_buffers[0]));

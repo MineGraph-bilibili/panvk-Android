@@ -30,13 +30,47 @@
 extern DWORD
 CalculateQualityFromQP( DWORD QP );
 
+// utility to convert from pipe_h2645_enc_picture_type to string description
+static const char *
+ConvertPipeH2645FrameTypeToString( pipe_h2645_enc_picture_type picType )
+{
+   switch( picType )
+   {
+      case PIPE_H2645_ENC_PICTURE_TYPE_P:
+      {
+         return "H265_P_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_B:
+      {
+         return "H265_B_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_I:
+      {
+         return "H265_I_FRAME";
+      }
+      break;
+      case PIPE_H2645_ENC_PICTURE_TYPE_IDR:
+      {
+         return "H265_IDR_FRAME";
+      }
+      break;
+      default:
+      {
+         UNREACHABLE( "Unsupported pipe_h2645_enc_picture_type" );
+      }
+      break;
+   }
+}
+
 // utility function to compute the cropping rectangle given texture and output dimensions
 static void
 ComputeCroppingRect( const UINT32 textureWidth,
                      const UINT32 textureHeight,
                      const UINT uiOutputWidth,
                      const UINT uiOutputHeight,
-                     const enum pipe_video_profile outputPipeProfile,
+                     const eAVEncH265VProfile hevcProfile,
                      BOOL &bFrameCroppingFlag,
                      UINT32 &uiFrameCropRightOffset,
                      UINT32 &uiFrameCropBottomOffset )
@@ -46,7 +80,7 @@ ComputeCroppingRect( const UINT32 textureWidth,
 
    if( iCropRight || iCropBottom )
    {
-      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertProfileToFormat( outputPipeProfile ) );
+      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertAVEncVProfileToPipeFormat( hevcProfile ) );
       UINT32 cropUnitX = 1;
       UINT32 cropUnitY = 1;
       switch( chromaFormatIdc )
@@ -113,7 +147,7 @@ CDX12EncHMFT::UpdateH265EncPictureDesc( pipe_h265_enc_picture_desc *pPicInfo,
    pPicInfo->seq.ip_period = ip_period;
    pPicInfo->seq.pic_width_in_luma_samples = pic_width_in_luma_samples;
    pPicInfo->seq.pic_height_in_luma_samples = pic_height_in_luma_samples;
-   pPicInfo->seq.chroma_format_idc = GetChromaFormatIdc( ConvertProfileToFormat( m_outputPipeProfile ) );
+   pPicInfo->seq.chroma_format_idc = GetChromaFormatIdc( ConvertAVEncVProfileToPipeFormat( m_uiProfile ) );
 
    pPicInfo->seq.log2_max_pic_order_cnt_lsb_minus4 = log2_max_pic_order_cnt_lsb_minus4;
    pPicInfo->seq.log2_min_luma_coding_block_size_minus3 =
@@ -776,7 +810,7 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
                         alignedHeight,
                         m_uiOutputWidth,
                         m_uiOutputHeight,
-                        m_outputPipeProfile,
+                        m_uiProfile,
                         m_bFrameCroppingFlag,
                         m_uiFrameCropRightOffset,
                         m_uiFrameCropBottomOffset );
@@ -1040,7 +1074,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
          m_pPipeVideoCodec,
          static_cast<unsigned>( std::ceil( textureWidth / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
          static_cast<unsigned>( std::ceil( textureHeight / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
-         ConvertProfileToFormat( m_pPipeVideoCodec->profile ),
+         ConvertAVEncVProfileToPipeFormat( m_uiProfile ),
          m_pPipeVideoCodec->max_references + 1 /*curr pic*/ +
             ( m_bLowLatency ? 0 : MFT_INPUT_QUEUE_DEPTH ) /*MFT process input queue depth for delayed in flight recon pic release*/,
          hr );
@@ -1049,6 +1083,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
 
    m_pGOPTracker = new reference_frames_tracker_hevc( this,
                                                       m_pPipeVideoCodec,
+                                                      m_uiProfile,
                                                       textureWidth,
                                                       textureHeight,
                                                       m_uiGopSize,

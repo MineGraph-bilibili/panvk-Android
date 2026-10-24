@@ -4,16 +4,22 @@
 use crate::api::icd::*;
 use crate::api::types::*;
 use crate::core::context::*;
+use crate::core::device::*;
 use crate::core::queue::*;
 use crate::impl_cl_type_trait;
 
+use mesa_rust::pipe::context::RWFlags;
 use mesa_rust::pipe::query::*;
+use mesa_rust::pipe::resource::PipeResourceOwned;
+use mesa_rust::pipe::screen::ResourceType;
 use mesa_rust_gen::*;
 use mesa_rust_util::static_assert;
 use rusticl_opencl_gen::*;
 
 use std::collections::HashSet;
 use std::mem;
+use std::sync::atomic;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -30,6 +36,8 @@ static_assert!(CL_QUEUED == 3);
 pub type EventSig =
     Box<dyn FnOnce(&Context, &mut QueueContextWithState) -> CLResult<()> + Send + Sync>;
 
+const PROFILING_ORDERING: atomic::Ordering = atomic::Ordering::SeqCst;
+
 pub enum EventTimes {
     Queued = CL_PROFILING_COMMAND_QUEUED as isize,
     Submit = CL_PROFILING_COMMAND_SUBMIT as isize,
@@ -42,20 +50,215 @@ struct EventMutState {
     status: cl_int,
     cbs: [Vec<EventCB>; 3],
     work: Option<EventSig>,
-    time_queued: cl_ulong,
-    time_submit: cl_ulong,
-    time_start: cl_ulong,
-    time_end: cl_ulong,
+}
+
+trait Profiler: Send + Sync {
+    fn profile_work(
+        &self,
+        cl_ctx: &Context,
+        ctx: &mut QueueContextWithState,
+        work: Option<EventSig>,
+    ) -> CLResult<()>;
+    fn get_time(&self, which: EventTimes) -> cl_ulong;
+    fn mark_queued(&self, time: cl_ulong);
+}
+
+struct DisabledProfiler {}
+
+impl Profiler for DisabledProfiler {
+    fn get_time(&self, _which: EventTimes) -> cl_ulong {
+        0
+    }
+
+    fn mark_queued(&self, _time: cl_ulong) {}
+
+    fn profile_work(
+        &self,
+        cl_ctx: &Context,
+        ctx: &mut QueueContextWithState,
+        work: Option<EventSig>,
+    ) -> CLResult<()> {
+        if let Some(w) = work {
+            w(cl_ctx, ctx)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Default)]
+struct CPUProfiler {
+    time_queued: AtomicU64,
+    time_submit: AtomicU64,
+    time_start: AtomicU64,
+    time_end: AtomicU64,
+}
+
+impl CPUProfiler {
+    fn set_time(&self, which: EventTimes, value: cl_ulong) {
+        match which {
+            EventTimes::Queued => &self.time_queued.store(value, PROFILING_ORDERING),
+            EventTimes::Submit => &self.time_submit.store(value, PROFILING_ORDERING),
+            EventTimes::Start => &self.time_start.store(value, PROFILING_ORDERING),
+            EventTimes::End => &self.time_end.store(value, PROFILING_ORDERING),
+        };
+    }
+}
+
+impl Profiler for CPUProfiler {
+    fn profile_work(
+        &self,
+        cl_ctx: &Context,
+        ctx: &mut QueueContextWithState,
+        work: Option<EventSig>,
+    ) -> CLResult<()> {
+        self.set_time(EventTimes::Submit, ctx.dev.screen().get_timestamp());
+        if let Some(w) = work {
+            let mut query_start =
+                PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx)
+                    .ok_or(CL_OUT_OF_HOST_MEMORY)?;
+            w(cl_ctx, ctx)?;
+            let mut query_end =
+                PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx)
+                    .ok_or(CL_OUT_OF_HOST_MEMORY)?;
+
+            self.set_time(EventTimes::Start, query_start.read_blocked());
+            self.set_time(EventTimes::End, query_end.read_blocked());
+        }
+
+        Ok(())
+    }
+
+    fn get_time(&self, which: EventTimes) -> cl_ulong {
+        match which {
+            EventTimes::Queued => self.time_queued.load(PROFILING_ORDERING),
+            EventTimes::Submit => self.time_submit.load(PROFILING_ORDERING),
+            EventTimes::Start => self.time_start.load(PROFILING_ORDERING),
+            EventTimes::End => self.time_end.load(PROFILING_ORDERING),
+        }
+    }
+
+    fn mark_queued(&self, time: cl_ulong) {
+        self.set_time(EventTimes::Queued, time);
+    }
+}
+
+struct GPUProfiler {
+    time_queued: AtomicU64,
+    time_submit: AtomicU64,
+    res: PipeResourceOwned,
+    dev: &'static Device,
+}
+
+impl GPUProfiler {
+    fn new(dev: &'static Device) -> CLResult<Self> {
+        let res = dev
+            .screen()
+            .resource_create_buffer(
+                0x10,
+                ResourceType::Staging,
+                PIPE_BIND_QUERY_BUFFER,
+                0,
+                // PIPE_RESOURCE_FLAG_MAP_COHERENT | PIPE_RESOURCE_FLAG_MAP_PERSISTENT,
+            )
+            .ok_or(CL_OUT_OF_RESOURCES)?;
+
+        Ok(Self {
+            time_queued: 0.into(),
+            time_submit: 0.into(),
+            dev: dev,
+            res: res,
+        })
+    }
+
+    fn has_timestamp_query_raw(&self) -> bool {
+        self.dev.screen().is_convert_timestamp_supported()
+    }
+
+    fn read_timestamp_query(&self, offset: i32) -> cl_ulong {
+        let helper_ctx = self.dev.helper_ctx();
+        let tx = helper_ctx
+            .buffer_map(&self.res, offset, 8, RWFlags::RD)
+            .unwrap();
+        let mut ts = unsafe { tx.ptr().cast::<cl_ulong>().read() };
+        if self.has_timestamp_query_raw() {
+            ts = self.dev.screen().convert_timestamp(ts);
+        }
+        ts
+    }
+
+    fn create_timestamp_query<'c>(&self, ctx: &'c QueueContext) -> CLResult<PipeQuery<'c, u64>> {
+        let query_start = if self.has_timestamp_query_raw() {
+            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP_RAW }>::new(ctx)
+        } else {
+            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx)
+        };
+
+        query_start.ok_or(CL_OUT_OF_HOST_MEMORY)
+    }
+}
+
+impl Profiler for GPUProfiler {
+    fn profile_work(
+        &self,
+        cl_ctx: &Context,
+        ctx: &mut QueueContextWithState,
+        work: Option<EventSig>,
+    ) -> CLResult<()> {
+        self.time_submit
+            .store(ctx.dev.screen().get_timestamp(), PROFILING_ORDERING);
+
+        if let Some(w) = work {
+            let mut query_start = self.create_timestamp_query(ctx.ctx)?;
+            query_start.write_to_resource(&self.res, 0);
+
+            w(cl_ctx, ctx)?;
+
+            let mut query_end = self.create_timestamp_query(ctx.ctx)?;
+            query_end.write_to_resource(&self.res, 8);
+        }
+
+        Ok(())
+    }
+
+    fn get_time(&self, which: EventTimes) -> cl_ulong {
+        match which {
+            EventTimes::Queued => self.time_queued.load(PROFILING_ORDERING),
+            EventTimes::Submit => self.time_submit.load(PROFILING_ORDERING),
+            EventTimes::Start => self.read_timestamp_query(0),
+            EventTimes::End => self.read_timestamp_query(8),
+        }
+    }
+
+    fn mark_queued(&self, time: cl_ulong) {
+        self.time_queued.store(time, PROFILING_ORDERING);
+    }
+}
+
+pub struct GPUEvent {
+    cmd_type: cl_command_type,
+    queue: Weak<Queue>,
+    deps: Vec<Arc<Event>>,
+    profiling: Box<dyn Profiler>,
+}
+
+impl GPUEvent {
+    pub fn get_time(&self, which: EventTimes) -> cl_ulong {
+        self.profiling.get_time(which)
+    }
+}
+
+enum EventImpl {
+    UserEvent,
+    GPUEvent(GPUEvent),
 }
 
 pub struct Event {
     pub base: CLObjectBase<CL_INVALID_EVENT>,
     pub context: Arc<Context>,
-    pub queue: Option<Weak<Queue>>,
-    pub cmd_type: cl_command_type,
-    pub deps: Vec<Arc<Event>>,
     state: Mutex<EventMutState>,
     cv: Condvar,
+    kind: EventImpl,
 }
 
 impl_cl_type_trait!(cl_event, Event, CL_INVALID_EVENT);
@@ -66,33 +269,44 @@ impl Event {
         cmd_type: cl_command_type,
         deps: Vec<Arc<Event>>,
         work: EventSig,
-    ) -> Arc<Event> {
-        Arc::new(Self {
+    ) -> CLResult<Arc<Event>> {
+        let profiler: Box<dyn Profiler> = if queue.is_profiling_enabled() {
+            if queue.device.screen().caps().query_buffer_object {
+                Box::new(GPUProfiler::new(queue.device)?)
+            } else {
+                Box::new(CPUProfiler::default())
+            }
+        } else {
+            Box::new(DisabledProfiler {})
+        };
+
+        Ok(Arc::new(Self {
             base: CLObjectBase::new(RusticlTypes::Event),
             context: Arc::clone(&queue.context),
-            queue: Some(Arc::downgrade(queue)),
-            cmd_type: cmd_type,
-            deps: deps,
             state: Mutex::new(EventMutState {
                 status: CL_QUEUED as cl_int,
                 work: Some(work),
                 ..Default::default()
             }),
+            kind: EventImpl::GPUEvent(GPUEvent {
+                cmd_type: cmd_type,
+                queue: Arc::downgrade(queue),
+                deps: deps,
+                profiling: profiler,
+            }),
             cv: Condvar::new(),
-        })
+        }))
     }
 
     pub fn new_user(context: Arc<Context>) -> Arc<Event> {
         Arc::new(Self {
             base: CLObjectBase::new(RusticlTypes::Event),
             context: context,
-            queue: None,
-            cmd_type: CL_COMMAND_USER,
-            deps: Vec::new(),
             state: Mutex::new(EventMutState {
                 status: CL_SUBMITTED as cl_int,
                 ..Default::default()
             }),
+            kind: EventImpl::UserEvent,
             cv: Condvar::new(),
         })
     }
@@ -160,27 +374,13 @@ impl Event {
     }
 
     pub fn is_user(&self) -> bool {
-        self.cmd_type == CL_COMMAND_USER
+        matches!(self.kind, EventImpl::UserEvent)
     }
 
-    pub fn set_time(&self, which: EventTimes, value: cl_ulong) {
-        let mut lock = self.state();
-        match which {
-            EventTimes::Queued => lock.time_queued = value,
-            EventTimes::Submit => lock.time_submit = value,
-            EventTimes::Start => lock.time_start = value,
-            EventTimes::End => lock.time_end = value,
-        }
-    }
-
-    pub fn get_time(&self, which: EventTimes) -> cl_ulong {
-        let lock = self.state();
-
-        match which {
-            EventTimes::Queued => lock.time_queued,
-            EventTimes::Submit => lock.time_submit,
-            EventTimes::Start => lock.time_start,
-            EventTimes::End => lock.time_end,
+    pub fn mark_queued(&self, value: cl_ulong) {
+        match &self.kind {
+            EventImpl::GPUEvent(gpu) => gpu.profiling.mark_queued(value),
+            EventImpl::UserEvent => {}
         }
     }
 
@@ -221,46 +421,23 @@ impl Event {
         lock.status
     }
 
+    fn call_inner(&self, ctx: &mut QueueContextWithState, work: Option<EventSig>) -> CLResult<()> {
+        let gpu = self.gpu_event().unwrap();
+        gpu.profiling.profile_work(&self.context, ctx, work)
+    }
+
     // We always assume that work here simply submits stuff to the hardware even if it's just doing
     // sw emulation or nothing at all.
     // If anything requets waiting, we will update the status through fencing later.
     pub fn call(&self, ctx: &mut QueueContextWithState) -> cl_int {
         let mut lock = self.state();
         let mut status = lock.status;
-        let profiling_enabled = lock.time_queued != 0;
+
         if status == CL_QUEUED as cl_int {
-            if profiling_enabled {
-                // We already have the lock so can't call set_time on the event
-                lock.time_submit = ctx.dev.screen().get_timestamp();
-            }
-            let mut query_start = None;
-            let mut query_end = None;
-            status = lock.work.take().map_or(
-                // if there is no work
-                CL_SUBMITTED as cl_int,
-                |w| {
-                    if profiling_enabled {
-                        query_start =
-                            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx);
-                    }
-
-                    let res = w(&self.context, ctx).err().map_or(
-                        // return the error if there is one
-                        CL_SUBMITTED as cl_int,
-                        |e| e,
-                    );
-                    if profiling_enabled {
-                        query_end =
-                            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx);
-                    }
-                    res
-                },
-            );
-
-            if profiling_enabled {
-                lock.time_start = query_start.unwrap().read_blocked();
-                lock.time_end = query_end.unwrap().read_blocked();
-            }
+            status = self
+                .call_inner(ctx, lock.work.take())
+                .err()
+                .unwrap_or(CL_SUBMITTED as cl_int);
             self.set_status(lock, status);
         }
         status
@@ -273,7 +450,7 @@ impl Event {
 
         // only scan dependencies if it's a new one
         if result.insert(self) {
-            for e in &self.deps {
+            for e in self.deps() {
                 e.deep_unflushed_deps_impl(result);
             }
         }
@@ -295,10 +472,38 @@ impl Event {
     pub fn deep_unflushed_queues(events: &[Arc<Event>]) -> HashSet<Arc<Queue>> {
         Event::deep_unflushed_deps(events)
             .iter()
-            .filter_map(|e| e.queue.as_ref())
+            .filter_map(|e| e.queue())
             // We don't have to do anything for destroyed queues as they already flush on drop.
             .filter_map(Weak::upgrade)
             .collect()
+    }
+
+    pub fn cmd_type(&self) -> cl_command_type {
+        match &self.kind {
+            EventImpl::GPUEvent(gpu) => gpu.cmd_type,
+            EventImpl::UserEvent => CL_COMMAND_USER,
+        }
+    }
+
+    pub fn queue(&self) -> Option<&Weak<Queue>> {
+        match &self.kind {
+            EventImpl::GPUEvent(gpu) => Some(&gpu.queue),
+            EventImpl::UserEvent => None,
+        }
+    }
+
+    pub fn deps(&self) -> &[Arc<Event>] {
+        match &self.kind {
+            EventImpl::GPUEvent(gpu) => &gpu.deps,
+            EventImpl::UserEvent => &[],
+        }
+    }
+
+    pub fn gpu_event(&self) -> Option<&GPUEvent> {
+        match &self.kind {
+            EventImpl::GPUEvent(gpu) => Some(gpu),
+            EventImpl::UserEvent => None,
+        }
     }
 }
 
@@ -308,15 +513,19 @@ impl Drop for Event {
     // This abuses the fact that `Arc::into_inner` only succeeds when there is one strong reference
     // so we turn a recursive drop chain into a drop list for events having no other references.
     fn drop(&mut self) {
-        if self.deps.is_empty() {
+        let EventImpl::GPUEvent(gpu) = &mut self.kind else {
             return;
-        }
+        };
 
-        let mut deps_list = vec![mem::take(&mut self.deps)];
+        let mut deps_list = vec![mem::take(&mut gpu.deps)];
         while let Some(deps) = deps_list.pop() {
             for dep in deps {
                 if let Some(mut dep) = Arc::into_inner(dep) {
-                    deps_list.push(mem::take(&mut dep.deps));
+                    let EventImpl::GPUEvent(ref mut gpu) = dep.kind else {
+                        continue;
+                    };
+
+                    deps_list.push(mem::take(&mut gpu.deps));
                 }
             }
         }

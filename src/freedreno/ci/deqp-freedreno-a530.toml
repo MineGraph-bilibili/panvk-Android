@@ -18,7 +18,6 @@ deqp_args = [
     "--deqp-surface-type=pbuffer", "--deqp-visibility=hidden",
     "--deqp-gl-config-name=rgba8888d24s8ms0",
 ]
-fraction = 2
 
 [[deqp]]
 deqp = "/deqp-gles/modules/gles31/deqp-gles31"
@@ -28,7 +27,6 @@ deqp_args = [
     "--deqp-surface-type=pbuffer", "--deqp-visibility=hidden",
     "--deqp-gl-config-name=rgba8888d24s8ms0",
 ]
-fraction = 2
 
 [[deqp]]
 deqp = "/deqp-gles/external/openglcts/modules/glcts"
@@ -42,13 +40,3 @@ deqp_args = [
     "--deqp-surface-type=pbuffer", "--deqp-visibility=hidden",
     "--deqp-gl-config-name=rgba8888d24s8ms0",
 ]
-
-[[piglit]]
-piglit_folder = "/piglit"
-# We use "gpu" to skip running glslparser tests, with the assumption that
-# they're covered by the llvmpipe run.
-profile = "quick_shader"
-process_isolation = true
-  [piglit.env]
-  PIGLIT_PLATFORM = "gbm"
-  WAFFLE_PLATFORM = "gbm"

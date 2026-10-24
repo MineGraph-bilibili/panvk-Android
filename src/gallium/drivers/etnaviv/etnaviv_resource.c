@@ -85,11 +85,21 @@ static uint64_t etna_resource_modifier(struct etna_resource *rsc)
    return layout_to_modifier(rsc->layout);
 }
 
+bool
+etna_resource_needs_rb_swap(const struct etna_screen *screen,
+                            const struct etna_resource *rsc)
+{
+   return rsc->shared && translate_pe_format_rb_swap(rsc->base.format, screen);
+}
+
 static bool
 etna_resource_is_render_compatible(struct pipe_screen *pscreen,
                                    struct etna_resource *rsc)
 {
    struct etna_screen *screen = etna_screen(pscreen);
+
+   if (etna_resource_needs_rb_swap(screen, rsc))
+      return false;
 
    if (rsc->layout == ETNA_LAYOUT_LINEAR) {
       if (!VIV_FEATURE(screen, ETNA_FEATURE_LINEAR_PE))
@@ -111,8 +121,8 @@ etna_resource_is_render_compatible(struct pipe_screen *pscreen,
 }
 
 struct etna_resource *
-etna_resource_get_render_compatible(struct pipe_context *pctx,
-                                    struct pipe_resource *prsc)
+etna_resource_alloc_render_shadow(struct pipe_context *pctx,
+                                  struct pipe_resource *prsc)
 {
    struct etna_context *ctx = etna_context(pctx);
    struct etna_screen *screen = ctx->screen;
@@ -122,11 +132,7 @@ etna_resource_get_render_compatible(struct pipe_context *pctx,
    struct pipe_resource templat;
    unsigned layout;
 
-   if (res->render)
-      return etna_resource(res->render);
-
-   if (etna_resource_is_render_compatible(pctx->screen, res))
-      return res;
+   assert(!res->render);
 
    layout = ETNA_LAYOUT_TILED;
    if (need_multitiled)
@@ -263,6 +269,7 @@ etna_screen_resource_alloc_ts(struct pipe_screen *pscreen,
       close(handle.handle);
    } else {
       rsc->ts_bo = etna_bo_new(screen->dev, ts_bo_size, DRM_ETNA_GEM_CACHE_WC);
+      lvl->ts_needs_clear = true;
    }
 
    if (unlikely(!rsc->ts_bo)) {
@@ -294,8 +301,6 @@ etna_screen_can_create_resource(struct pipe_screen *pscreen,
                                 const struct pipe_resource *templat)
 {
    struct etna_screen *screen = etna_screen(pscreen);
-   if (!translate_samples_to_xyscale(templat->nr_samples, NULL, NULL))
-      return false;
 
    /* templat->bind is not set here, so we must use the minimum sizes */
    uint max_size =
@@ -528,9 +533,11 @@ etna_resource_alloc(struct pipe_screen *pscreen, unsigned layout,
       }
    }
 
+   rsc->render_compatible = etna_resource_is_render_compatible(pscreen, rsc);
+
    /* Allocate TS for the resource if it is renderable and may use TS */
    if ((templat->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL)) &&
-       etna_resource_is_render_compatible(pscreen, rsc) &&
+       rsc->render_compatible &&
        etna_resource_can_use_ts(screen, rsc))
       etna_screen_resource_alloc_ts(pscreen, rsc, modifier);
 
@@ -863,6 +870,8 @@ etna_resource_from_handle(struct pipe_screen *pscreen,
                                                                   level->padded_height);
    level->size = level->layer_stride;
 
+   rsc->render_compatible = etna_resource_is_render_compatible(pscreen, rsc);
+
    if (screen->ro)
       rsc->scanout = renderonly_create_gpu_import_for_resource(prsc, screen->ro,
                                                                NULL);
@@ -948,6 +957,7 @@ etna_resource_get_handle(struct pipe_screen *pscreen,
     * when the PE renders to this resource. */
    rsc->shared = true;
    rsc->shared_native_order = true;
+   rsc->render_compatible = etna_resource_is_render_compatible(pscreen, rsc);
 
    if (!(usage & PIPE_HANDLE_USAGE_EXPLICIT_FLUSH))
       rsc->explicit_flush = false;

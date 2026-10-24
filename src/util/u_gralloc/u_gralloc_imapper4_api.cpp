@@ -1,6 +1,7 @@
 /*
  * Mesa 3-D graphics library
  *
+ * Copyright (C) 2026 NXP
  * Copyright (C) 2021 GlobalLogic Ukraine
  * Copyright (C) 2021-2022 Roman Stratiienko (r.stratiienko@gmail.com)
  * SPDX-License-Identifier: MIT
@@ -33,7 +34,7 @@ using android::hardware::graphics::mapper::V4_0::IMapper;
 using MetadataType =
    android::hardware::graphics::mapper::V4_0::IMapper::MetadataType;
 
-Error
+static Error
 GetMetadata(android::sp<IMapper> mapper, const native_handle_t *buffer,
             MetadataType type, hidl_vec<uint8_t> *metadata)
 {
@@ -54,7 +55,7 @@ GetMetadata(android::sp<IMapper> mapper, const native_handle_t *buffer,
    return error;
 }
 
-std::optional<std::vector<PlaneLayout>>
+static std::optional<std::vector<PlaneLayout>>
 GetPlaneLayouts(android::sp<IMapper> mapper, const native_handle_t *buffer)
 {
    hidl_vec<uint8_t> encoded_layouts;
@@ -125,8 +126,38 @@ mapper4_get_buffer_basic_info(struct u_gralloc *gralloc,
    if (status != android::OK)
       return -EINVAL;
 
+   uint64_t alloc_size;
+
+   hidl_vec<uint8_t> encoded_alloc_size;
+   err = GetMetadata(gr4->mapper, hnd->handle,
+                     android::gralloc4::MetadataType_AllocationSize,
+                     &encoded_alloc_size);
+   if (err != Error::NONE)
+      return -EINVAL;
+
+   status = android::gralloc4::decodeAllocationSize(encoded_alloc_size,
+                                                    &alloc_size);
+   if (status != android::OK)
+      return -EINVAL;
+
+   uint64_t layer_count;
+
+   hidl_vec<uint8_t> encoded_layer_count;
+   err = GetMetadata(gr4->mapper, hnd->handle,
+                     android::gralloc4::MetadataType_LayerCount,
+                     &encoded_layer_count);
+   if (err != Error::NONE)
+      return -EINVAL;
+
+   status = android::gralloc4::decodeLayerCount(encoded_layer_count,
+                                                &layer_count);
+   if (status != android::OK)
+      return -EINVAL;
+
    out->drm_fourcc = drm_fourcc;
    out->modifier = drm_modifier;
+   out->alloc_size = alloc_size;
+   out->layer_count = layer_count;
 
    auto layouts_opt = GetPlaneLayouts(gr4->mapper, hnd->handle);
 

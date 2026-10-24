@@ -15,8 +15,8 @@
 #include "util/log.h"
 #include "util/os_misc.h"
 #include "util/u_debug.h"
-#include "venus-protocol/vn_protocol_driver_info.h"
 #include "vk_enum_to_str.h"
+#include "vn_protocol_driver_info.h"
 
 #include "vn_instance.h"
 #include "vn_ring.h"

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 files_libgallium = files(
-  'driver_ddebug/dd_draw.c',
+  'driver_ddebug/dd_util.c',
   'driver_ddebug/dd_util.h',
   'pipebuffer/pb_buffer_fenced.c',
   'pipebuffer/pb_buffer_fenced.h',
@@ -178,6 +178,7 @@ if with_gfx_compute
     'draw/draw_vs.h',
     'draw/draw_vs_variant.c',
     'driver_ddebug/dd_context.c',
+    'driver_ddebug/dd_draw.c',
     'driver_ddebug/dd_pipe.h',
     'driver_ddebug/dd_public.h',
     'driver_ddebug/dd_screen.c',

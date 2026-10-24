@@ -88,6 +88,7 @@ is_expression(const brw_shader *v, const brw_inst *const inst)
    case SHADER_OPCODE_INT_REMAINDER:
    case SHADER_OPCODE_SIN:
    case SHADER_OPCODE_COS:
+   case SHADER_OPCODE_TANH:
    case SHADER_OPCODE_LOAD_SUBGROUP_INVOCATION:
    case FS_OPCODE_INTERPOLATE_AT_SAMPLE:
    case FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET:
@@ -372,11 +373,11 @@ hash_inst(const void *v)
          (uint8_t)tex->const_offsets[1],
          (uint8_t)tex->const_offsets[2],
       };
-      const uint32_t tex_u32data[] = {
+      const uint64_t tex_u64data[] = {
          tex->bits,
       };
       hash = HASH(hash, tex_u8data);
-      hash = HASH(hash, tex_u32data);
+      hash = HASH(hash, tex_u64data);
       break;
    }
 
@@ -390,6 +391,7 @@ hash_inst(const void *v)
          mem->coord_components,
          mem->components,
          mem->flags,
+         mem->surface_index,
       };
       const uint32_t mem_u32data[] = {
          (uint32_t)mem->address_offset,

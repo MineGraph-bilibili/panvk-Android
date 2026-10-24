@@ -10,6 +10,33 @@
 #include <stdbool.h>
 
 static inline void
+u_hexdump_words(FILE *fp, const uint8_t *hex, size_t cnt)
+{
+   size_t i;
+
+   for (i = 0; i + 4 <= cnt; i += 4) {
+      if ((i & 0xF) == 0)
+         fprintf(fp, "%06zX ", i);
+
+      fprintf(fp, " %02x%02x%02x%02x", hex[i + 3], hex[i + 2], hex[i + 1], hex[i]);
+
+      if ((i & 0xF) == 0xC)
+         fprintf(fp, "\n");
+   }
+
+   if (i < cnt) {
+      if ((i & 0xF) == 0)
+         fprintf(fp, "%06zX ", i);
+      fprintf(fp, " ");
+      for (; i < cnt; ++i)
+         fprintf(fp, "%02x", hex[i]);
+   }
+
+   if ((i & 0xF) != 0 || cnt == 0)
+      fprintf(fp, "\n");
+}
+
+static inline void
 u_hexdump(FILE *fp, const uint8_t *hex, size_t cnt, bool with_strings)
 {
    for (unsigned i = 0; i < cnt; ++i) {

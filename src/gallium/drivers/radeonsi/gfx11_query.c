@@ -10,6 +10,8 @@
 #include "util/u_memory.h"
 #include "util/u_suballoc.h"
 
+#include "ac_cmdbuf_cp.h"
+
 #include <stddef.h>
 
 static void emit_shader_query(struct si_context *sctx, unsigned index)
@@ -393,7 +395,7 @@ static void gfx11_sh_query_get_result_resource(struct si_context *sctx, struct s
          va += end - sizeof(struct gfx11_sh_query_buffer_mem);
          va += offsetof(struct gfx11_sh_query_buffer_mem, fence);
 
-         si_cp_wait_mem(sctx, &sctx->gfx_cs, va, 0x00000001, 0x00000001, 0);
+         ac_emit_cp_wait_mem(&sctx->gfx_cs.current, va, 0x00000001, 0x00000001, 0);
       }
 
       /* ssbo[2] is either tmp_buffer or resource */

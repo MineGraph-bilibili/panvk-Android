@@ -119,6 +119,8 @@ struct vk_ir_node {
 /* Box node contains no opaque leaves */
 #define VK_BVH_BOX_FLAG_NO_OPAQUE    0x2
 
+#define VK_BVH_BOX_FLAGS_INV_CULL_MASK_SHIFT 2
+
 struct vk_ir_box_node {
    vk_ir_node base;
    uint32_t children[2];
@@ -196,6 +198,11 @@ struct key64_id_pair {
 struct vk_prefix_scan_partition {
    uint32_t aggregate;
    uint32_t inclusive_sum;
+};
+
+struct morton_ready_count {
+   uint32_t ready;
+   uint32_t done;
 };
 
 #ifdef VULKAN
@@ -384,6 +391,7 @@ TYPE(vk_aabb, 4);
 
 TYPE(key32_id_pair, 4);
 TYPE(key64_id_pair, 4);
+TYPE(morton_ready_count, 4);
 
 TYPE(vk_accel_struct_serialization_header, 8);
 
@@ -421,6 +429,8 @@ TYPE(vk_prefix_scan_partition, 4);
 #define BVH_BOUNDS_OFFSET_ID 1
 #define BUILD_FLAGS_ID 2
 #define ROOT_FLAGS_OFFSET_ID 3
+#define MORTON_SORT_WORKGROUP_SIZE_ID 4
+#define MORTON_SORT_KVS_PER_THREAD_ID 5
 
 #define VK_BUILD_FLAG_ALWAYS_ACTIVE (1 << 0)
 #define VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS (1 << 1)
@@ -429,7 +439,7 @@ TYPE(vk_prefix_scan_partition, 4);
 #define VK_BUILD_FLAG_COUNT 4
 
 #define VK_LEAF_BUILD_FLAGS (VK_BUILD_FLAG_ALWAYS_ACTIVE | VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | \
-                             VK_BUILD_FLAG_64BIT_KEYS | VK_BUILD_FLAG_HAS_QUADS)
+                             VK_BUILD_FLAG_HAS_QUADS)
 
 struct leaf_args {
    VOID_REF bvh;
@@ -441,10 +451,13 @@ struct leaf_args {
 
 #define VK_MORTON_BUILD_FLAGS (VK_BUILD_FLAG_64BIT_KEYS)
 
-struct morton_args {
+struct morton_sort_args {
    VOID_REF bvh;
    REF(vk_ir_header) header;
-   VOID_REF ids;
+   VOID_REF ids_even;
+   VOID_REF ids_odd;
+   REF(morton_ready_count) counts;
+   uint32_t leaf_count;
 };
 
 #define LBVH_RIGHT_CHILD_BIT_SHIFT 29

@@ -57,6 +57,9 @@ enum nvk_experimental {
     * smaller minor number than the device.
     */
    NVK_EXPERIMENTAL_DLSS_BACK_COMPAT = 1ull << 1,
+
+   /* Enable video support */
+   NVK_EXPERIMENTAL_VIDEO = 1ull << 2,
 };
 
 #endif /* NVK_DEBUG_H */

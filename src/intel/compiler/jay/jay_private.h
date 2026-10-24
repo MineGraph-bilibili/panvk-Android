@@ -21,19 +21,27 @@ extern "C" {
 #define JAY_DBG_STRICT      BITFIELD_BIT(6)
 extern int jay_debug;
 
+
+struct jay_fs_perprim_data {
+   int32_t per_primitive_offsets[VARYING_SLOT_MAX];
+   const struct brw_mue_map *mue;
+};
+
 bool jay_nir_lower_bool(nir_shader *nir);
-bool jay_nir_lower_fsign(nir_shader *nir);
+bool jay_nir_lower_fsign(nir_shader *nir, unsigned verx10);
 bool jay_nir_lower_bfloat_math(nir_shader *nir);
 
 void jay_populate_prog_data(const struct intel_device_info *devinfo,
                             nir_shader *nir,
                             union brw_any_prog_data *prog_data,
-                            union brw_any_prog_key *key);
+                            union brw_any_prog_key *key,
+                            struct jay_fs_perprim_data *fs_perprim);
 void jay_process_nir(const struct intel_device_info *devinfo,
                      nir_shader *nir,
                      union brw_any_prog_data *prog_data,
                      union brw_any_prog_key *key,
-                     debug_archiver *archiver);
+                     debug_archiver *archiver,
+                     struct jay_fs_perprim_data *fs_perprim);
 unsigned jay_select_simd(const struct intel_device_info *, nir_shader *nir);
 void jay_process_nir_for_simd(const struct intel_device_info *devinfo,
                               nir_shader *nir,
@@ -56,10 +64,17 @@ void jay_assign_accumulators(jay_shader *s);
 
 const char *jay_file_prefix(enum jay_file file);
 void jay_print_type(FILE *f, enum jay_type t);
-void jay_print_inst(FILE *fp, jay_block *block, jay_inst *I, unsigned *lu);
-void jay_print_block(FILE *f, jay_block *block);
+void jay_print_inst_with_lu(
+   FILE *fp, jay_function *func, jay_block *block, jay_inst *I, unsigned *lu);
+void jay_print_block(FILE *f, jay_function *func, jay_block *block);
 void jay_print_func(FILE *fp, jay_function *func);
 void jay_print(FILE *f, jay_shader *s);
+
+static inline void
+jay_print_inst(FILE *fp, jay_function *func, jay_inst *I)
+{
+   jay_print_inst_with_lu(fp, func, NULL, I, NULL);
+}
 
 #ifndef NDEBUG
 void jay_archive(jay_shader *s, const char *name, unsigned idx);
@@ -132,6 +147,8 @@ jay_is_early_eot_send(jay_shader *s, const jay_inst *I)
 {
    return I->op == JAY_OPCODE_SEND && jay_send_eot(I) && jay_has_early_eot(s);
 }
+
+void jay_opt_sampler_vectorize(jay_shader *s);
 
 #ifdef __cplusplus
 } /* extern C */

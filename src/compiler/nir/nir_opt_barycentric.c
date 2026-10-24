@@ -61,8 +61,7 @@ src_is_vec2_sample_pos_minus_half(nir_src src)
 
    /* Check both vec2 components. */
    for (unsigned u = 0; u < 2; ++u) {
-      nir_scalar comp = nir_get_scalar(&alu->def, u);
-      comp = nir_scalar_chase_movs(comp);
+      nir_scalar comp = nir_scalar_resolved(&alu->def, u);
 
       if (!nir_scalar_is_alu(comp))
          return false;

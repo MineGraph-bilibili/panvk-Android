@@ -36,3 +36,4 @@ spec@!opengl 1.1@draw-sync
 spec@!opengl 1.1@gl-1.3-alpha_to_coverage_nop
 spec@!opengl 1.1@texsubimage
 spec@!opengl 1.1@texsubimage-unpack
+spec@arb_timer_query@timestamp-get

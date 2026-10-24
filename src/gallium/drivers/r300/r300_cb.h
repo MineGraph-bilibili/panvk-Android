@@ -111,7 +111,7 @@
     OUT_CB(fui(value));
 
 #define OUT_CB_REG(register, value) do { \
-    assert(register); \
+    assert((register) != 0); \
     OUT_CB(CP_PACKET0(register, 0)); \
     OUT_CB(value); \
 } while (0)
@@ -119,12 +119,12 @@
 /* Note: This expects count to be the number of registers,
  * not the actual packet0 count! */
 #define OUT_CB_REG_SEQ(register, count) do { \
-    assert(register); \
+    assert((register) != 0); \
     OUT_CB(CP_PACKET0(register, (count) - 1)); \
 } while (0)
 
 #define OUT_CB_ONE_REG(register, count) do { \
-    assert(register); \
+    assert((register) != 0); \
     OUT_CB(CP_PACKET0(register, (count) - 1) | RADEON_ONE_REG_WR); \
 } while (0)
 

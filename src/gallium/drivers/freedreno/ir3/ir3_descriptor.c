@@ -8,10 +8,31 @@
 
 #include "ir3/ir3_descriptor.h"
 
+struct lower_io_state {
+   bool lower_to_bindless;
+};
+
 static bool
-lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr)
+lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
+                const struct lower_io_state *state)
 {
    unsigned desc_offset;
+
+   bool progress = false;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_ubo:
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_get_ssbo_size:
+      nir_intrinsic_set_access(intr,
+                               nir_intrinsic_access(intr) | ACCESS_CAN_SPECULATE);
+      progress = true;
+      break;
+   default:
+      break;
+   }
+
+   if (!state->lower_to_bindless)
+      return progress;
 
    switch (intr->intrinsic) {
    case nir_intrinsic_load_ssbo:
@@ -20,6 +41,7 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr)
    case nir_intrinsic_ssbo_atomic_swap:
    case nir_intrinsic_get_ssbo_size:
       desc_offset = IR3_BINDLESS_SSBO_OFFSET;
+      progress = true;
       break;
    case nir_intrinsic_image_load:
    case nir_intrinsic_image_store:
@@ -28,9 +50,10 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr)
    case nir_intrinsic_image_size:
    case nir_intrinsic_image_samples:
       desc_offset = IR3_BINDLESS_IMAGE_OFFSET;
+      progress = true;
       break;
    default:
-      return false;
+      return progress;
    }
 
    unsigned buffer_src;
@@ -53,7 +76,9 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr)
     * can avoid the dmesg spam and users thinking this is a driver bug:
     */
    src = nir_umod_imm(b, src, IR3_BINDLESS_DESC_COUNT);
-   nir_def *bindless = nir_bindless_resource_ir3(b, 32, src, set);
+   nir_def *bindless = nir_bindless_resource_ir3(b, 32, src,
+                                                 .desc_set = set,
+                                                 .access = ACCESS_CAN_SPECULATE);
    nir_src_rewrite(&intr->src[buffer_src], bindless);
 
    return true;
@@ -65,17 +90,17 @@ lower_instr(nir_builder *b, nir_instr *instr, void *cb_data)
    b->cursor = nir_before_instr(instr);
    switch (instr->type) {
    case nir_instr_type_intrinsic:
-      return lower_intrinsic(b, nir_instr_as_intrinsic(instr));
+      return lower_intrinsic(b, nir_instr_as_intrinsic(instr), cb_data);
    default:
       return false;
    }
 }
 
 /**
- * Lower bindful image/SSBO to bindless
+ * Lower bindful image/SSBO to bindless and add CAN_SPECULATE.
  */
 bool
-ir3_nir_lower_io_to_bindless(nir_shader *shader)
+ir3_nir_lower_io_gallium(nir_shader *shader, bool lower_to_bindless)
 {
    /* Note: We don't currently support API level bindless, as we assume we
     * can remap bindful images/SSBOs to bindless while controlling the entire
@@ -89,5 +114,9 @@ ir3_nir_lower_io_to_bindless(nir_shader *shader)
     */
    assert(!shader->info.uses_bindless);
 
-   return nir_shader_instructions_pass(shader, lower_instr, nir_metadata_none, NULL);
+   struct lower_io_state state = {
+      .lower_to_bindless = lower_to_bindless,
+   };
+
+   return nir_shader_instructions_pass(shader, lower_instr, nir_metadata_none, &state);
 }

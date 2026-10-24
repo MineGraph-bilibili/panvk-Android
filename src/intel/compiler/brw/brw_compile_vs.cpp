@@ -53,7 +53,7 @@ brw_compile_vs(const struct brw_compiler *compiler,
    const bool debug_enabled =
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_VS,
-                                   params->base.source_hash);
+                                   prog_data->base.base.source_hash);
    const unsigned dispatch_width = brw_geometry_stage_dispatch_width(compiler->devinfo);
 
    /* We only expect slot compaction to be disabled when using device

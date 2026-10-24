@@ -1277,15 +1277,26 @@ emit_fs_outputs(fd_crb &crb, const struct program_builder *b)
       .stencilref_regid = stencilref_regid,
    ));
 
-   for (uint32_t i = 0; i < output_reg_count; i++) {
-      crb.add(A6XX_SP_PS_OUTPUT_REG(i,
-         .regid          = fragdata_regid[i] & ~HALF_REG_ID,
-         .half_precision = fragdata_regid[i] & HALF_REG_ID,
-      ));
+   if (fs->fs.yuv_color) {
+      uint32_t regid = fragdata_regid[0] & ~HALF_REG_ID;
+      bool half = !!(fragdata_regid[0] & HALF_REG_ID);
 
-      if (VALIDREG(fragdata_regid[i]) ||
-          (fragdata_aliased_components & (0xf << (i * 4)))) {
-         b->state->mrt_components |= 0xf << (i * 4);
+      crb.add(A6XX_SP_PS_OUTPUT_REG(0, .regid = regid, .half_precision = half));
+      crb.add(A6XX_SP_PS_OUTPUT_REG(1, .regid = regid, .half_precision = half));
+
+      b->state->mrt_components |= 0xf;
+      b->state->mrt_components |= 0xf << 4;
+   } else {
+      for (uint32_t i = 0; i < output_reg_count; i++) {
+         crb.add(A6XX_SP_PS_OUTPUT_REG(i,
+            .regid          = fragdata_regid[i] & ~HALF_REG_ID,
+            .half_precision = fragdata_regid[i] & HALF_REG_ID,
+         ));
+
+         if (VALIDREG(fragdata_regid[i]) ||
+             (fragdata_aliased_components & (0xf << (i * 4)))) {
+            b->state->mrt_components |= 0xf << (i * 4);
+         }
       }
    }
 

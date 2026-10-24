@@ -62,5 +62,5 @@ asan-KHR-GL46.packed_pixels.varied_rectangle.compressed_signed_rg_rgtc2_format_b
 asan-KHR-GL46.packed_pixels.varied_rectangle.compressed_signed_rg_rgtc2_format_bgra,Fail
 
 # uprev Piglit in Mesa
-vulkan@shaders@cmat-uniform-ctor,Fail
+spec@arb_texture_view@tex-view,Fail
 

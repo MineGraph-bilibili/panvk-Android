@@ -39,6 +39,11 @@ where
     }
 }
 
+/// Single trait that documents the length of AsArray
+pub trait AsArrayLen<T> {
+    const LEN: usize;
+}
+
 /// A trait which indicates that the given type may be viewed as an array of
 /// (some of) its children.  This is a stronger version of `AsSlice` which is
 /// usable from const contexts.
@@ -64,7 +69,7 @@ where
 ///
 /// Because there is no way for the compiler to verify this, AsArray is marked
 /// as an unsafe trait.
-pub unsafe trait AsArray<T, const N: usize> {
+pub unsafe trait AsArray<T, const N: usize>: AsArrayLen<T> {
     /// The type of field attributes.  If no field attributes are needed, this
     /// can be `()`.
     type Attr;
@@ -75,8 +80,16 @@ pub unsafe trait AsArray<T, const N: usize> {
     /// The offset, in bytes, from `Self` to the start of the array
     const ARRAY_OFFSET: usize;
 
+    /// Ensures that N is the same as the associated AsArrayLen<T>::SIZE, the
+    /// proper solution would be an associated constant instead, but rustc isn't
+    /// there yet unfortunately.
+    #[doc(hidden)]
+    const _CHECK_SIZE: () = { assert!(N == <Self as AsArrayLen<T>>::LEN) };
+
     /// Returns the fields of type `T` as an array
     fn as_array(&self) -> &[T; N] {
+        // Make sure the const-time assert actually fires
+        let () = Self::_CHECK_SIZE;
         unsafe {
             let ptr = self as *const Self;
             let ptr = ptr.byte_offset(Self::ARRAY_OFFSET.try_into().unwrap());

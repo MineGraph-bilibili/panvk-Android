@@ -1188,7 +1188,8 @@ st_create_fp_variant(struct st_context *st,
                   key->external.lower_yx_xvxu || key->external.lower_xy_vxux ||
                   key->external.lower_ayuv || key->external.lower_xyuv ||
                   key->external.lower_yuv || key->external.lower_yu_yv ||
-                  key->external.lower_yv_yu || key->external.lower_y41x)) {
+                  key->external.lower_yv_yu || key->external.lower_y41x ||
+                  key->external.external_y2y)) {
 
       st_nir_lower_samplers(st->screen, state.ir.nir,
                               fp->shader_program, fp);
@@ -1212,6 +1213,7 @@ st_create_fp_variant(struct st_context *st,
       options.bt709_external = key->external.bt709;
       options.bt2020_external = key->external.bt2020;
       options.yuv_full_range_external = key->external.yuv_full_range;
+      options.bypass_csc_external = key->external.external_y2y;
       NIR_PASS(_, state.ir.nir, nir_lower_tex, &options);
       finalize = true;
       need_lower_tex_src_plane = true;

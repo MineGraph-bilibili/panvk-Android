@@ -25,24 +25,39 @@ SOFTWARE.
 
 <csbgen name="ROGUE" prefix="LLS">
 
-  <!-- Size of the CDM's context state buffer in bytes. -->
-  <define name="CDM_CONTEXT_RESUME_BUFFER_SIZE" value="72"/>
-  <define name="CDM_CONTEXT_RESUME_BUFFER_ALIGNMENT" value="16"/>
+  <define name="CDM_CONTEXT_RESUME_BUFFER_ALIGNMENT" value="16">
+    <doc>Alignment of the CDM's context state buffer in bytes.</doc>
+  </define>
+  <define name="CDM_CONTEXT_RESUME_BUFFER_SIZE" value="72">
+    <doc>Size of the CDM's context state buffer in bytes.</doc>
+  </define>
 
-  <!-- Size of the PDS's persistent-temporary register context state buffer in bytes. -->
-  <define name="PDS_PERSISTENT_TEMPS_BUFFER_ALIGNMENT" value="16"/>
-  <define name="PDS_PERSISTENT_TEMPS_BUFFER_SIZE" value="128"/>
+  <define name="PDS_PERSISTENT_TEMPS_BUFFER_ALIGNMENT" value="16">
+    <doc>Alignment of the PDS's persistent-temporary register context state buffer in bytes.</doc>
+  </define>
+  <define name="PDS_PERSISTENT_TEMPS_BUFFER_SIZE" value="128">
+    <doc>Size of the PDS's persistent-temporary register context state buffer in bytes.</doc>
+  </define>
 
-  <!-- Size of the TA's context state buffer in bytes. -->
-  <define name="TA_STATE_BUFFER_ALIGNMENT" value="16"/>
-  <define name="TA_STATE_BUFFER_SIZE" value="484"/>
+  <define name="TA_STATE_BUFFER_ALIGNMENT" value="16">
+    <doc>Alignment of the TA's context state buffer in bytes.</doc>
+  </define>
+  <define name="TA_STATE_BUFFER_SIZE" value="484">
+    <doc>Size of the TA's context state buffer in bytes.</doc>
+  </define>
 
-  <!-- Size of the USC's shared register context state buffer in bytes. -->
-  <define name="USC_SHARED_REGS_BUFFER_ALIGNMENT" value="16"/>
-  <define name="USC_SHARED_REGS_BUFFER_SIZE" value="16384"/>
+  <define name="USC_SHARED_REGS_BUFFER_ALIGNMENT" value="16">
+    <doc>Alignment of the USC's shared register context state buffer in bytes.</doc>
+  </define>
+  <define name="USC_SHARED_REGS_BUFFER_SIZE" value="16384">
+    <doc>Size of the USC's shared register context state buffer in bytes.</doc>
+  </define>
 
-  <!-- Size of the VDM's context resume control stream buffer in bytes. -->
-  <define name="VDM_CONTEXT_RESUME_BUFFER_ALIGNMENT" value="16"/>
-  <define name="VDM_CONTEXT_RESUME_BUFFER_SIZE" value="92"/>
+  <define name="VDM_CONTEXT_RESUME_BUFFER_ALIGNMENT" value="16">
+    <doc>Alignment of the VDM's context resume control stream buffer in bytes.</doc>
+  </define>
+  <define name="VDM_CONTEXT_RESUME_BUFFER_SIZE" value="92">
+    <doc>Size of the VDM's context resume control stream buffer in bytes.</doc>
+  </define>
 
 </csbgen>

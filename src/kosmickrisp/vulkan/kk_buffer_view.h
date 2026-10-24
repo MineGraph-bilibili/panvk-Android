@@ -28,4 +28,6 @@ struct kk_buffer_view {
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_buffer_view, vk.base, VkBufferView,
                                VK_OBJECT_TYPE_BUFFER_VIEW)
 
+void kk_buffer_view_set_label(struct kk_buffer_view *bview, const char *label);
+
 #endif

@@ -659,6 +659,14 @@ set_ms_final_output_counts(nir_builder *b,
                            nir_def **out_num_prm,
                            nir_def **out_num_vtx)
 {
+   if (s->options->rasterizer_discard) {
+      nir_def *zero = nir_imm_int(b, 0);
+
+      ac_nir_ngg_alloc_vertices_and_primitives(b, zero, zero, false);
+      *out_num_vtx = *out_num_prm = zero;
+      return;
+   }
+
    /* The spec allows the numbers to be divergent, and in that case we need to
     * use the values from the first invocation. Also the HW requires us to set
     * both to 0 if either was 0.
@@ -968,6 +976,9 @@ emit_ms_outputs(nir_builder *b, nir_def *invocation_index, nir_def *row_start,
                            uint64_t, lower_ngg_ms_state *),
                 lower_ngg_ms_state *s)
 {
+   if (s->options->rasterizer_discard)
+      return;
+
    if (cb == &emit_ms_primitive ? s->prim_multirow_export : s->vert_multirow_export) {
       assert(s->hw_workgroup_size % s->wave_size == 0);
       const unsigned num_waves = s->hw_workgroup_size / s->wave_size;
@@ -1015,8 +1026,10 @@ emit_ms_finale(nir_builder *b, lower_ngg_ms_state *s)
    nir_block *last_block = nir_impl_last_block(b->impl);
    b->cursor = nir_after_block(last_block);
 
-   nir_barrier(b, .execution_scope=SCOPE_WORKGROUP, .memory_scope=SCOPE_WORKGROUP,
-                         .memory_semantics=NIR_MEMORY_ACQ_REL, .memory_modes=nir_var_shader_out|nir_var_mem_shared);
+   if (!s->options->rasterizer_discard) {
+      nir_barrier(b, .execution_scope=SCOPE_WORKGROUP, .memory_scope=SCOPE_WORKGROUP,
+                     .memory_semantics=NIR_MEMORY_ACQ_REL, .memory_modes=nir_var_shader_out | nir_var_mem_shared);
+   }
 
    nir_def *num_prm;
    nir_def *num_vtx;

@@ -19,7 +19,6 @@
 #include "panvk_entrypoints.h"
 #include "panvk_image.h"
 #include "panvk_image_view.h"
-#include "panvk_instance.h"
 #include "panvk_priv_bo.h"
 
 #include "pan_afbc.h"
@@ -52,6 +51,9 @@ panvk_storage_pview(const struct panvk_image_view *view,
                     const struct pan_image_view *pview)
 {
    struct pan_image_view spview = *pview;
+
+   if (spview.dim == MALI_TEXTURE_DIMENSION_CUBE)
+      spview.dim = MALI_TEXTURE_DIMENSION_2D;
 
    /* A storage view only sees its Z-slice range. The range defaults to the
     * full view depth, so non-sliced views are left unchanged
@@ -431,26 +433,29 @@ panvk_per_arch(CreateImageView)(VkDevice _device,
       view->pview.format = panvk_image_depth_only_pfmt(image);
 
    if (image->bc_emul && panvk_format_is_bc(view->vk.view_format)) {
-      if (PANVK_DEBUG(BC_TRACE))
-         mesa_logi("bc_view: img_fmt=%d view_fmt=%d usage=0x%x",
-                   (int)view->vk.format, (int)view->vk.view_format,
-                   (unsigned)view->vk.usage);
-
       view->pview.format = vk_format_to_pipe_format(
-         panvk_bc_decoded_format(view->vk.view_format));
+         image->bc_afrc ? (vk_format_is_srgb(view->vk.view_format)
+                              ? VK_FORMAT_R8G8B8A8_SRGB
+                              : VK_FORMAT_R8G8B8A8_UNORM)
+                        : panvk_bc_decoded_view_format(image->vk.format,
+                                                       view->vk.view_format));
+      view->pview.astc.hdr = util_format_is_astc_hdr(view->pview.format);
+      /* The transcoded LDR ASTC plane comes from 8-bit BC data, so decode it
+       * to 8 bits per channel: it then filters at full rate instead of the
+       * half rate of the default fp16 decode, and takes half the texture
+       * cache. pan_texture leaves sRGB views on their usual decode. */
+      view->pview.astc.narrow = !view->pview.astc.hdr;
       view->pview.planes[0] = (struct pan_image_plane_ref){
          .image = &image->bc_decoded.image,
          .plane_idx = 0,
       };
 
-      if (view->vk.view_format == VK_FORMAT_BC1_RGB_UNORM_BLOCK ||
-          view->vk.view_format == VK_FORMAT_BC1_RGB_SRGB_BLOCK) {
-         static const unsigned char rgb1[4] = {
-            PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_1,
-         };
+      unsigned char dec_swz[4];
+      if (panvk_bc_decoded_swizzle(image->vk.format, view->vk.view_format,
+                                   dec_swz)) {
          unsigned char swz[4];
 
-         util_format_compose_swizzles(rgb1, view->pview.swizzle, swz);
+         util_format_compose_swizzles(dec_swz, view->pview.swizzle, swz);
          memcpy(view->pview.swizzle, swz, sizeof(swz));
       }
    }

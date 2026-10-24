@@ -80,6 +80,11 @@ static bool
 find_blt_conversion(enum pipe_format src_pipe, enum pipe_format dst_pipe,
                     struct blt_conv_swizzle *swizzle)
 {
+   /* An integer conversion changes the stored values, a raw copy cannot. */
+   if (util_format_is_pure_integer(src_pipe) ||
+       util_format_is_pure_integer(dst_pipe))
+      return false;
+
    const uint32_t src_blt = translate_blt_format(src_pipe);
    const uint32_t dst_blt = translate_blt_format(dst_pipe);
 
@@ -194,9 +199,12 @@ blt_compute_swizzle_bits(const struct blt_imginfo *img, bool for_dest)
 
 /* Clear (part of) an image */
 static void
-emit_blt_clearimage(struct etna_cmd_stream *stream, const struct blt_clear_op *op)
+emit_blt_clearimage(struct etna_context *ctx, const struct blt_clear_op *op)
 {
+   struct etna_cmd_stream *stream = ctx->stream;
+
    etna_cmd_stream_reserve(stream, 64*2); /* Make sure BLT op doesn't get broken up */
+   ETNA_CONTEXT_ATOMIC_EMIT(ctx);
 
    etna_set_state(stream, VIVS_BLT_ENABLE, 0x00000001);
    assert(op->dest.bpp);
@@ -240,14 +248,18 @@ emit_blt_clearimage(struct etna_cmd_stream *stream, const struct blt_clear_op *o
 
 /* Copy (a subset of) an image to another image. */
 static void
-emit_blt_copyimage(struct etna_cmd_stream *stream, const struct blt_imgcopy_op *op)
+emit_blt_copyimage(struct etna_context *ctx, const struct blt_imgcopy_op *op)
 {
+   struct etna_cmd_stream *stream = ctx->stream;
+
    etna_cmd_stream_reserve(stream, 64*2); /* Never allow BLT sequences to be broken up */
+   ETNA_CONTEXT_ATOMIC_EMIT(ctx);
 
    etna_set_state(stream, VIVS_BLT_ENABLE, 0x00000001);
    etna_set_state(stream, VIVS_BLT_CONFIG,
            VIVS_BLT_CONFIG_SRC_ENDIAN(op->src.endian_mode) |
-           VIVS_BLT_CONFIG_DEST_ENDIAN(op->dest.endian_mode));
+           VIVS_BLT_CONFIG_DEST_ENDIAN(op->dest.endian_mode) |
+           COND(op->downsample_one_sample, VIVS_BLT_CONFIG_DOWNSAMPLE_ONE_SAMPLE));
    etna_set_state(stream, VIVS_BLT_SRC_STRIDE, blt_compute_stride_bits(&op->src));
    etna_set_state(stream, VIVS_BLT_SRC_CONFIG,
            blt_compute_src_img_config_bits(&op->src) |
@@ -290,10 +302,14 @@ emit_blt_copyimage(struct etna_cmd_stream *stream, const struct blt_imgcopy_op *
 
 /* Emit in-place resolve using BLT. */
 static void
-emit_blt_inplace(struct etna_cmd_stream *stream, const struct blt_inplace_op *op)
+emit_blt_inplace(struct etna_context *ctx, const struct blt_inplace_op *op)
 {
+   struct etna_cmd_stream *stream = ctx->stream;
+
    assert(op->bpp > 0 && util_is_power_of_two_nonzero(op->bpp));
    etna_cmd_stream_reserve(stream, 64*2); /* Never allow BLT sequences to be broken up */
+   ETNA_CONTEXT_ATOMIC_EMIT(ctx);
+
    etna_set_state(stream, VIVS_BLT_ENABLE, 0x00000001);
    etna_set_state(stream, VIVS_BLT_CONFIG,
          VIVS_BLT_CONFIG_INPLACE_TS_MODE(op->ts_mode) |
@@ -315,9 +331,12 @@ emit_blt_inplace(struct etna_cmd_stream *stream, const struct blt_inplace_op *op
 
 /* Emit genmipamp using BLT. */
 static void
-emit_blt_genmipmap(struct etna_cmd_stream *stream, const struct blt_genmipmap_op *op)
+emit_blt_genmipmap(struct etna_context *ctx, const struct blt_genmipmap_op *op)
 {
+   struct etna_cmd_stream *stream = ctx->stream;
+
    etna_cmd_stream_reserve(stream, 64*2); /* Never allow BLT sequences to be broken up */
+   ETNA_CONTEXT_ATOMIC_EMIT(ctx);
 
    etna_set_state(stream, VIVS_GL_FLUSH_CACHE, 0x00000c23);
    etna_set_state(stream, VIVS_TS_FLUSH_CACHE, VIVS_TS_FLUSH_CACHE_FLUSH);
@@ -391,6 +410,31 @@ etna_calculate_clear_bits(enum pipe_format format, unsigned clear_mask)
 }
 
 static void
+etna_blt_clear_ts(struct etna_context *ctx, struct etna_resource *res,
+                  struct etna_resource_level *level)
+{
+   struct blt_clear_op clr = {};
+
+   assert(level->ts_needs_clear);
+
+   clr.dest.addr.bo = res->ts_bo;
+   clr.dest.addr.offset = level->ts_offset;
+   clr.dest.addr.flags = ETNA_RELOC_WRITE;
+   clr.dest.format = BLT_FORMAT_A8R8G8B8;
+   clr.dest.bpp = 4;
+   clr.dest.stride = 0x40;
+   clr.dest.tiling = ETNA_LAYOUT_LINEAR;
+   clr.clear_bits[0] = 0xffffffff;
+   clr.clear_bits[1] = 0xffffffff;
+   clr.rect_w = 0x40 / 4;
+   clr.rect_h = level->ts_layer_stride / 0x40;
+
+   emit_blt_clearimage(ctx, &clr);
+
+   level->ts_needs_clear = false;
+}
+
+static void
 etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
                       const union pipe_color_union *color,
                       const struct pipe_scissor_state *scissor_state,
@@ -400,12 +444,13 @@ etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
    struct pipe_surface *dst = &ctx->framebuffer_s.base.cbufs[idx];
    struct etna_resource *dst_res = etna_resource_get_render_compatible(pctx, dst->texture);
    struct etna_resource_level *dst_level = &dst_res->levels[dst->level];
-   uint64_t new_clear_value = etna_clear_blit_pack_rgba(dst->format, color);
-   const uint64_t clear_bits = etna_calculate_clear_bits(dst->format, clear_mask);
+   uint64_t new_clear_value = etna_clear_blit_pack_rgba(dst->format, color, ctx->screen);
+   bool is_128bit_format = format_is_128bit(dst->format);
+   const uint64_t clear_bits = is_128bit_format ? 0 :
+      etna_calculate_clear_bits(translate_pe_internal_format(dst->format, ctx->screen), clear_mask);
    bool fast_clear = etna_blt_will_fastclear(dst_level, scissor_state, clear_mask, 0xf);
    bool use_ts = etna_framebuffer_rt_use_ts(ctx, idx);
    int msaa_xscale = 1, msaa_yscale = 1;
-   bool is_128bit_format = format_is_128bit(dst->format);
 
    translate_samples_to_xyscale(dst->texture->nr_samples,
                                 &msaa_xscale, &msaa_yscale);
@@ -422,6 +467,9 @@ etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
    clr.dest.tiling = dst_res->layout;
 
    if (use_ts) {
+      if (unlikely(dst_level->ts_needs_clear))
+         etna_blt_clear_ts(ctx, dst_res, dst_level);
+
       clr.dest.use_ts = 1;
       clr.dest.ts_addr.bo = dst_res->ts_bo;
       clr.dest.ts_addr.offset = dst_level->ts_offset;
@@ -450,18 +498,28 @@ etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
    }
 
    if (is_128bit_format) {
+      const uint64_t rg_bits =
+         etna_calculate_clear_bits(translate_format_128bit_to_64bit(dst->format), clear_mask);
+
       clr.clear_value[0] = color->ui[0];
       clr.clear_value[1] = color->ui[1];
+      clr.clear_bits[0] = rg_bits;
+      clr.clear_bits[1] = rg_bits >> 32;
    }
 
-   emit_blt_clearimage(ctx->stream, &clr);
+   emit_blt_clearimage(ctx, &clr);
 
    if (is_128bit_format) {
+      const uint64_t ba_bits =
+         etna_calculate_clear_bits(translate_format_128bit_to_64bit(dst->format), clear_mask >> 2);
+
       clr.clear_value[0] = color->ui[2];
       clr.clear_value[1] = color->ui[3];
+      clr.clear_bits[0] = ba_bits;
+      clr.clear_bits[1] = ba_bits >> 32;
       clr.dest.addr.offset += etna_resource_level_second_plane_offset(dst_level);
 
-      emit_blt_clearimage(ctx->stream, &clr);
+      emit_blt_clearimage(ctx, &clr);
    }
 
    /* This made the TS valid */
@@ -541,6 +599,9 @@ etna_blit_clear_zs_blt(struct pipe_context *pctx, struct pipe_surface *dst,
    clr.dest.tiling = dst_res->layout;
 
    if (dst_level->ts_size) {
+      if (unlikely(dst_level->ts_needs_clear))
+         etna_blt_clear_ts(ctx, dst_res, dst_level);
+
       clr.dest.use_ts = 1;
       clr.dest.ts_addr.bo = dst_res->ts_bo;
       clr.dest.ts_addr.offset = dst_level->ts_offset;
@@ -568,7 +629,7 @@ etna_blit_clear_zs_blt(struct pipe_context *pctx, struct pipe_surface *dst,
       clr.rect_h = dst_level->height * msaa_yscale;
    }
 
-   emit_blt_clearimage(ctx->stream, &clr);
+   emit_blt_clearimage(ctx, &clr);
 
    /* This made the TS valid */
    if (dst_level->ts_size) {
@@ -698,7 +759,7 @@ etna_generate_mipmap_blt(struct pipe_context *pctx,
       etna_resource_level_ts_mark_invalid(dst_lev);
    }
 
-   emit_blt_genmipmap(ctx->stream, &op);
+   emit_blt_genmipmap(ctx, &op);
 
    etna_stall(ctx->stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_BLT);
 
@@ -848,7 +909,7 @@ etna_try_blt_blit(struct pipe_context *pctx,
 
       etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE, 0x00000c23);
       etna_set_state(ctx->stream, VIVS_TS_FLUSH_CACHE, 0x00000001);
-      emit_blt_inplace(ctx->stream, &op);
+      emit_blt_inplace(ctx, &op);
    } else {
       /* Copy op */
       struct blt_imgcopy_op op = {};
@@ -871,6 +932,9 @@ etna_try_blt_blit(struct pipe_context *pctx,
       op.src.tiling = src->layout;
       op.src.downsample_x = downsample_x;
       op.src.downsample_y = downsample_y;
+
+      op.downsample_one_sample = (downsample_x || downsample_y) &&
+                                 resolve_copies_one_sample(blit_info->dst.format);
       if (has_conversion)
          memcpy(op.src.swizzle, conv_swizzle.src_swizzle, 4);
       else
@@ -908,7 +972,7 @@ etna_try_blt_blit(struct pipe_context *pctx,
          op.dest.swizzle[0] = 2; /* R from B position */
          op.dest.swizzle[2] = 0; /* B from R position */
       } else if (ctx->in_transfer_blit &&
-                 translate_pe_format_rb_swap(blit_info->src.format) &&
+                 translate_pe_format_rb_swap(blit_info->src.format, ctx->screen) &&
                  !src->shared && !dst->shared) {
          bool src_linear = src->layout == ETNA_LAYOUT_LINEAR;
          bool dst_linear = dst->layout == ETNA_LAYOUT_LINEAR;
@@ -949,13 +1013,13 @@ etna_try_blt_blit(struct pipe_context *pctx,
 
       etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE, 0x00000c23);
       etna_set_state(ctx->stream, VIVS_TS_FLUSH_CACHE, 0x00000001);
-      emit_blt_copyimage(ctx->stream, &op);
+      emit_blt_copyimage(ctx, &op);
 
       if (format_is_128bit(blit_info->dst.format)) {
          op.src.addr.offset += etna_resource_level_second_plane_offset(src_lev);
          op.dest.addr.offset += etna_resource_level_second_plane_offset(dst_lev);
 
-         emit_blt_copyimage(ctx->stream, &op);
+         emit_blt_copyimage(ctx, &op);
       }
    }
 

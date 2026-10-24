@@ -2093,6 +2093,10 @@ private:
    bool
    try_compact()
    {
+      /* TODO: implement sendg compact */
+      if (desc->gen_op == GEN_OP_SENDG)
+         return false;
+
       memset(&c_raw, 0, sizeof(c_raw));
       precompact();
 

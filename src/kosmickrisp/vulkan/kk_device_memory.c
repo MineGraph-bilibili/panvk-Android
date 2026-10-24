@@ -166,6 +166,10 @@ kk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    if (!mem)
       return;
 
+   /* According to spec, memory is implicitly unmapped upon free */
+   if (mem->map)
+      kk_bo_unmap(dev, mem->bo, mem->map, false);
+
    kk_destroy_bo(dev, mem->bo);
 
    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
@@ -187,6 +191,13 @@ kk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
    const VkDeviceSize offset = pMemoryMapInfo->offset;
    const VkDeviceSize size = vk_device_memory_range(
       &mem->vk, pMemoryMapInfo->offset, pMemoryMapInfo->size);
+
+   void *fixed_addr = NULL;
+   if (pMemoryMapInfo->flags & VK_MEMORY_MAP_PLACED_BIT_EXT) {
+      const VkMemoryMapPlacedInfoEXT *placed_info = vk_find_struct_const(
+         pMemoryMapInfo->pNext, MEMORY_MAP_PLACED_INFO_EXT);
+      fixed_addr = placed_info->pPlacedAddress;
+   }
 
    /* From the Vulkan spec version 1.0.32 docs for MapMemory:
     *
@@ -213,9 +224,13 @@ kk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
                        "Memory object already mapped.");
    }
 
-   // TODO_KOSMICKRISP Use mmap here to so we can support VK_EXT_map_memory_placed
-   mem->map = mem->bo->cpu;
+   void *mapped_addr = fixed_addr;
+   result = kk_bo_map_placed(dev, mem->bo, &mapped_addr);
+   if (result != VK_SUCCESS)
+      return result;
 
+   assert(!fixed_addr || mapped_addr == fixed_addr);
+   mem->map = mapped_addr;
    *ppData = mem->map + offset;
 
    return result;
@@ -225,16 +240,24 @@ VKAPI_ATTR VkResult VKAPI_CALL
 kk_UnmapMemory2KHR(VkDevice device,
                    const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo)
 {
+   VK_FROM_HANDLE(kk_device, dev, device);
    VK_FROM_HANDLE(kk_device_memory, mem, pMemoryUnmapInfo->memory);
+   VkResult result = VK_SUCCESS;
 
    if (mem == NULL)
-      return VK_SUCCESS;
+      return result;
 
-   // TODO_KOSMICKRISP Use unmap here to so we can support
-   // VK_EXT_map_memory_placed
+   bool reserved = pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT;
+
+   result = kk_bo_unmap(dev, mem->bo, mem->map, reserved);
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* According to spec, memory is not unmapped on failure, so we only clear to
+    * NULL on success */
    mem->map = NULL;
 
-   return VK_SUCCESS;
+   return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -293,4 +316,11 @@ kk_GetDeviceMemoryOpaqueCaptureAddress(
    VK_FROM_HANDLE(kk_device_memory, mem, pInfo->memory);
 
    return mem->bo->gpu;
+}
+
+void
+kk_device_memory_set_label(struct kk_device_memory *dev_mem, const char *label)
+{
+   if (dev_mem->bo)
+      kk_bo_set_label(dev_mem->bo, label);
 }

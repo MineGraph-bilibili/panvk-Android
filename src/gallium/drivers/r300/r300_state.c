@@ -1316,13 +1316,17 @@ static void* r300_create_fs_state(struct pipe_context* pipe,
     memset(&precompile_state, 0, sizeof(precompile_state));
 
     if (fs->state.type == PIPE_SHADER_IR_NIR) {
-        /* Pick something for the shadow samplers so that we have somewhat reliable shader stats later. */
+        /* Record sampler metadata and pick something for the shadow samplers
+         * so that we have somewhat reliable shader stats later. */
         nir_foreach_function_impl(impl, fs->state.ir.nir) {
             nir_foreach_block_safe(block, impl) {
                 nir_foreach_instr_safe(instr, block) {
                     if (instr->type != nir_instr_type_tex)
                         continue;
                     nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+                    if (tex->sampler_dim == GLSL_SAMPLER_DIM_2D)
+                        fs->samplers_2d |= 1u << tex->sampler_index;
 
                     if (tex->is_shadow) {
                         precompile_state.unit[tex->sampler_index].compare_mode_enabled = true;
@@ -1890,10 +1894,12 @@ static void r300_set_sampler_views(struct pipe_context* pipe,
         /* A new sampler view (= texture)... */
         dirty_tex = true;
 
-        /* Set the texrect factor in the fragment shader.
-             * Needed for RECT and NPOT fallback. */
+        /* Set texture size factors in the fragment shader.
+         * Needed for RECT, unnormalized coordinates, and NPOT fallback. */
         texture = r300_resource(views[i]->texture);
-        if (texture->tex.is_npot) {
+        if (texture->tex.is_npot || views[i]->target == PIPE_TEXTURE_RECT ||
+            (i < state->sampler_state_count && state->sampler_states[i] &&
+             state->sampler_states[i]->state.unnormalized_coords)) {
             r300_mark_atom_dirty(r300, &r300->fs_rc_constant_state);
         }
 

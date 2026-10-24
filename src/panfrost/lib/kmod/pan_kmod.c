@@ -200,9 +200,13 @@ pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
 
    if (dev->ops->bo_import_fd) {
       size_t size = lseek(fd, 0, SEEK_END);
-      if (size == 0 || size == (size_t)-1) {
-         mesa_loge("invalid dmabuf size");
-         goto err_unlock;
+      if (size == (size_t)-1 || size == 0) {
+         /* Vendor gralloc dma-bufs (e.g. MTK AFBC window buffers) do not
+          * implement llseek, so the size cannot be probed from userspace.
+          * Backends derive the true size from the kernel import response
+          * (kbase: KBASE_IOCTL_MEM_IMPORT out.va_pages), so hand down 0
+          * instead of rejecting the import outright. */
+         size = 0;
       }
 
       bo = dev->ops->bo_import_fd(dev, fd, size);
@@ -275,6 +279,15 @@ pan_kmod_flush_bo_map_syncs_locked(struct pan_kmod_dev *dev)
       sync->bo->has_pending_deferred_syncs = false;
 
    util_dynarray_clear(&dev->pending_bo_syncs.array);
+}
+
+int
+pan_kmod_cs_event_signal(struct pan_kmod_dev *dev)
+{
+   if (!dev->ops->cs_event_signal)
+      return 0;
+
+   return dev->ops->cs_event_signal(dev);
 }
 
 void

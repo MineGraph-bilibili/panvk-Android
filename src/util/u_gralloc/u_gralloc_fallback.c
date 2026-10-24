@@ -6,10 +6,16 @@
  */
 
 #include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <dirent.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <unistd.h>
+#ifdef __ANDROID__
 #include <sys/system_properties.h>
+#endif
 #include "u_gralloc_internal.h"
 
 #include <hardware/gralloc.h>
@@ -17,7 +23,6 @@
 #include "drm-uapi/drm_fourcc.h"
 #include "util/log.h"
 #include "util/macros.h"
-#include "util/u_debug.h"
 #include "util/u_memory.h"
 
 #include <dlfcn.h>
@@ -66,112 +71,257 @@ typedef int32_t (*panvk_v19_load_mapper_fn)(struct panvk_v19_mapper **);
 typedef void *(*panvk_v19_open_passthrough_fn)(const char *, const char *, int);
 typedef void *(*panvk_v19_load_sphal_fn)(const char *, int);
 
+#if defined(__aarch64__)
+/* HIDL IMapper@4.0 passthrough for vendor API < 34 (no AIMapper stable-C).
+ * libhidlbase is neither in the NDK nor visible to an app namespace, so the
+ * frozen IMapper@4.0 C++ ABI (aarch64 Itanium, libc++ ABI v1) is called
+ * directly. Layout checked against Arm gralloc4 arm::mapper::GrallocMapper
+ * (MT8755, vendor API 33): vtable slots importBuffer=14 freeBuffer=15
+ * get=23; Return<Error> stores Error at +0x24; std::function is a 32-byte
+ * buffer + __base* at +0x20 and the impl copies it via __clone(__base*). */
+typedef void (*panvk_v19_vfn)(void);
+struct panvk_v19_hidl_vec { const void *data; uint32_t size; bool owns; }; /* hidl_vec, hidl_string */
+struct panvk_v19_hidl_handle { const native_handle_t *handle; bool owns; };
+struct panvk_v19_metadata_type { struct panvk_v19_hidl_vec name; int64_t value; };
+struct panvk_v19_hidl_ret { int32_t exception; uint8_t status[0x1c]; bool checked; int32_t error; };
+struct panvk_v19_fn_base { const panvk_v19_vfn *vtbl; void *ctx; };
+struct panvk_v19_fn { /* aligned_storage<3 * sizeof(void *)> is 16-aligned: 32-byte buffer */
+   _Alignas(16) struct panvk_v19_fn_base buf; void *pad[2]; struct panvk_v19_fn_base *f;
+};
+_Static_assert(sizeof(struct panvk_v19_hidl_vec) == 16, "hidl_vec");
+_Static_assert(sizeof(struct panvk_v19_hidl_handle) == 16, "hidl_handle");
+_Static_assert(sizeof(struct panvk_v19_metadata_type) == 24, "MetadataType");
+_Static_assert(offsetof(struct panvk_v19_hidl_ret, error) == 0x24 &&
+               sizeof(struct panvk_v19_hidl_ret) == 0x28, "Return<Error>");
+_Static_assert(offsetof(struct panvk_v19_fn, f) == 32 && sizeof(struct panvk_v19_fn) == 48,
+               "std::function");
+
+struct panvk_v19_cb_ctx { int32_t error; void *buffer; uint8_t *data; size_t size; };
+
+static void panvk_v19_fn_nop(struct panvk_v19_fn_base *self) { (void)self; }
+static struct panvk_v19_fn_base *
+panvk_v19_fn_clone(const struct panvk_v19_fn_base *self) { return (struct panvk_v19_fn_base *)self; }
+static void
+panvk_v19_fn_clone_into(const struct panvk_v19_fn_base *self, struct panvk_v19_fn_base *dst) { *dst = *self; }
+static const void *
+panvk_v19_fn_target(const struct panvk_v19_fn_base *self, const void *ti) { (void)self; (void)ti; return NULL; }
+
+static void
+panvk_v19_import_cb(struct panvk_v19_fn_base *self, const int32_t *error, void *const *buffer)
+{
+   struct panvk_v19_cb_ctx *ctx = self->ctx;
+   ctx->error = *error;
+   ctx->buffer = *error ? NULL : *buffer;
+}
+
+static void
+panvk_v19_get_cb(struct panvk_v19_fn_base *self, const int32_t *error,
+                 const struct panvk_v19_hidl_vec *vec)
+{
+   struct panvk_v19_cb_ctx *ctx = self->ctx;
+   ctx->error = *error;
+   if (*error || ctx->data || !vec->data || !vec->size || vec->size > 65536) return;
+   ctx->data = malloc(vec->size);
+   if (!ctx->data) return;
+   memcpy(ctx->data, vec->data, vec->size);
+   ctx->size = vec->size;
+}
+
+/* libc++ __function::__base: D1, D0, __clone(), __clone(p), destroy,
+ * destroy_deallocate, operator(), target, target_type (after offset/RTTI). */
+#define PANVK_V19_FN_VTBL(call) { NULL, NULL, \
+   (panvk_v19_vfn)panvk_v19_fn_nop, (panvk_v19_vfn)panvk_v19_fn_nop, \
+   (panvk_v19_vfn)panvk_v19_fn_clone, (panvk_v19_vfn)panvk_v19_fn_clone_into, \
+   (panvk_v19_vfn)panvk_v19_fn_nop, (panvk_v19_vfn)panvk_v19_fn_nop, (panvk_v19_vfn)(call), \
+   (panvk_v19_vfn)panvk_v19_fn_target, (panvk_v19_vfn)panvk_v19_fn_target }
+static const panvk_v19_vfn panvk_v19_import_vtbl[] = PANVK_V19_FN_VTBL(panvk_v19_import_cb);
+static const panvk_v19_vfn panvk_v19_get_vtbl[] = PANVK_V19_FN_VTBL(panvk_v19_get_cb);
+
+enum { PANVK_V19_M4_IMPORT = 14, PANVK_V19_M4_FREE = 15, PANVK_V19_M4_GET = 23 };
+typedef struct panvk_v19_hidl_ret (*panvk_v19_m4_import_fn)(void *, const struct panvk_v19_hidl_handle *,
+                                                            struct panvk_v19_fn *);
+typedef struct panvk_v19_hidl_ret (*panvk_v19_m4_free_fn)(void *, void *);
+typedef struct panvk_v19_hidl_ret (*panvk_v19_m4_get_fn)(void *, void *,
+                                                         const struct panvk_v19_metadata_type *,
+                                                         struct panvk_v19_fn *);
+typedef void *(*panvk_v19_m4_fetch_fn)(const char *);
+static void *panvk_v19_m4; /* IMapper@4.0 * */
+#define PANVK_V19_M4_CALL(type, slot) ((type)(*(const panvk_v19_vfn *const *)panvk_v19_m4)[slot])
+#endif
+
 static pthread_once_t panvk_v19_once = PTHREAD_ONCE_INIT;
 static struct panvk_v19_mapper *panvk_v19_mapper_ptr;
-static void *panvk_v19_mapper_so;
-static int panvk_v19_mapper_status = -ENOTSUP;
+static int panvk_v19_backend; /* 5: AIMapper stable-C, 4: HIDL IMapper@4.0, 0: none */
+
+#define PANVK_V19_MAX_NAMES 16
+static const char *const panvk_v19_hw_dirs[] = { "/vendor/lib64/hw", "/odm/lib64/hw" };
+static const char panvk_v19_m4_prefix[] = "android.hardware.graphics.mapper@4.0-impl-";
+
+static void
+panvk_v19_add_name(char names[][64], int *n, const char *s, size_t len)
+{
+   if (!len || len >= 64 || *n >= PANVK_V19_MAX_NAMES || memchr(s, '/', len)) return;
+   for (int i = 0; i < *n; i++)
+      if (strlen(names[i]) == len && !memcmp(names[i], s, len)) return;
+   memcpy(names[*n], s, len);
+   names[*n][len] = '\0';
+   (*n)++;
+}
+
+/* Mapper instance names, vendor-neutral: PANVK_MAPPER_NAMES (comma list),
+ * then what the vendor hw dirs ship (mapper.<n>.so = AIMapper stable-C,
+ * android.hardware.graphics.mapper@4.0-impl-<n>.so = HIDL mapper4), then
+ * ro.hardware.gralloc, then "mediatek" in case the dirs cannot be listed. */
+static int
+panvk_v19_collect_names(char names[][64])
+{
+   int n = 0;
+   const size_t plen = sizeof(panvk_v19_m4_prefix) - 1;
+   for (const char *env = getenv("PANVK_MAPPER_NAMES"); env && *env;) {
+      size_t len = strcspn(env, ",");
+      panvk_v19_add_name(names, &n, env, len);
+      env += len + (env[len] == ',');
+   }
+   for (unsigned d = 0; d < ARRAY_SIZE(panvk_v19_hw_dirs); d++) {
+      DIR *dir = opendir(panvk_v19_hw_dirs[d]);
+      if (!dir) continue;
+      for (struct dirent *e; (e = readdir(dir));) {
+         const char *s = e->d_name;
+         size_t len = strlen(s);
+         if (len < 4 || strcmp(s + len - 3, ".so")) continue;
+         if (len > 10 && !strncmp(s, "mapper.", 7))
+            panvk_v19_add_name(names, &n, s + 7, len - 10);
+         else if (len > plen + 3 && !strncmp(s, panvk_v19_m4_prefix, plen))
+            panvk_v19_add_name(names, &n, s + plen, len - plen - 3);
+      }
+      closedir(dir);
+   }
+#ifdef __ANDROID__
+   char prop[PROP_VALUE_MAX] = "";
+   if (__system_property_get("ro.hardware.gralloc", prop) > 0)
+      panvk_v19_add_name(names, &n, prop, strlen(prop));
+#endif
+   panvk_v19_add_name(names, &n, "mediatek", 8);
+   return n;
+}
+
+static void *
+panvk_v19_dlopen(panvk_v19_load_sphal_fn load_sphal, const char *path, const char **how)
+{
+   if (access(path, F_OK) && errno == ENOENT) return NULL;
+   void *so = load_sphal ? load_sphal(path, RTLD_NOW | RTLD_LOCAL) : NULL;
+   *how = "SPHAL";
+   if (!so) {
+      so = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+      *how = "DIRECT";
+   }
+   if (!so) {
+      const char *err = dlerror();
+      mesa_logi("[P0A-V19-FULLPLANE] dlopen %s failed: %s", path, err ? err : "?");
+   }
+   return so;
+}
 
 static void
 panvk_v19_mapper_init_once(void)
 {
-   /* Doc-recommended hardening: don't hardcode one vendor mapper name.
-    * Probe the SoC name from build properties and walk the common defaults
-    * so other devices in the support matrix (G710/G610/...) can reach their
-    * real vendor AIMapper before we ever fall back to guessing the layout. */
-   char plat[PROP_VALUE_MAX] = {0}, hw[PROP_VALUE_MAX] = {0};
-   __system_property_get("ro.board.platform", plat);
-   __system_property_get("ro.hardware", hw);
-
-   const char *names[5];
-   int name_count = 0;
-   names[name_count++] = "mediatek";
-   names[name_count++] = "arm";
-   if (plat[0] && strcmp(plat, "mediatek") && strcmp(plat, "arm"))
-      names[name_count++] = plat;
-   if (hw[0] && strcmp(hw, "mediatek") && strcmp(hw, "arm") &&
-       (!plat[0] || strcmp(hw, plat)))
-      names[name_count++] = hw;
-   names[name_count++] = "default";
-
+   char names[PANVK_V19_MAX_NAMES][64], path[PATH_MAX];
+   int n = panvk_v19_collect_names(names);
+   panvk_v19_open_passthrough_fn open_hal = NULL;
+   panvk_v19_load_sphal_fn load_sphal = NULL;
    void *bn = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
    if (!bn)
       bn = dlopen("/system/lib64/libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
-   panvk_v19_open_passthrough_fn open_hal = NULL;
    if (bn)
-      open_hal =
-         (panvk_v19_open_passthrough_fn)dlsym(bn, "AServiceManager_openDeclaredPassthroughHal");
-
+      open_hal = (panvk_v19_open_passthrough_fn)dlsym(bn, "AServiceManager_openDeclaredPassthroughHal");
    void *vs = dlopen("libvndksupport.so", RTLD_NOW | RTLD_LOCAL);
    if (!vs)
       vs = dlopen("/system/lib64/libvndksupport.so", RTLD_NOW | RTLD_LOCAL);
-   panvk_v19_load_sphal_fn load_sphal = NULL;
    if (vs)
-      load_sphal =
-         (panvk_v19_load_sphal_fn)dlsym(vs, "android_load_sphal_library");
+      load_sphal = (panvk_v19_load_sphal_fn)dlsym(vs, "android_load_sphal_library");
 
-   void *so = NULL;
-   const char *how = "NONE";
-   const char *used = NULL;
-   char tried[256] = "";
-
-   for (int i = 0; i < name_count; i++) {
-      size_t len = strlen(tried);
-      snprintf(tried + len, sizeof(tried) - len, "%s%s", len ? ", " : "", names[i]);
-
-      if (open_hal &&
-          (so = open_hal("mapper", names[i], RTLD_NOW | RTLD_LOCAL))) {
-         how = "BINDER_PASSTHROUGH";
-         used = names[i];
-         break;
+   /* AIMapper stable-C (mapper5), as libui Gralloc5 loads it. */
+   for (int i = 0; i < n; i++) {
+      const char *how = "BINDER_PASSTHROUGH";
+      void *so = open_hal ? open_hal("mapper", names[i], RTLD_NOW | RTLD_LOCAL) : NULL;
+      for (unsigned d = 0; !so && d < ARRAY_SIZE(panvk_v19_hw_dirs); d++) {
+         snprintf(path, sizeof(path), "%s/mapper.%s.so", panvk_v19_hw_dirs[d], names[i]);
+         so = panvk_v19_dlopen(load_sphal, path, &how);
       }
-
-      char so_name[PROP_VALUE_MAX + 16];
-      char so_path[PROP_VALUE_MAX + 48];
-      snprintf(so_name, sizeof(so_name), "mapper.%s.so", names[i]);
-      snprintf(so_path, sizeof(so_path), "/vendor/lib64/hw/mapper.%s.so", names[i]);
-
-      if (load_sphal &&
-          ((so = load_sphal(so_name, RTLD_NOW | RTLD_LOCAL)) ||
-           (so = load_sphal(so_path, RTLD_NOW | RTLD_LOCAL)))) {
-         how = "SPHAL";
-         used = names[i];
-         break;
-      }
-
-      if ((so = dlopen(so_path, RTLD_NOW | RTLD_LOCAL))) {
-         how = "DIRECT";
-         used = names[i];
-         break;
+      if (!so) continue;
+      panvk_v19_load_mapper_fn load =
+         (panvk_v19_load_mapper_fn)dlsym(so, "AIMapper_loadIMapper");
+      struct panvk_v19_mapper *m = NULL;
+      int32_t rc = load ? load(&m) : -1;
+      mesa_logi("[P0A-V19-FULLPLANE] init backend=aimapper name=%s how=%s rc=%d mapper=%p version=%u",
+                names[i], how, rc, m, m ? m->version : 0);
+      if (!rc && m && m->version >= 5 && m->v5.importBuffer && m->v5.freeBuffer &&
+          m->v5.getStandardMetadata) {
+         panvk_v19_mapper_ptr = m;
+         panvk_v19_backend = 5;
+         return;
       }
    }
-
-   if (!so) {
-      mesa_logw("[P0A-V19-FULLPLANE] mapper load failed (tried: %s)", tried);
-      return;
+#if defined(__aarch64__)
+   /* HIDL IMapper@4.0 passthrough (vendor API < 34). */
+   for (int i = 0; i < n; i++) {
+      for (unsigned d = 0; d < ARRAY_SIZE(panvk_v19_hw_dirs); d++) {
+         const char *how = "NONE";
+         snprintf(path, sizeof(path), "%s/%s%s.so", panvk_v19_hw_dirs[d], panvk_v19_m4_prefix, names[i]);
+         void *so = panvk_v19_dlopen(load_sphal, path, &how);
+         if (!so) continue;
+         panvk_v19_m4_fetch_fn fetch = (panvk_v19_m4_fetch_fn)dlsym(so, "HIDL_FETCH_IMapper");
+         void *m = fetch ? fetch("default") : NULL;
+         mesa_logi("[P0A-V19-FULLPLANE] init backend=hidl-mapper4 name=%s how=%s mapper=%p",
+                   names[i], how, m);
+         if (m) {
+            panvk_v19_m4 = m;
+            panvk_v19_backend = 4;
+            return;
+         }
+      }
    }
-   panvk_v19_load_mapper_fn load =
-      (panvk_v19_load_mapper_fn)dlsym(so, "AIMapper_loadIMapper");
-   if (!load) {
-      mesa_logw("[P0A-V19-FULLPLANE] AIMapper_loadIMapper absent");
-      return;
-   }
-   int32_t rc = load(&panvk_v19_mapper_ptr);
-   mesa_logi("[P0A-V19-FULLPLANE] init how=%s name=%s rc=%d mapper=%p version=%u", how, used, rc,
-             panvk_v19_mapper_ptr, panvk_v19_mapper_ptr ? panvk_v19_mapper_ptr->version : 0);
-   if (rc || !panvk_v19_mapper_ptr || panvk_v19_mapper_ptr->version < 5 ||
-       !panvk_v19_mapper_ptr->v5.importBuffer || !panvk_v19_mapper_ptr->v5.freeBuffer ||
-       !panvk_v19_mapper_ptr->v5.getStandardMetadata)
-      return;
-   panvk_v19_mapper_so = so;
-   panvk_v19_mapper_status = 0;
+#endif
+   mesa_logw("[P0A-V19-FULLPLANE] mapper load failed (%d candidate names, first=%s); "
+             "PANVK_MAPPER_NAMES=<suffix> overrides", n, n ? names[0] : "-");
 }
 
 static int
 panvk_v19_init_mapper(void)
 {
-   int rc = pthread_once(&panvk_v19_once, panvk_v19_mapper_init_once);
-   if (rc || !panvk_v19_mapper_so) return -ENOTSUP;
-   return panvk_v19_mapper_status;
+   if (pthread_once(&panvk_v19_once, panvk_v19_mapper_init_once)) return -ENOTSUP;
+   return panvk_v19_backend ? 0 : -ENOTSUP;
+}
+
+static int32_t
+panvk_v19_import(const native_handle_t *raw, panvk_v19_buffer_handle_t *out)
+{
+#if defined(__aarch64__)
+   if (panvk_v19_backend == 4) {
+      struct panvk_v19_cb_ctx ctx = { .error = -1 };
+      struct panvk_v19_hidl_handle hh = { raw, false };
+      struct panvk_v19_fn cb = { { panvk_v19_import_vtbl + 2, &ctx } };
+      cb.f = &cb.buf;
+      struct panvk_v19_hidl_ret r =
+         PANVK_V19_M4_CALL(panvk_v19_m4_import_fn, PANVK_V19_M4_IMPORT)(panvk_v19_m4, &hh, &cb);
+      *out = ctx.buffer;
+      return r.exception ? r.exception : ctx.error;
+   }
+#endif
+   return panvk_v19_mapper_ptr->v5.importBuffer(raw, out);
+}
+
+static int32_t
+panvk_v19_free(panvk_v19_buffer_handle_t h)
+{
+#if defined(__aarch64__)
+   if (panvk_v19_backend == 4) {
+      struct panvk_v19_hidl_ret r =
+         PANVK_V19_M4_CALL(panvk_v19_m4_free_fn, PANVK_V19_M4_FREE)(panvk_v19_m4, (void *)h);
+      return r.exception ? r.exception : r.error;
+   }
+#endif
+   return panvk_v19_mapper_ptr->v5.freeBuffer(h);
 }
 
 struct panvk_v19_blob { uint8_t *data; size_t size; };
@@ -180,6 +330,24 @@ static int
 panvk_v19_get_blob(panvk_v19_buffer_handle_t h, int64_t type, struct panvk_v19_blob *out)
 {
    memset(out, 0, sizeof(*out));
+#if defined(__aarch64__)
+   if (panvk_v19_backend == 4) {
+      static const char name[] = "android.hardware.graphics.common.StandardMetadataType";
+      struct panvk_v19_metadata_type mt = { { name, sizeof(name) - 1, false }, type };
+      struct panvk_v19_cb_ctx ctx = { .error = -1 };
+      struct panvk_v19_fn cb = { { panvk_v19_get_vtbl + 2, &ctx } };
+      cb.f = &cb.buf;
+      struct panvk_v19_hidl_ret r =
+         PANVK_V19_M4_CALL(panvk_v19_m4_get_fn, PANVK_V19_M4_GET)(panvk_v19_m4, (void *)h, &mt, &cb);
+      if (r.exception || ctx.error || !ctx.data) {
+         free(ctx.data);
+         return -EINVAL;
+      }
+      out->data = ctx.data;
+      out->size = ctx.size;
+      return 0;
+   }
+#endif
    int32_t need = panvk_v19_mapper_ptr->v5.getStandardMetadata(h, type, NULL, 0);
    if (need <= 0 || need > 65536) return -EINVAL;
    uint8_t *data = malloc((size_t)need);
@@ -321,7 +489,7 @@ panvk_v19_query_mapper(const native_handle_t *raw, struct u_gralloc_buffer_basic
 {
    if (!raw || !out || panvk_v19_init_mapper()) return -ENOTSUP;
    panvk_v19_buffer_handle_t imported = NULL;
-   int32_t ir = panvk_v19_mapper_ptr->v5.importBuffer(raw, &imported);
+   int32_t ir = panvk_v19_import(raw, &imported);
    if (ir || !imported) {
       mesa_logw("[P0A-V19-FULLPLANE] import rc=%d", ir);
       return -EINVAL;
@@ -338,7 +506,7 @@ panvk_v19_query_mapper(const native_handle_t *raw, struct u_gralloc_buffer_basic
       rp = panvk_v19_decode_planes(imported, raw, allocation, out);
    else
       rp = -EINVAL;
-   int32_t fr = panvk_v19_mapper_ptr->v5.freeBuffer(imported);
+   int32_t fr = panvk_v19_free(imported);
    mesa_logi("[P0A-V19-FULLPLANE] metadata layer_rc=%d layers=%llu fourcc_rc=%d fourcc=0x%08x modifier_rc=%d modifier=0x%016llx alloc_rc=%d alloc=%llu planes_rc=%d free_rc=%d",
              rl, (unsigned long long)layer_count, rf, fourcc, rm,
              (unsigned long long)modifier, ra, (unsigned long long)allocation, rp, fr);
@@ -406,72 +574,6 @@ fallback_gralloc_get_yuv_info(struct u_gralloc *gralloc,
    return 0;
 }
 
-/* Vendor metadata route: MTK's gralloc_extra plain-C API -- the same metadata
- * core the vendor mapper4 impl links against (libgralloc_extra.so is in its
- * DT_NEEDED), reachable from an untrusted app because it is a plain function
- * call, no HIDL/binder/ioctl.  Semantics pinned by the panvk.24 GED-DIAG
- * device dump on a real BGRA_8888 640x454 swapchain buffer: attr 12 = 640
- * (stride/width px), 13 = 454 (height), 14 = 1162240 == stride*height*bpp,
- * proving plain linear.  When the size matches, emit exact metadata (fourcc +
- * LINEAR + stride) so the buffer import no longer relies on a blind guess;
- * a size mismatch means vendor compression or a multi-plane layout, which
- * the linear guess cannot represent.  drm_fourcc and stride are the
- * caller-validated values derived from the AHB/ANB descriptor.
- * Returns 0 on accepted metadata, -EINVAL for a non-linear (unrepresentable)
- * layout, -ENOTSUP when the vendor API is unavailable. */
-static int
-panvk_v19_query_gralloc_extra(struct u_gralloc_buffer_handle *hnd,
-                              uint32_t drm_fourcc, int stride,
-                              struct u_gralloc_buffer_basic_info *out)
-{
-   static int (*ge_query)(const native_handle_t *, unsigned int, void *);
-   static bool ge_tried = false;
-
-   if (!ge_tried) {
-      ge_tried = true;
-      /* Preload the one vendor dependency so its soname resolves. */
-      dlopen("/vendor/lib64/libged.so", RTLD_NOW | RTLD_LOCAL);
-      void *so = dlopen("/vendor/lib64/libgralloc_extra.so", RTLD_NOW | RTLD_LOCAL);
-      if (so) {
-         ge_query = (int (*)(const native_handle_t *, unsigned int, void *))
-            dlsym(so, "gralloc_extra_query");
-      }
-      if (!ge_query) {
-         mesa_logw("[P0A-V19-FULLPLANE] vendor gralloc_extra unavailable: %s",
-                   dlerror() ? dlerror() : "gralloc_extra_query absent");
-         return -ENOTSUP;
-      }
-   }
-
-   int32_t width = 0, height = 0, size = 0;
-   if (!ge_query || ge_query(hnd->handle, 12, &width) ||
-       ge_query(hnd->handle, 13, &height) || ge_query(hnd->handle, 14, &size) ||
-       width <= 0 || height <= 0 || size <= 0)
-      return -ENOTSUP;
-
-   int bpp = get_hal_format_bpp(hnd->hal_format);
-   if (bpp <= 0 || stride <= 0)
-      return -ENOTSUP;
-
-   int64_t linear = (int64_t)stride * height;
-   if ((int64_t)size != linear) {
-      mesa_logw("[P0A-V19-FULLPLANE] vendor metadata: size=%d != linear %lld "
-                "(attr12=%d bpp=%d h=%d) -- layout not plain linear",
-                size, (long long)linear, width, bpp, height);
-      return -EINVAL;
-   }
-
-   out->drm_fourcc = drm_fourcc;
-   out->modifier = DRM_FORMAT_MOD_LINEAR;
-   out->num_planes = 1;
-   out->fds[0] = hnd->handle->data[0];
-   out->strides[0] = stride;
-   out->offsets[0] = 0;
-   mesa_logi("[P0A-V19-FULLPLANE] vendor metadata accepted fourcc=0x%08x modifier=LINEAR stride=%d (size=%d h=%d)",
-             drm_fourcc, stride, size, height);
-   return 0;
-}
-
 static int
 fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
                                  struct u_gralloc_buffer_handle *hnd,
@@ -533,32 +635,11 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
 
 
 
-   /* Precise metadata via the vendor AIMapper when available. If the mapper
-    * is unavailable (e.g. sphal mapper blocked by SELinux on some vendors),
-    * fall back to the guessed RGB layout above instead of failing: failing
-    * here breaks every swapchain, including plain RGBA_8888 ones. Vendor
-    * formats that cannot be guessed are rejected earlier in this function.
-    */
    int stable_ret = panvk_v19_query_mapper(hnd->handle, out);
-   if (stable_ret != 0)
-      stable_ret = panvk_v19_query_gralloc_extra(hnd, drm_fourcc, stride, out);
-
-   if (stable_ret == -EINVAL) {
-      /* Vendor metadata proved the physical layout is not plain linear; the
-       * LINEAR guess would render garbage (doc side-effect: AFBC detected).
-       * Refuse under the escape hatch, warn loudly otherwise. */
-      if (debug_get_bool_option("PANVK_KBASE_NO_GUESS", false)) {
-         mesa_logw("[P0A-V19-FULLPLANE] vendor metadata says NOT linear and "
-                   "PANVK_KBASE_NO_GUESS=1: refusing import (fourcc=0x%08x stride=%d)",
-                   drm_fourcc, stride);
-         return -ENOTSUP;
-      }
-      mesa_logw("[P0A-V19-FULLPLANE] guessing LINEAR on a non-linear buffer "
-                "(fourcc=0x%08x stride=%d); set PANVK_KBASE_NO_GUESS=1 to refuse instead",
-                drm_fourcc, stride);
-   } else if (stable_ret != 0) {
-      mesa_logi("[P0A-V19-FULLPLANE] no mapper/vendor metadata (rc=%d); using guessed RGB layout fourcc=0x%08x stride=%d",
-                stable_ret, drm_fourcc, stride);
+   if (stable_ret != 0) {
+      mesa_logw("[P0A-V19-FULLPLANE] complete metadata unavailable rc=%d; refusing guessed layout",
+                stable_ret);
+      return stable_ret;
    }
 
    return 0;

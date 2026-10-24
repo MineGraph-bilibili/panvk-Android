@@ -121,6 +121,8 @@ struct cso_context_priv {
    struct pipe_viewport_state vp, vp_saved;
    unsigned sample_mask, sample_mask_saved;
    unsigned min_samples, min_samples_saved;
+   float sample_coverage, sample_coverage_saved;
+   bool sample_coverage_invert, sample_coverage_invert_saved;
    struct pipe_stencil_ref stencil_ref, stencil_ref_saved;
 
    /* This should be last to keep all of the above together in memory. */
@@ -291,6 +293,7 @@ cso_create_context(struct pipe_context *pipe, unsigned flags)
 
    ctx->base.pipe = pipe;
    ctx->sample_mask = ~0;
+   ctx->sample_coverage = 1.0f;
 
    if (!(flags & CSO_NO_VBUF))
       cso_init_vbuf(ctx, flags);
@@ -458,6 +461,8 @@ cso_unbind_context(struct cso_context *cso)
           offsetof(struct cso_context_priv, cache)
           - offsetof(struct cso_context_priv, nr_so_targets));
    ctx->sample_mask = ~0;
+   ctx->sample_coverage = 1.0f;
+
    /*
     * If the cso context is reused (with the same pipe context),
     * need to really make sure the context state doesn't get out of sync.
@@ -465,6 +470,11 @@ cso_unbind_context(struct cso_context *cso)
    ctx->base.pipe->set_sample_mask(ctx->base.pipe, ctx->sample_mask);
    if (ctx->base.pipe->set_min_samples)
       ctx->base.pipe->set_min_samples(ctx->base.pipe, ctx->min_samples);
+
+   if (ctx->base.pipe->set_sample_coverage)
+      ctx->base.pipe->set_sample_coverage(ctx->base.pipe,
+                                         ctx->sample_coverage,
+                                         ctx->sample_coverage_invert);
    if (dumping)
       trace_dumping_start_locked();
 }
@@ -870,6 +880,8 @@ static void
 cso_save_sample_mask(struct cso_context_priv *ctx)
 {
    ctx->sample_mask_saved = ctx->sample_mask;
+   ctx->sample_coverage_saved = ctx->sample_coverage;
+   ctx->sample_coverage_invert_saved = ctx->sample_coverage_invert;
 }
 
 
@@ -877,6 +889,8 @@ static void
 cso_restore_sample_mask(struct cso_context_priv *ctx)
 {
    cso_set_sample_mask(&ctx->base, ctx->sample_mask_saved);
+   cso_set_sample_coverage(&ctx->base, ctx->sample_coverage_saved,
+                           ctx->sample_coverage_invert_saved);
 }
 
 
@@ -888,6 +902,21 @@ cso_set_min_samples(struct cso_context *cso, unsigned min_samples)
    if (ctx->min_samples != min_samples && ctx->base.pipe->set_min_samples) {
       ctx->min_samples = min_samples;
       ctx->base.pipe->set_min_samples(ctx->base.pipe, min_samples);
+   }
+}
+
+
+void
+cso_set_sample_coverage(struct cso_context *cso, float value, bool invert)
+{
+   struct cso_context_priv *ctx = (struct cso_context_priv *)cso;
+
+   if (ctx->base.pipe->set_sample_coverage &&
+       (ctx->sample_coverage != value ||
+        ctx->sample_coverage_invert != invert)) {
+      ctx->sample_coverage = value;
+      ctx->sample_coverage_invert = invert;
+      ctx->base.pipe->set_sample_coverage(ctx->base.pipe, value, invert);
    }
 }
 

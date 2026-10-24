@@ -92,13 +92,15 @@ public:
    gl_system_value system_value() const { return m_system_value; }
    void set_system_value(gl_system_value system_value) { m_system_value = system_value; }
 
-   void set_interpolator(int interp, int interp_loc, bool uses_interpolate_at_centroid);
+   void set_interpolator(glsl_interp_mode interp,
+                         r600_interp_location interp_loc,
+                         bool uses_interpolate_at_centroid);
    void set_uses_interpolate_at_centroid();
    void set_need_lds_pos() { m_need_lds_pos = true; }
    int ij_index() const { return m_ij_index; }
 
-   int interpolator() const { return m_interpolator; }
-   int interpolate_loc() const { return m_interpolate_loc; }
+   glsl_interp_mode interpolator() const { return m_interpolator; }
+   r600_interp_location interpolate_loc() const { return m_interpolate_loc; }
    bool need_lds_pos() const { return m_need_lds_pos; }
    int lds_pos() const { return m_lds_pos; }
    void set_lds_pos(int pos) { m_lds_pos = pos; }
@@ -111,8 +113,8 @@ private:
    void do_print(std::ostream& os) const override;
 
    gl_system_value m_system_value{SYSTEM_VALUE_MAX};
-   int m_interpolator{0};
-   int m_interpolate_loc{0};
+   glsl_interp_mode m_interpolator{INTERP_MODE_NONE};
+   r600_interp_location m_interpolate_loc{R600_INTERP_LOC_SAMPLE};
    int m_ij_index{0};
    bool m_uses_interpolate_at_centroid{false};
    bool m_need_lds_pos{false};
@@ -234,9 +236,13 @@ public:
 
    PRegister atomic_update();
    int remap_atomic_base(int base);
-   auto evaluate_resource_offset(nir_intrinsic_instr *instr, int src_id)
-      -> std::pair<int, PRegister>;
-   int ssbo_image_offset() const { return m_ssbo_image_offset; }
+   auto evaluate_resource_offset(nir_intrinsic_instr *instr,
+                                 int src_id) -> std::pair<int, PRegister>;
+   bool get_alt_const() const
+   {
+      return m_shader_stage == MESA_SHADER_FRAGMENT ||
+             m_shader_stage == MESA_SHADER_GEOMETRY;
+   }
    PRegister rat_return_address()
    {
       assert(m_rat_return_address);
@@ -245,7 +251,12 @@ public:
 
    PRegister emit_load_to_register(PVirtualValue src, int chan = -1);
 
-   virtual unsigned image_size_const_offset() { return 0;}
+   struct dynamic_offset get_dynamic_offset() const { return m_dynamic_offset; }
+   void clamp_dynamic_offset(const unsigned num_images)
+   {
+      if (num_images > m_dynamic_offset.ssbo_offset)
+         m_dynamic_offset.ssbo_offset = num_images;
+   }
 
    auto required_registers() const { return m_required_registers;}
 
@@ -273,7 +284,7 @@ protected:
 
    std::bitset<es_last> m_sv_values;
 
-   Shader(const char *type_id);
+   Shader(const char *type_id, struct dynamic_offset dynamic_offset = {0});
 
    const ShaderInput& input(int base) const;
 
@@ -351,7 +362,6 @@ private:
 
    Instr *m_last_txd{nullptr};
 
-   uint32_t m_indirect_files{0};
    std::bitset<sh_flags_count> m_flags;
    uint32_t nhwatomic_ranges{0};
    std::vector<r600_shader_atomic, Allocator<r600_shader_atomic>> m_atomics;
@@ -365,12 +375,13 @@ private:
    PRegister m_atomic_update{nullptr};
    PRegister m_rat_return_address{nullptr};
 
-   int32_t m_ssbo_image_offset{0};
+   mesa_shader_stage m_shader_stage{(mesa_shader_stage)-1};
    uint32_t m_nloops{0};
    uint32_t m_required_registers{0};
 
    int64_t m_shader_id;
    static int64_t s_next_shader_id;
+   struct dynamic_offset m_dynamic_offset;
 
    class InstructionChain : public InstrVisitor {
    public:

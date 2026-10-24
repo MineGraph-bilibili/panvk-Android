@@ -47,8 +47,9 @@ panfrost_batch_add_surface(struct panfrost_batch *batch,
 {
    if (surf->texture) {
       struct panfrost_resource *rsrc = pan_resource(surf->texture);
-      pan_legalize_format(batch->ctx, rsrc, surf->format, true, false);
-      panfrost_batch_write_rsrc(batch, rsrc, MESA_SHADER_FRAGMENT);
+      pan_resource_modifier_legalize(batch->ctx, rsrc, surf->format, true,
+                                     false);
+      panfrost_batch_write_rsrc(batch, rsrc);
    }
 }
 
@@ -335,35 +336,29 @@ panfrost_batch_add_bo_old(struct panfrost_batch *batch, struct panfrost_bo *bo,
    *entry = flags;
 }
 
-static uint32_t
-panfrost_access_for_stage(mesa_shader_stage stage)
+void
+panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo)
 {
-   return (stage == MESA_SHADER_FRAGMENT) ? PAN_BO_ACCESS_FRAGMENT
-                                          : PAN_BO_ACCESS_VERTEX_TILER;
+   panfrost_batch_add_bo_old(batch, bo, PAN_BO_ACCESS_READ);
 }
 
 void
-panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo,
-                      mesa_shader_stage stage)
+panfrost_batch_write_bo(struct panfrost_batch *batch, struct panfrost_bo *bo)
 {
-   panfrost_batch_add_bo_old(
-      batch, bo, PAN_BO_ACCESS_READ | panfrost_access_for_stage(stage));
-}
-
-void
-panfrost_batch_write_bo(struct panfrost_batch *batch, struct panfrost_bo *bo,
-                        mesa_shader_stage stage)
-{
-   panfrost_batch_add_bo_old(
-      batch, bo, PAN_BO_ACCESS_WRITE | panfrost_access_for_stage(stage));
+   panfrost_batch_add_bo_old(batch, bo, PAN_BO_ACCESS_WRITE);
 }
 
 void
 panfrost_batch_read_rsrc(struct panfrost_batch *batch,
-                         struct panfrost_resource *rsrc,
-                         mesa_shader_stage stage)
+                         struct panfrost_resource *rsrc)
 {
-   uint32_t access = PAN_BO_ACCESS_READ | panfrost_access_for_stage(stage);
+   /* Recursive call to panfrost_batch_read_rsrc() to add all planes.
+    * The max recursion depth should be 3.
+    */
+   if (rsrc->base.next)
+      panfrost_batch_read_rsrc(batch, pan_resource(rsrc->base.next));
+
+   uint32_t access = PAN_BO_ACCESS_READ | PAN_BO_ACCESS_PER_CTX_TRACKING;
 
    pan_resource_update_access(batch->ctx, rsrc, false);
 
@@ -379,10 +374,15 @@ panfrost_batch_read_rsrc(struct panfrost_batch *batch,
 
 void
 panfrost_batch_write_rsrc(struct panfrost_batch *batch,
-                          struct panfrost_resource *rsrc,
-                          mesa_shader_stage stage)
+                          struct panfrost_resource *rsrc)
 {
-   uint32_t access = PAN_BO_ACCESS_WRITE | panfrost_access_for_stage(stage);
+   /* Recursive call to panfrost_batch_write_rsrc() to add all planes.
+    * The max recursion depth should be 3.
+    */
+   if (rsrc->base.next)
+      panfrost_batch_write_rsrc(batch, pan_resource(rsrc->base.next));
+
+   uint32_t access = PAN_BO_ACCESS_WRITE | PAN_BO_ACCESS_PER_CTX_TRACKING;
 
    pan_resource_update_access(batch->ctx, rsrc, true);
 
@@ -406,7 +406,7 @@ panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
    bo = panfrost_bo_create(pan_device(batch->ctx->base.screen), size,
                            create_flags, label);
    if (bo) {
-      panfrost_batch_add_bo(batch, bo, stage);
+      panfrost_batch_add_bo(batch, bo);
 
       /* panfrost_batch_add_bo() has retained a reference and
        * panfrost_bo_create() initialize the refcnt to 1, so let's
@@ -434,7 +434,7 @@ panfrost_batch_get_scratchpad(struct panfrost_batch *batch,
                                   MESA_SHADER_VERTEX, "Thread local storage");
 
       if (batch->scratchpad)
-         panfrost_batch_add_bo(batch, batch->scratchpad, MESA_SHADER_FRAGMENT);
+         panfrost_batch_add_bo(batch, batch->scratchpad);
    }
 
    return batch->scratchpad;
@@ -483,6 +483,7 @@ panfrost_batch_to_fb_info(const struct panfrost_batch *batch,
    fb->force_samples = (batch->line_smoothing == U_TRISTATE_YES) ? 16 : 0;
    fb->rt_count = batch->key.nr_cbufs;
    fb->pls_enabled = batch->key.pls_enabled;
+   fb->downscale_rts = batch->key.downscale_cbufs;
    fb->sprite_coord_origin = (batch->sprite_coord_origin == U_TRISTATE_YES);
    fb->first_provoking_vertex =
       (batch->first_provoking_vertex == U_TRISTATE_YES);
@@ -510,6 +511,11 @@ panfrost_batch_to_fb_info(const struct panfrost_batch *batch,
       }
 
       fb->rts[i].discard = !reserve && !(batch->resolve & mask);
+
+      if (fb->downscale_rts) {
+         assert(fb->rt_count == 2);
+         fb->rts[i].discard = false;
+      }
 
       /* Clamp the rendering area to the damage extent. The
        * KHR_partial_update spec states that trying to render outside of

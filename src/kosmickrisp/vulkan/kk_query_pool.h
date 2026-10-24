@@ -10,21 +10,13 @@
 
 #include "kk_private.h"
 
-#include "util/u_dynarray.h"
 #include "vulkan/runtime/vk_query_pool.h"
-
-struct kk_ts_stage_entry {
-   mtl_render_encoder *pass;
-   enum mtl_render_stages stage;
-   uint16_t index;
-};
 
 struct kk_ts_state {
    /* Metal 4 counter heap backing VK_QUERY_TYPE_TIMESTAMP pools. Timestamps are
     * sampled into this heap and later resolved into `bo` (see kk_query_pool.c).
     * NULL for non-timestamp pools. */
    mtl_counter_heap *heap;
-   struct util_dynarray stage_map;
 };
 
 struct kk_oq_state {

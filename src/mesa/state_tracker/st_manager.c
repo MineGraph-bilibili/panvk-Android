@@ -884,6 +884,14 @@ st_context_teximage(struct st_context *st, GLenum target,
    pipe_resource_reference(&texImage->pt, tex);
    texObj->surface_format = pipe_format;
 
+   /* Cache whether the extra YUV plane-view / lowering setup in
+    * st_get_sampler_views() and st_get_external_sampler_key() must run for
+    * this texture. st_finalize_texture() returns early for surface_based
+    * textures without computing this.
+    */
+   texObj->needs_yuv_plane_views = tex &&
+      (pipe_format != tex->format || util_format_is_yuv(pipe_format));
+
    texObj->needs_validation = true;
 
    _mesa_dirty_texobj(ctx, texObj);

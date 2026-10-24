@@ -33,6 +33,7 @@
 struct rs_state {
    uint8_t downsample_x : 1; /* Downsample in x direction */
    uint8_t downsample_y : 1; /* Downsample in y direction */
+   uint8_t downsample_one_sample : 1; /* Copy sample 0, do not average */
    uint8_t source_ts_valid : 1;
    uint8_t source_ts_mode : 1;
    uint8_t source_ts_compressed : 1;
@@ -67,6 +68,7 @@ struct rs_state {
 struct compiled_rs_state {
    uint8_t source_ts_valid : 1;
    uint8_t single_buffer : 1;
+   uint8_t downsample_one_sample : 1;
    uint32_t RS_CONFIG;
    uint32_t RS_SOURCE_STRIDE;
    uint32_t RS_DEST_STRIDE;

@@ -219,8 +219,8 @@ radv_amdgpu_winsys_unreserve_vmid(struct radeon_winsys *rws)
 }
 
 VkResult
-radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, uint64_t debug_flags, uint64_t perftest_flags,
-                          bool is_virtio, struct radeon_winsys **winsys)
+radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_WORD *debug_flags,
+                          uint64_t perftest_flags, bool is_virtio, struct radeon_winsys **winsys)
 {
    VkResult result = VK_SUCCESS;
 
@@ -251,12 +251,12 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, uint64_t debug
 
    memcpy(&ws->info, info, sizeof(ws->info));
 
-   ws->chain_ib = !(debug_flags & RADV_DEBUG_NO_IB_CHAINING);
-   ws->debug_all_bos = !!(debug_flags & RADV_DEBUG_ALL_BOS);
-   ws->debug_log_bos = debug_flags & RADV_DEBUG_HANG;
-   ws->dump_ibs = !!(debug_flags & RADV_DEBUG_DUMP_IBS);
+   ws->chain_ib = !BITSET_TEST(debug_flags, RADV_DEBUG_NO_IB_CHAINING);
+   ws->debug_all_bos = BITSET_TEST(debug_flags, RADV_DEBUG_ALL_BOS);
+   ws->debug_log_bos = BITSET_TEST(debug_flags, RADV_DEBUG_HANG);
+   ws->dump_ibs = BITSET_TEST(debug_flags, RADV_DEBUG_DUMP_IBS);
 
-   if (debug_flags & RADV_DEBUG_DUMP_BO_HISTORY) {
+   if (BITSET_TEST(debug_flags, RADV_DEBUG_DUMP_BO_HISTORY)) {
       ws->bo_history_logfile = fopen("/tmp/radv_bo_history.log", "w+");
       if (!ws->bo_history_logfile)
          fprintf(stderr, "radv/amdgpu: Failed to create /tmp/radv_bo_history.log.\n");
@@ -268,8 +268,8 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, uint64_t debug
    simple_mtx_init(&ws->vm_ioctl_lock, mtx_plain);
 
    ws->perftest = perftest_flags;
-   ws->zero_all_vram_allocs = debug_flags & RADV_DEBUG_ZERO_VRAM;
-   ws->debug_vm = debug_flags & RADV_DEBUG_VM;
+   ws->zero_all_vram_allocs = BITSET_TEST(debug_flags, RADV_DEBUG_ZERO_VRAM);
+   ws->debug_vm = BITSET_TEST(debug_flags, RADV_DEBUG_VM);
    u_rwlock_init(&ws->global_bo_list.lock);
    list_inithead(&ws->log_bo_list);
    u_rwlock_init(&ws->log_bo_list_lock);
@@ -320,7 +320,7 @@ radv_amdgpu_ctx_is_priority_permitted(ac_drm_device *dev, enum radeon_ctx_priori
 }
 
 VkResult
-radv_amdgpu_winsys_query_info(int fd, uint64_t debug_flags, bool is_virtio, struct radeon_winsys_info *info)
+radv_amdgpu_winsys_query_info(int fd, const BITSET_WORD *debug_flags, bool is_virtio, struct radeon_winsys_info *info)
 {
    uint32_t drm_major, drm_minor, r;
    VkResult result = VK_SUCCESS;
@@ -339,7 +339,7 @@ radv_amdgpu_winsys_query_info(int fd, uint64_t debug_flags, bool is_virtio, stru
    info->base.is_virtio = is_virtio;
 
    enum ac_query_gpu_info_result info_result =
-      ac_query_gpu_info(fd, dev, &info->base, true, !(debug_flags & RADV_DEBUG_NO_CACHE_COMPAT));
+      ac_query_gpu_info(fd, dev, &info->base, true, !BITSET_TEST(debug_flags, RADV_DEBUG_NO_CACHE_COMPAT));
    if (info_result != AC_QUERY_GPU_INFO_SUCCESS) {
       result = info_result == AC_QUERY_GPU_INFO_FAIL ? VK_ERROR_INITIALIZATION_FAILED : VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail;

@@ -29,6 +29,7 @@ enum i915_ccmd {
    I915_CCMD_GEM_EXECBUFFER2,
    I915_CCMD_GEM_SET_MMAP_MODE,
    I915_CCMD_GEM_BUSY,
+   I915_CCMD_GEM_EXECBUFFER2_V2,
 };
 
 #define I915_CCMD(_cmd, _len) (struct vdrm_ccmd_req){    \

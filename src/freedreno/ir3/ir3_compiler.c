@@ -346,17 +346,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
 
    compiler->has_isam_ssbo = compiler->gen >= 6;
 
-   if (compiler->gen >= 6) {
-      compiler->reg_size_vec4 = dev_info->props.reg_size_vec4;
-   } else if (compiler->gen >= 4) {
-      /* On a4xx-a5xx, using r24.x and above requires using the smallest
-       * threadsize.
-       */
-      compiler->reg_size_vec4 = 48;
-   } else {
-      /* TODO: confirm this */
-      compiler->reg_size_vec4 = 96;
-   }
+   compiler->reg_size_vec4 = dev_info->props.reg_size_vec4;
 
    if (compiler->gen >= 4) {
       /* need special handling for "flat" */

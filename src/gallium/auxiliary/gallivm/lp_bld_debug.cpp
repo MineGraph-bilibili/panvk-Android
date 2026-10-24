@@ -379,8 +379,10 @@ lp_function_add_debug_info(gallivm_state *gallivm, LLVMValueRef func, LLVMTypeRe
 
       os_mkdir(LP_NIR_SHADER_DUMP_DIR, 0755);
 
-      asprintf(&gallivm->file_name, "%s/%u.nir", LP_NIR_SHADER_DUMP_DIR, shader_index);
-
+      if (asprintf(&gallivm->file_name, "%s/%u.nir", LP_NIR_SHADER_DUMP_DIR, shader_index) < 0) {
+         fprintf(stderr, "asprintf failed\n");
+         return;
+      }
       gallivm->file = LLVMDIBuilderCreateFile(gallivm->di_builder, gallivm->file_name, strlen(gallivm->file_name), ".", 1);
 
       LLVMDIBuilderCreateCompileUnit(

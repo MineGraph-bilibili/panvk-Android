@@ -1,5 +1,0 @@
-Name: xshmfence
-Description: xshmfence
-Version: 1.15
-Libs: -lxshmfence
-Cflags:

@@ -41,6 +41,13 @@ fd6_ifmt(enum a6xx_format fmt)
    case FMT6_4_4_4_4_UNORM:
    case FMT6_5_5_5_1_UNORM:
    case FMT6_5_6_5_UNORM:
+   case FMT6_NV12_4R:
+   case FMT6_NV12_4R_Y:
+   case FMT6_NV12_4R_UV:
+   case FMT6_NV12_Y:
+   case FMT6_NV12_UV:
+   case FMT6_R8G8R8B8_422_UNORM:
+   case FMT6_G8R8B8R8_422_UNORM:
       return R2D_UNORM8;
 
    case FMT6_32_UINT:
@@ -236,7 +243,10 @@ can_do_blit(const struct fd_dev_info *dev_info, const struct pipe_blit_info *inf
    const int common_channels =
       MIN2(src_desc->nr_channels, dst_desc->nr_channels);
 
-   if (info->mask & PIPE_MASK_RGBA) {
+   bool is_yuv_blit = util_format_is_yuv(info->src.format) || 
+                      util_format_is_yuv(info->dst.format);
+
+   if (!is_yuv_blit && (info->mask & PIPE_MASK_RGBA)) {
       for (int i = 0; i < common_channels; i++) {
          fail_if(memcmp(&src_desc->channel[i], &dst_desc->channel[i],
                         sizeof(src_desc->channel[0])));
@@ -315,14 +325,17 @@ emit_blit_setup(fd_ncrb<CHIP> &ncrb, enum pipe_format pfmt,
       ifmt = R2D_UNORM8_SRGB;
    }
 
+   bool is_yuv = util_format_is_yuv(pfmt);
+
    ncrb.add(A6XX_RB_A2D_BLT_CNTL(
       .rotate = p.rotate,
       .solid_color = !!p.color,
       .color_format = fmt,
       .scissor = p.scissor_enable,
-      .is_src_yuv = fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !p.color,
+      .is_src_yuv = (fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !p.color) || is_yuv,
       .mask = p.mask,
       .ifmt = util_format_is_srgb(pfmt) ? R2D_UNORM8_SRGB : ifmt,
+      .linear_yuv = is_yuv,
    ));
 
    ncrb.add(GRAS_A2D_BLT_CNTL(CHIP,
@@ -330,9 +343,10 @@ emit_blit_setup(fd_ncrb<CHIP> &ncrb, enum pipe_format pfmt,
       .solid_color = !!p.color,
       .color_format = fmt,
       .scissor = p.scissor_enable,
-      .is_src_yuv = fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !p.color,
+      .is_src_yuv = (fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !p.color) || is_yuv,
       .mask = p.mask,
       .ifmt = util_format_is_srgb(pfmt) ? R2D_UNORM8_SRGB : ifmt,
+      .linear_yuv = is_yuv,
    ));
 
    if (CHIP >= A7XX) {
@@ -344,6 +358,10 @@ emit_blit_setup(fd_ncrb<CHIP> &ncrb, enum pipe_format pfmt,
 
    if (fmt == FMT6_10_10_10_2_UNORM_DEST)
       fmt = FMT6_16_16_16_16_FLOAT;
+
+   if (fd_format_is_planar_yuv(pfmt))
+      fmt = FMT6_8_8_8_8_UNORM;
+
 
    enum a6xx_sp_a2d_output_ifmt_type output_ifmt_type;
    if (util_format_is_pure_uint(pfmt))
@@ -605,7 +623,7 @@ fd6_clear_ubwc(struct fd_batch *batch, struct fd_resource *rsc) assert_dt
                           FD6_WAIT_FOR_IDLE);
 }
 
-/* nregs: 10 */
+/* nregs: 15 */
 template <chip CHIP>
 static void
 emit_blit_dst(fd_ncrb<CHIP> &ncrb, struct pipe_resource *prsc,
@@ -639,6 +657,19 @@ emit_blit_dst(fd_ncrb<CHIP> &ncrb, struct pipe_resource *prsc,
    ));
    ncrb.add(A6XX_RB_A2D_DEST_BUFFER_PITCH(pitch));
 
+   if (fd_format_is_planar_yuv(pfmt)) {
+      struct fd_resource *uv_rsc = fd_resource_plane(prsc, 1);
+      uint32_t uv_pitch = fd_resource_pitch(uv_rsc, level);
+      unsigned uv_off = fd_resource_offset(uv_rsc, level, layer);
+
+      ncrb.add(A6XX_RB_A2D_DEST_BUFFER_BASE_1(
+         .bo = uv_rsc->bo,
+         .bo_offset = uv_off,
+      ));
+      ncrb.add(A6XX_RB_A2D_DEST_BUFFER_PITCH_1(uv_pitch));
+      ncrb.add(A6XX_RB_A2D_DEST_BUFFER_BASE_2(0));
+   }
+
    if (ubwc_enabled) {
       ncrb.add(A6XX_RB_A2D_DEST_FLAG_BUFFER_BASE(
          dst->bo, fd_resource_ubwc_offset(dst, level, layer)
@@ -652,7 +683,7 @@ emit_blit_dst(fd_ncrb<CHIP> &ncrb, struct pipe_resource *prsc,
    }
 }
 
-/* nregs: 8 */
+/* nregs: 16 */
 template <chip CHIP>
 static void
 emit_blit_src(fd_ncrb<CHIP> &ncrb, const struct pipe_blit_info *info,
@@ -693,6 +724,19 @@ emit_blit_src(fd_ncrb<CHIP> &ncrb, const struct pipe_blit_info *info,
    ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE(CHIP, .bo = src->bo, .bo_offset = soff));
    ncrb.add(TPL1_A2D_SRC_TEXTURE_PITCH(CHIP, .pitch = pitch));
 
+   if (fd_format_is_planar_yuv(info->src.format)) {
+      struct fd_resource *uv_rsc = fd_resource_plane(info->src.resource, 1);
+      uint32_t uv_pitch = fd_resource_pitch(uv_rsc, info->src.level);
+      unsigned uv_off = fd_resource_offset(uv_rsc, info->src.level, layer);
+
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE_1(CHIP,
+         .bo = uv_rsc->bo,
+         .bo_offset = uv_off,
+      ));
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_PITCH_1(CHIP, uv_pitch));
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE_2(CHIP, 0));
+   }
+
    if (subwc_enabled && fd_resource_ubwc_enabled(src, info->src.level)) {
       ncrb.add(TPL1_A2D_SRC_TEXTURE_FLAG_BASE(CHIP,
          .bo = src->bo,
@@ -701,6 +745,9 @@ emit_blit_src(fd_ncrb<CHIP> &ncrb, const struct pipe_blit_info *info,
       ncrb.add(TPL1_A2D_SRC_TEXTURE_FLAG_PITCH(CHIP,
          fdl_ubwc_pitch(&src->layout, info->src.level),
       ));
+   } else {
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_FLAG_BASE(CHIP, .qword = 0));
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_FLAG_PITCH(CHIP, 0));
    }
 }
 
@@ -792,7 +839,7 @@ emit_blit_texture(struct fd_context *ctx, fd_cs &cs, const struct pipe_blit_info
    uint32_t nr_samples = fd_resource_nr_samples(&dst->b.b);
 
    for (unsigned i = 0; i < info->dst.box.depth; i++) {
-      with_ncrb (cs, 18) {
+      with_ncrb (cs, 28) {
          emit_blit_src<CHIP>(ncrb, info, sbox->z + i, nr_samples);
          emit_blit_dst(ncrb, info->dst.resource, info->dst.format, info->dst.level,
                        dbox->z + i);
@@ -1133,7 +1180,7 @@ fd6_clear_surface(struct fd_context *ctx, fd_cs &cs,
    clear_surface_setup<CHIP>(cs, psurf, box2d, color, buffers);
 
    for (unsigned i = psurf->first_layer; i <= psurf->last_layer; i++) {
-      with_ncrb (cs, 10)
+      with_ncrb (cs, 15)
          emit_blit_dst(ncrb, psurf->texture, psurf->format, psurf->level, i);
 
       emit_blit_fini<CHIP>(ctx, cs);
@@ -1232,15 +1279,24 @@ fd6_clear_texture(struct pipe_context *pctx, struct pipe_resource *prsc,
 template <chip CHIP>
 static void
 resolve_tile_setup(struct fd_batch *batch, fd_cs &cs, uint32_t base,
-                   struct pipe_surface *psurf,
+                   uint32_t uv_base, struct pipe_surface *psurf,
                    BITMASK_ENUM(fd_buffer_mask) buffers)
 {
    const struct fd_gmem_stateobj *gmem = batch->gmem_state;
-   uint32_t gmem_pitch = gmem->bin_w * batch->framebuffer.samples *
-                         util_format_get_blocksize(psurf->format);
+   uint32_t gmem_pitch;
+   if (util_format_is_yuv(psurf->format)) {
+      /* util_format_get_stride() accounts for block_width, unlike naive
+       * bin_w * blocksize. For YUYV (block_width=2), this is half the size. */
+      gmem_pitch = util_format_get_stride(
+         psurf->format, gmem->bin_w * batch->framebuffer.samples);
+   } else {
+      gmem_pitch = gmem->bin_w * batch->framebuffer.samples *
+                   util_format_get_blocksize(psurf->format);
+   }
    unsigned width = pipe_surface_width(psurf);
    unsigned height = pipe_surface_height(psurf);
-   fd_ncrb<CHIP> ncrb(cs, 26);
+   /* Extra 8 DWORDs for YUV: BASE_1(2) + PITCH_1(1) + BASE_2(2) + FLAG_BASE(2) + FLAG_PITCH(1) */
+   fd_ncrb<CHIP> ncrb(cs, 34);
 
    ncrb.add(GRAS_A2D_DEST_TL(CHIP, .x = 0, .y = 0));
    ncrb.add(GRAS_A2D_DEST_BR(CHIP, .x = width - 1, .y = height - 1));
@@ -1283,20 +1339,39 @@ resolve_tile_setup(struct fd_batch *batch, fd_cs &cs, uint32_t base,
    ));
 
    /* gen8 simply uses gmem offset when GMEM tiling (TILE6_2) is specified: */
-   if (CHIP < A8XX)
+   if (CHIP < A8XX) {
       base += batch->ctx->screen->gmem_base;
+      if (uv_base)
+         uv_base += batch->ctx->screen->gmem_base;
+   }
 
    ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE(CHIP, .qword = base));
    ncrb.add(TPL1_A2D_SRC_TEXTURE_PITCH(CHIP, .pitch = gmem_pitch));
+
+   if (util_format_is_yuv(psurf->format)) {
+      /* For NV12/YUV GMEM resolves, the 2D blitter reads the UV plane from
+       * GMEM using BASE_1/PITCH_1. uv_base is the GMEM offset of the UV plane
+       * (gmem->cbuf_base[i+1]).
+       *
+       * The UV plane in GMEM uses the same pitch as the Y plane because GMEM
+       * tiles are always the same width (bin_w) regardless of plane.
+       */
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE_1(CHIP, .qword = uv_base));
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_PITCH_1(CHIP, gmem_pitch));
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE_2(CHIP, .qword = 0));
+      /* Always emit FLAG_BASE/PITCH for YUV to clear stale values */
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_FLAG_BASE(CHIP, .qword = 0));
+      ncrb.add(TPL1_A2D_SRC_TEXTURE_FLAG_PITCH(CHIP, 0));
+   }
 }
 
 template <chip CHIP>
 void
 fd6_resolve_tile(struct fd_batch *batch, fd_cs &cs, uint32_t base,
-                 struct pipe_surface *psurf,
+                 uint32_t uv_base, struct pipe_surface *psurf,
                  BITMASK_ENUM(fd_buffer_mask) buffers)
 {
-   resolve_tile_setup<CHIP>(batch, cs, base, psurf, buffers);
+   resolve_tile_setup<CHIP>(batch, cs, base, uv_base, psurf, buffers);
 
    /* sync GMEM writes with CACHE. */
    fd6_cache_inv<CHIP>(batch->ctx, cs);

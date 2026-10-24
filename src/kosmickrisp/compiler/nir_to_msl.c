@@ -61,6 +61,8 @@ static const char *sysval_table[SYSTEM_VALUE_MAX] = {
    [SYSTEM_VALUE_SAMPLE_ID] = "uint gl_SampleID [[sample_id]]",
    [SYSTEM_VALUE_SAMPLE_MASK_IN] = "uint gl_SampleMask [[sample_mask]]",
    [SYSTEM_VALUE_PRIMITIVE_ID] = "uint gl_PrimitiveID [[primitive_id]]",
+   [SYSTEM_VALUE_BARYCENTRIC_PERSP_COORD] =
+      "float3 gl_BaryCoord [[barycentric_coord]]",
    [SYSTEM_VALUE_AMPLIFICATION_ID_KK] =
       "uint mtl_AmplificationID [[amplification_id]]",
    [SYSTEM_VALUE_FIRST_VERTEX] = "uint gl_FirstVertex [[base_vertex]]",
@@ -256,9 +258,9 @@ static void
 alu_fcmp_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr,
                 const char *op)
 {
-   /* KK_WORKAROUND_14 Since comparison operations must always preserve NANs,
-    * this is always applied */
-   if (!(ctx->disabled_workarounds & BITFIELD64_BIT(14))) {
+   /* KK_WORKAROUND_17 Follow up to KK_WORKAROUND_14 since the safe pragma is
+    * not enough in macOS26 */
+   if (!(ctx->disabled_workarounds & BITFIELD64_BIT(17))) {
       /* fneu is unordered (true on NaN), the others are ordered. */
       bool ordered = instr->op != nir_op_fneu;
       for (unsigned i = 0; i < 2; i++) {
@@ -927,7 +929,7 @@ atomic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
    P(ctx, "%s_explicit((%s atomic_%s*)", atomic_op, scope,
      msl_type_for_def(ctx->types, &instr->def));
    if (shared)
-      P(ctx, "&shared_data[");
+      P(ctx, "&shared_data[%u + ", nir_intrinsic_base(instr));
    src_to_msl(ctx, &instr->src[0]);
    if (shared)
       P(ctx, "]");
@@ -949,7 +951,7 @@ atomic_swap_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
    src_to_msl(ctx, &instr->src[1]);
    P(ctx, "; %s_explicit((%s atomic_%s*)", atomic_op, scope, type);
    if (shared)
-      P(ctx, "&shared_data[");
+      P(ctx, "&shared_data[%u + ", nir_intrinsic_base(instr));
    src_to_msl(ctx, &instr->src[0]);
    if (shared)
       P(ctx, "]");
@@ -1209,6 +1211,9 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_primitive_id:
       P(ctx, "gl_PrimitiveID;\n");
       break;
+   case nir_intrinsic_load_barycentric_coord_pixel:
+      P(ctx, "gl_BaryCoord;\n");
+      break;
    case nir_intrinsic_load_sample_pos:
       P(ctx, "get_sample_position(gl_SampleID);\n");
       break;
@@ -1254,17 +1259,29 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       break;
    }
    case nir_intrinsic_load_output: {
-      unsigned idx = nir_src_as_uint(instr->src[0]);
+      /* Should have been constant folded by now to 0 */
+      assert(nir_src_as_uint(instr->src[0]) == 0u);
+
       nir_io_semantics io = nir_intrinsic_io_semantics(instr);
-      nir_alu_type type = nir_intrinsic_dest_type(instr);
       bool needs_padding =
          FRAG_RESULT_DATA0 <= io.location && io.location <= FRAG_RESULT_DATA7;
       if (needs_padding) {
-         P(ctx, "%s4(", tex_type_name(type));
+         const char *type = tex_type_name(nir_intrinsic_dest_type(instr));
+         uint32_t num_components =
+            ctx->outputs_info[io.location].num_components;
+         if (num_components == 1) {
+            P(ctx, "%s4(as_type<%s>(", type, type);
+         } else {
+            P(ctx, "%s4(as_type<%s%d>(", type, type, num_components);
+         }
       }
-      msl_output_name(ctx, io.location + idx, 0);
+
+      uint64_t output_mask = 1 << (io.location);
+      bool load_from_input = !(output_mask & ctx->shader->info.outputs_written);
+      msl_output_name(ctx, io.location, 0, load_from_input);
 
       if (needs_padding) {
+         P(ctx, ")");
          for (uint32_t i = ctx->outputs_info[io.location].num_components;
               i < 4u; ++i)
             P(ctx, ", %c", "0001"[i]);
@@ -1282,8 +1299,7 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       uint32_t dst_num_components = msl_output_num_components(ctx, location);
       uint32_t num_components = instr->num_components;
 
-      P_IND(ctx, "%s", "");
-      msl_output_name(ctx, location, component);
+      msl_output_name(ctx, location, component, false);
       if (dst_num_components > 1u) {
          P(ctx, ".");
          for (unsigned i = 0; i < num_components; i++)
@@ -1492,16 +1508,15 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       P_IND(ctx, "return;\n");
       break;
    case nir_intrinsic_load_shared:
-      assert(nir_intrinsic_base(instr) == 0);
-      P(ctx, "*(threadgroup %s*)&shared_data[",
-        msl_type_for_def(ctx->types, &instr->def));
+      P(ctx, "*(threadgroup %s*)&shared_data[%u + ",
+        msl_type_for_def(ctx->types, &instr->def), nir_intrinsic_base(instr));
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, "];\n");
       break;
    case nir_intrinsic_store_shared:
-      assert(nir_intrinsic_base(instr) == 0);
-      P_IND(ctx, "(*(threadgroup %s*)&shared_data[",
-            msl_type_for_src(ctx->types, &instr->src[0]));
+      P_IND(ctx, "(*(threadgroup %s*)&shared_data[%u + ",
+            msl_type_for_src(ctx->types, &instr->src[0]),
+            nir_intrinsic_base(instr));
       src_to_msl(ctx, &instr->src[1]);
       P(ctx, "])");
       writemask_to_msl(ctx, nir_intrinsic_write_mask(instr),
@@ -1512,6 +1527,12 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
          writemask_to_msl(ctx, nir_intrinsic_write_mask(instr),
                           instr->num_components);
       P(ctx, ";\n");
+      break;
+   case nir_intrinsic_load_constant:
+      P(ctx, "*(constant %s*)((constant uchar *)constant_data + %u + ",
+        msl_type_for_def(ctx->types, &instr->def), nir_intrinsic_base(instr));
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, ");\n");
       break;
    case nir_intrinsic_load_scratch:
       P(ctx, "*(thread %s*)&scratch[",
@@ -2020,7 +2041,7 @@ jump_instr_to_msl(struct nir_to_msl_ctx *ctx, nir_jump_instr *jump)
 }
 
 static const char *
-alu_fp_math_mode_pragma(const nir_alu_instr *alu)
+alu_fp_math_mode_pragma(struct nir_to_msl_ctx *ctx, const nir_alu_instr *alu)
 {
    unsigned fp_math_ctrl = alu->fp_math_ctrl;
 
@@ -2033,6 +2054,15 @@ alu_fp_math_mode_pragma(const nir_alu_instr *alu)
             fp_math_ctrl |= src_alu->fp_math_ctrl;
          }
       }
+   }
+
+   /* KK_WORKAROUND_14 Since comparison operations must always preserve NANs,
+    * this is always applied */
+   if (!(ctx->disabled_workarounds & BITFIELD64_BIT(14))) {
+      bool is_min_max_sz = (alu->op == nir_op_fmin || alu->op == nir_op_fmax) &&
+                           (fp_math_ctrl & nir_fp_preserve_signed_zero);
+      if (is_min_max_sz || nir_alu_instr_is_comparison(alu))
+         return "safe";
    }
 
    if (fp_math_ctrl & (nir_fp_no_contract | nir_fp_no_reassoc))
@@ -2053,7 +2083,7 @@ instr_to_msl(struct nir_to_msl_ctx *ctx, nir_instr *instr)
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
-      const char *math_mode = alu_fp_math_mode_pragma(alu);
+      const char *math_mode = alu_fp_math_mode_pragma(ctx, alu);
       if (math_mode) {
          P_IND(ctx, "{\n");
          P_IND(ctx, "#pragma METAL fp math_mode(%s)\n", math_mode);
@@ -2235,10 +2265,6 @@ msl_preprocess_nir(struct nir_shader *nir)
     * PositiveShaderImageAccess.UndefImage */
    NIR_PASS(_, nir, nir_opt_dce);
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      nir_input_attachment_options input_attachment_options = {};
-      NIR_PASS(_, nir, nir_lower_input_attachments, &input_attachment_options);
-   }
    NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
    NIR_PASS(_, nir, nir_lower_var_copies);
    NIR_PASS(_, nir, nir_split_var_copies);
@@ -2247,6 +2273,9 @@ msl_preprocess_nir(struct nir_shader *nir)
    NIR_PASS(_, nir, nir_split_array_vars,
             nir_var_function_temp | nir_var_shader_in | nir_var_shader_out);
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, kk_scalarize_filter, NULL);
+
+   NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_natural_size_align_bytes,
+            32);
 
    /* If we do 256 here MSL compiler crashes with
     * dEQP-VK.graphicsfuzz.stable-binarysearch-tree-nested-if-and-conditional */
@@ -2436,6 +2465,28 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
    }
 }
 
+/* Emitted as uint words rather than individual bytes to keep the
+ * generated source small.
+ */
+static void
+msl_emit_constant_data(struct nir_to_msl_ctx *ctx, nir_shader *shader)
+{
+   if (!shader->constant_data_size)
+      return;
+
+   const uint8_t *cdata = (const uint8_t *)shader->constant_data;
+   const uint32_t size = shader->constant_data_size;
+
+   P(ctx, "constant uint constant_data[%u] = {", DIV_ROUND_UP(size, 4u));
+   for (uint32_t i = 0u; i < size; i += 4u) {
+      uint32_t word = 0u;
+      for (uint32_t b = 0u; b < 4u && i + b < size; ++b)
+         word |= (uint32_t)cdata[i + b] << (b * 8u);
+      P(ctx, "%s0x%xu", i ? "," : "", word);
+   }
+   P(ctx, "};\n");
+}
+
 char *
 nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
 {
@@ -2458,6 +2509,8 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
       P(&ctx, "#include <metal_compute>\n");
    P(&ctx, "#include <metal_stdlib>\n");
    P(&ctx, "using namespace metal;\n");
+
+   msl_emit_constant_data(&ctx, shader);
 
    msl_emit_io_blocks(&ctx, shader);
    if (shader->info.stage == MESA_SHADER_FRAGMENT &&

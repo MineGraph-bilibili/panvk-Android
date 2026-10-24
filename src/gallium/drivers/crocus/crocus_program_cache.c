@@ -237,7 +237,7 @@ crocus_upload_shader(struct crocus_context *ice,
 
 bool
 crocus_blorp_lookup_shader(struct blorp_batch *blorp_batch, const void *key,
-                           uint32_t key_size, uint32_t *kernel_out,
+                           uint32_t key_size, uint64_t *kernel_out,
                            void *prog_data_out)
 {
    struct blorp_context *blorp = blorp_batch->blorp;
@@ -259,7 +259,7 @@ crocus_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
                            const void *key, uint32_t key_size,
                            const void *kernel, uint32_t kernel_size,
                            const void *prog_data_templ,
-                           uint32_t prog_data_size, uint32_t *kernel_out,
+                           uint32_t prog_data_size, uint64_t *kernel_out,
                            void *prog_data_out)
 {
    struct blorp_context *blorp = blorp_batch->blorp;

@@ -162,12 +162,24 @@ enum radv_cmd_flush_bits {
    RADV_CMD_FLAG_START_PIPELINE_STATS = 1 << 14,
    RADV_CMD_FLAG_STOP_PIPELINE_STATS = 1 << 15,
    RADV_CMD_FLAG_VGT_STREAMOUT_SYNC = 1 << 16,
+   RADV_CMD_FLAG_PFP_SYNC_ME = 1 << 17,
 
    RADV_CMD_FLUSH_AND_INV_FRAMEBUFFER = (RADV_CMD_FLAG_FLUSH_AND_INV_CB | RADV_CMD_FLAG_FLUSH_AND_INV_CB_META |
                                          RADV_CMD_FLAG_FLUSH_AND_INV_DB | RADV_CMD_FLAG_FLUSH_AND_INV_DB_META),
 
    RADV_CMD_FLUSH_ALL_COMPUTE = (RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE |
                                  RADV_CMD_FLAG_INV_L2 | RADV_CMD_FLAG_WB_L2 | RADV_CMD_FLAG_CS_PARTIAL_FLUSH),
+};
+
+/* PWS (Pixel Wait Sync) acquire point, i.e. the pipeline stage at which a GFX11+ PWS ACQUIRE
+ * waits for a preceding RELEASE. The acquire point is derived from the barrier destination stage
+ * so the wait can be deferred to the latest legal pipeline stage.
+ */
+enum radv_pws_acquire_point {
+   RADV_PWS_ACQUIRE_POINT_NONE = 0,
+   RADV_PWS_ACQUIRE_POINT_PRE_DEPTH, /* Wait just before depth/fragment work. */
+   RADV_PWS_ACQUIRE_POINT_ME,        /* Wait at the CP micro-engine. */
+   RADV_PWS_ACQUIRE_POINT_PFP,       /* Wait at the CP prefetch parser (frontend). */
 };
 
 struct radv_streamout_binding {
@@ -267,30 +279,10 @@ struct radv_push_constant_state {
    bool need_upload;
 };
 
-enum rgp_flush_bits {
-   RGP_FLUSH_WAIT_ON_EOP_TS = 0x1,
-   RGP_FLUSH_VS_PARTIAL_FLUSH = 0x2,
-   RGP_FLUSH_PS_PARTIAL_FLUSH = 0x4,
-   RGP_FLUSH_CS_PARTIAL_FLUSH = 0x8,
-   RGP_FLUSH_PFP_SYNC_ME = 0x10,
-   RGP_FLUSH_SYNC_CP_DMA = 0x20,
-   RGP_FLUSH_INVAL_VMEM_L0 = 0x40,
-   RGP_FLUSH_INVAL_ICACHE = 0x80,
-   RGP_FLUSH_INVAL_SMEM_L0 = 0x100,
-   RGP_FLUSH_FLUSH_L2 = 0x200,
-   RGP_FLUSH_INVAL_L2 = 0x400,
-   RGP_FLUSH_FLUSH_CB = 0x800,
-   RGP_FLUSH_INVAL_CB = 0x1000,
-   RGP_FLUSH_FLUSH_DB = 0x2000,
-   RGP_FLUSH_INVAL_DB = 0x4000,
-   RGP_FLUSH_INVAL_L1 = 0x8000,
-};
-
 enum radv_depth_clamp_mode {
    RADV_DEPTH_CLAMP_MODE_VIEWPORT = 0,     /* Clamp to the viewport min/max depth bounds */
    RADV_DEPTH_CLAMP_MODE_USER_DEFINED = 1, /* Range set using VK_EXT_depth_clamp_control */
-   RADV_DEPTH_CLAMP_MODE_ZERO_TO_ONE = 2,  /* Clamp between 0.0f and 1.0f */
-   RADV_DEPTH_CLAMP_MODE_DISABLED = 3,     /* Disable depth clamping */
+   RADV_DEPTH_CLAMP_MODE_DISABLED = 2,     /* Disable depth clamping */
 };
 
 struct radv_meta_saved_descriptor_state {
@@ -361,8 +353,6 @@ struct radv_cmd_state {
    struct radv_shader_object *shader_objs[MESA_VULKAN_SHADER_STAGES];
 
    uint32_t prefetch_L2_mask;
-   uint64_t vb_va;
-   unsigned vb_size;
 
    struct radv_graphics_pipeline *graphics_pipeline;
    struct radv_shader_part *emitted_vs_prolog;
@@ -386,6 +376,8 @@ struct radv_cmd_state {
    struct radv_meta_saved_state meta;
 
    enum radv_cmd_flush_bits flush_bits;
+   /* Earliest PWS acquire point required by the currently pending flush_bits*/
+   enum radv_pws_acquire_point pws_acquire_point;
    unsigned active_occlusion_queries;
    bool perfect_occlusion_queries_enabled;
    unsigned active_pipeline_queries;
@@ -469,7 +461,7 @@ struct radv_cmd_state {
    uint32_t num_layout_transitions;
    bool in_barrier;
    bool pending_sqtt_barrier_end;
-   enum rgp_flush_bits sqtt_flush_bits;
+   enum ac_rgp_flush_bits rgp_flush_bits;
 
    uint32_t trace_id;
 };
@@ -587,6 +579,7 @@ struct radv_cmd_buffer {
        *          The follower writes the value, and the leader waits.
        */
       struct {
+         struct radeon_winsys_bo *bo;     /* Buffer object of the semaphore (if separate) */
          uint64_t va;                     /* Virtual address of the semaphore. */
          uint32_t leader_value;           /* Current value of the leader. */
          uint32_t emitted_leader_value;   /* Last value emitted by the leader. */
@@ -611,6 +604,9 @@ struct radv_cmd_buffer {
       struct rvcn_sq_var sq;
       struct rvcn_decode_buffer_s *decode_buffer;
       struct radv_enc_state enc;
+
+      uint32_t status_offset;
+      uint32_t statistics_offset;
       uint64_t feedback_query_va;
    } video;
 
@@ -737,6 +733,9 @@ enum radv_cmd_flush_bits radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffe
                                                VkAccessFlags2 dst_flags, VkAccessFlags3KHR dst3_flags,
                                                const struct radv_image *image, const VkImageSubresourceRange *range);
 
+void radv_precompute_hw_sample_location_state(const struct radv_physical_device *pdev,
+                                              struct radv_sample_locations_state *state);
+
 struct radv_resolve_barrier {
    VkPipelineStageFlags2 src_stage_mask;
    VkPipelineStageFlags2 dst_stage_mask;
@@ -825,10 +824,9 @@ void radv_unaligned_dispatch(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uin
 uint32_t radv_init_fmask(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                          const VkImageSubresourceRange *range);
 
-uint32_t radv_init_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
-                       const VkImageSubresourceRange *range, uint32_t value);
+uint32_t radv_init_display_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, uint32_t value);
 
-void radv_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer);
+void radv_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer, bool pws_defer_allowed);
 
 void radv_emit_set_predication_state(struct radv_cmd_buffer *cmd_buffer, bool draw_visible, unsigned pred_op,
                                      uint64_t va);
@@ -845,7 +843,6 @@ struct radv_vbo_info {
    uint32_t size;
 
    uint32_t attrib_offset;
-   uint32_t attrib_index_offset;
    uint32_t attrib_format_size;
 
    uint32_t non_trivial_format;
@@ -854,7 +851,7 @@ struct radv_vbo_info {
 void radv_get_vbo_info(const struct radv_cmd_buffer *cmd_buffer, uint32_t vbo_idx, struct radv_vbo_info *vbo_info);
 
 void radv_emit_compute_shader(const struct radv_physical_device *pdev, struct radv_cmd_stream *cs,
-                              const struct radv_shader *shader);
+                              const struct radv_shader *shader, bool emit_cs_state);
 
 void radv_upload_indirect_descriptor_sets(struct radv_cmd_buffer *cmd_buffer,
                                           struct radv_descriptor_state *descriptors_state);
@@ -880,6 +877,12 @@ radv_resume_conditional_rendering(struct radv_cmd_buffer *cmd_buffer)
 
    cond_render->enabled = cond_render->enabled_save;
    cond_render->suspended = false;
+}
+
+static inline bool
+radv_cmd_buffer_is_transfer_gang(const struct radv_cmd_buffer *cmd_buffer)
+{
+   return cmd_buffer->qf == RADV_QUEUE_TRANSFER && cmd_buffer->gang.cs && cmd_buffer->gang.cs->hw_ip == AMD_IP_COMPUTE;
 }
 
 #endif /* RADV_CMD_BUFFER_H */

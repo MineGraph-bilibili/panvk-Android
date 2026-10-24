@@ -100,3 +100,7 @@ dEQP-VK.api.copy_and_blit.core.use_after_copy.d32_sfloat_s8_uint.transfer_dst_op
 dEQP-VK.api.copy_and_blit.core.use_after_copy.d32_sfloat_s8_uint.transfer_dst_optimal.32x32x2_cq_regions_img2img_msaa,Fail
 dEQP-VK.api.copy_and_blit.core.use_after_copy.d32_sfloat_s8_uint.transfer_dst_optimal.64x64x2_tq_img2img_msaa,Fail
 dEQP-VK.api.copy_and_blit.core.use_after_copy.d32_sfloat_s8_uint.transfer_dst_optimal.64x64x2_tq_regions_img2img_msaa,Fail
+
+# https://gitlab.freedesktop.org/mesa/mesa/-/work_items/16182
+dEQP-VK.wsi.display.create_display_mode,Fail
+dEQP-VK.wsi.display_control.swapchain_counter,Crash

@@ -224,6 +224,11 @@ struct nvk_compute_state {
    bool active_compute_invocations_query;
 };
 
+struct nvk_video_state {
+   struct nvk_video_session *vid;
+   struct vk_video_session_parameters *params;
+};
+
 struct nvk_cmd_push {
    void *map;
    uint64_t addr;
@@ -240,6 +245,7 @@ struct nvk_cmd_buffer {
       struct nvk_graphics_state gfx;
       struct nvk_compute_state cs;
       VkQueryPipelineStatisticFlags inherited_pipeline_statistics;
+      struct nvk_video_state video;
    } state;
 
    /** List of nvk_cmd_mem
@@ -277,6 +283,10 @@ VK_DEFINE_HANDLE_CASTS(nvk_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
 
 extern const struct vk_command_buffer_ops nvk_cmd_buffer_ops;
+
+void
+nvk_descriptor_state_fini(struct nvk_cmd_buffer *cmd,
+                          struct nvk_descriptor_state *desc);
 
 static inline struct nvk_device *
 nvk_cmd_buffer_device(struct nvk_cmd_buffer *cmd)
@@ -459,12 +469,12 @@ void nvk_cmd_fill_memory_ce(struct nvk_cmd_buffer *cmd,
                             uint64_t dst_addr, uint64_t size,
                             uint32_t data);
 
-void nvk_cmd_copy_buffer_ce(struct nvk_cmd_buffer *cmd,
-                            const VkCopyBufferInfo2 *pCopyBufferInfo);
-void nvk_cmd_copy_buffer_to_image_ce(struct nvk_cmd_buffer *cmd,
-                                     const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo);
-void nvk_cmd_copy_image_to_buffer_ce(struct nvk_cmd_buffer *cmd,
-                                     const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo);
+void nvk_cmd_copy_memory_ce(struct nvk_cmd_buffer *cmd,
+                            const VkCopyDeviceMemoryInfoKHR *pCopyMemoryInfo);
+void nvk_cmd_copy_memory_to_image_ce(struct nvk_cmd_buffer *cmd,
+                                     const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo);
+void nvk_cmd_copy_image_to_memory_ce(struct nvk_cmd_buffer *cmd,
+                                     const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo);
 void nvk_cmd_copy_image_ce(struct nvk_cmd_buffer *cmd,
                            const VkCopyImageInfo2 *pCopyImageInfo);
 

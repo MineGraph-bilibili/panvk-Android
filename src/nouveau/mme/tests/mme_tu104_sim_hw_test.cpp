@@ -1614,6 +1614,63 @@ TEST_F(mme_tu104_sim_test, dram_limit)
    }
 }
 
+TEST_F(mme_tu104_sim_test, dma_read)
+{
+   const uint32_t read_base = 0x80;
+   const uint32_t sync_idx = 0x100;
+   const uint32_t sync_val = 0x2;
+
+   mme_builder b;
+   mme_builder_init(&b, devinfo);
+
+   /* Sets up the dmem base for the read */
+   mme_mthd(&b, NVC597_SET_MME_DATA_RAM_ADDRESS);
+   mme_emit(&b, mme_imm(read_base));
+
+   mme_mthd(&b, NVC597_SET_MME_MEM_ADDRESS_A);
+   mme_emit(&b, mme_imm(high32(data_addr)));
+   mme_emit(&b, mme_imm(low32(data_addr)));
+
+   /* How many words to read? */
+   mme_mthd(&b, NVC597_MME_DMA_READ);
+   mme_emit(&b, mme_imm(16));
+
+   /* Write 0 to our sync value and set it up */
+   mme_dwrite(&b, mme_imm(sync_idx), mme_zero());
+   mme_mthd(&b, NVC597_SET_MME_DATA_RAM_ADDRESS);
+   mme_emit(&b, mme_imm(sync_idx));
+
+   /* Send the sync and busy wait until we read our sentinel back */
+   mme_mthd(&b, NVC597_MME_DMA_SYNC);
+   mme_emit(&b, mme_imm(sync_val));
+
+   mme_value tmp = mme_add(&b, mme_zero(), mme_zero());
+   mme_while(&b, ine, tmp, mme_imm(sync_val)) {
+      mme_dread_to(&b, tmp, mme_imm(sync_idx));
+   }
+
+   /* Write out all DMA fetched values */
+   for (unsigned i = 0; i < 16; i++) {
+      mme_value x = mme_dread(&b, mme_imm(read_base + i));
+      mme_store_imm_addr(&b, data_addr + 256 + (4 * i), x);
+      mme_free_reg(&b, x);
+   }
+
+   auto macro = mme_builder_finish_vec(&b);
+
+   for (uint32_t i = 0; i < 64; i++)
+      data[i] = 1000 + i;
+
+   std::vector<uint32_t> params;
+   params.push_back(7);
+   params.push_back(7);
+
+   test_macro(&b, macro, params);
+
+   for (unsigned i = 0; i < 16; i++)
+      ASSERT_EQ(data[64 + i], 1000 + i);
+}
+
 TEST_F(mme_tu104_sim_test, dma_read_fifoed)
 {
    mme_builder b;
@@ -1649,6 +1706,9 @@ TEST_F(mme_tu104_sim_test, dma_read_fifoed)
    params.push_back(7);
 
    test_macro(&b, macro, params);
+
+   ASSERT_EQ(data[64], data[0]);
+   ASSERT_EQ(data[65], data[1]);
 }
 
 TEST_F(mme_tu104_sim_test, scratch_limit)

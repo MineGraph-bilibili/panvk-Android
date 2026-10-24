@@ -219,14 +219,16 @@ class Csbgen(Node):
 
 
 class Enum(Node):
-    __slots__ = ["_values"]
+    __slots__ = ["_values", "doc"]
 
     _values: t.Dict[str, Value]
+    doc: t.Optional[str]
 
     def __init__(self, parent: Node, name: str) -> None:
         super().__init__(parent, name)
 
         self._values = {}
+        self.doc = None
 
         self.parent.add(self)
 
@@ -269,6 +271,12 @@ class Enum(Node):
         if not self._values.values():
             raise RuntimeError("Enum definition is empty. Enum: '%s'" % self.full_name)
 
+        print("")
+        if self.doc:
+            print("/**")
+            for line in self.doc.strip().split('\n'):
+                print(" * %s" % line.strip())
+            print(" */")
         print("enum %s {" % self.full_name)
         for value in self._values.values():
             value.emit()
@@ -278,33 +286,39 @@ class Enum(Node):
 
 
 class Value(Node):
-    __slots__ = ["value"]
+    __slots__ = ["value", "doc"]
 
     value: int
+    doc: t.Optional[str]
 
     def __init__(self, parent: Node, name: str, value: int) -> None:
         super().__init__(parent, name)
 
         self.value = value
+        self.doc = None
 
         self.parent.add(self)
 
     def emit(self):
+        if self.doc:
+            print("    /** %s */" % self.doc)
         print("    %-36s = %6d," % (self.full_name, self.value))
 
 
 class Struct(Node):
-    __slots__ = ["length", "size", "_children"]
+    __slots__ = ["length", "size", "_children", "doc"]
 
     length: int
     size: int
     _children: t.Dict[str, t.Union[Condition, Field]]
+    doc: t.Optional[str]
 
     def __init__(self, parent: Node, name: str, length: int) -> None:
         super().__init__(parent, name)
 
         self.length = length
         self.size = self.length * 32
+        self.doc = None
 
         if self.length <= 0:
             raise ValueError("Struct length must be greater than 0. Struct: '%s'." % self.full_name)
@@ -423,12 +437,19 @@ class Struct(Node):
         print("}\n")
 
     def emit(self, root: Csbgen) -> None:
+        print("/** Number of 32-bit words used to encode %s */" % self.full_name)
         print("#define %-33s %6d" % (self.full_name + "_length", self.length))
 
         self._emit_header(root)
 
         self._emit_helper_macros()
 
+        print("")
+        if self.doc:
+            print("/**")
+            for line in self.doc.strip().split('\n'):
+                print(" * %s" % line.strip())
+            print(" */")
         print("struct %s {" % self.full_name)
         for child in self._children.values():
             child.emit(root)
@@ -496,7 +517,7 @@ class Stream(Node):
         pass
 
 class Field(Node):
-    __slots__ = ["start", "end", "type", "default", "shift", "_defines"]
+    __slots__ = ["start", "end", "type", "default", "shift", "_defines", "doc"]
 
     start: int
     end: int
@@ -504,6 +525,7 @@ class Field(Node):
     default: t.Optional[t.Union[str, int]]
     shift: t.Optional[int]
     _defines: t.Dict[str, Define]
+    doc: t.Optional[str]
 
     def __init__(self, parent: Node, name: str, start: int, end: int, ty: str, *,
                  default: t.Optional[str] = None, shift: t.Optional[int] = None) -> None:
@@ -514,6 +536,7 @@ class Field(Node):
         self.type = ty
 
         self._defines = {}
+        self.doc = None
 
         self.parent.add(self)
 
@@ -604,25 +627,42 @@ class Field(Node):
         if self.type == "mbo":
             return
 
+        # Emit documentation with bit information
+        print("    /**")
+        if self.doc:
+            print("     * %s" % self.doc)
+            print("     *")
+        print("     * Bits: **[%d:%d]**" % (self.start, self.end))
+        if self.default is not None:
+            if isinstance(self.default, str):
+                print("     * Default: **%s**" % self.default)
+            else:
+                print("     * Default: **%d**" % self.default)
+        print("     */")
+        
         if self.type == "uint_array":
-            print("    %-36s %s[%u];" % (self._get_c_type(root), self.name, (self.end - self.start) / 8))
+            print("    %s %s[%u];" % (self._get_c_type(root), self.name, (self.end - self.start) / 8))
         else:
-            print("    %-36s %s;" % (self._get_c_type(root), self.name))
+            print("    %s %s;" % (self._get_c_type(root), self.name))
 
 
 class Define(Node):
-    __slots__ = ["value"]
+    __slots__ = ["value", "doc"]
 
     value: int
+    doc: t.Optional[str]
 
     def __init__(self, parent: Node, name: str, value: int) -> None:
         super().__init__(parent, name)
 
         self.value = value
+        self.doc = None
 
         self.parent.add(self)
 
     def emit(self) -> None:
+        if self.doc:
+            print("/** %s */" % self.doc)
         print("#define %-40s %d" % (self.full_name, self.value))
 
 
@@ -1027,19 +1067,22 @@ class Group:
 
 
 class Parser:
-    __slots__ = ["parser", "context", "filename"]
+    __slots__ = ["parser", "context", "filename", "_doc_buffer"]
 
     parser: expat.XMLParserType
     context: t.List[Node]
     filename: str
+    _doc_buffer: t.Optional[str]
 
     def __init__(self) -> None:
         self.parser = expat.ParserCreate()
         self.parser.StartElementHandler = self.start_element
         self.parser.EndElementHandler = self.end_element
+        self.parser.CharacterDataHandler = self.character_data
 
         self.context = []
         self.filename = ""
+        self._doc_buffer = None
 
     def start_element(self, name: str, attrs: t.Dict[str, str]) -> None:
         if name == "csbgen":
@@ -1128,10 +1171,28 @@ class Parser:
             else:
                 self.context.append(condition)
 
+        elif name == "doc":
+            # Start collecting documentation text
+            self._doc_buffer = ""
+
         else:
             raise RuntimeError("Unknown tag: '%s'" % name)
 
+    def character_data(self, data: str) -> None:
+        # Collect text content for <doc> tags
+        if self._doc_buffer is not None:
+            self._doc_buffer += data
+
     def end_element(self, name: str) -> None:
+        if name == "doc":
+            # Attach collected documentation to the current element
+            if self.context and self._doc_buffer is not None:
+                element = self.context[-1]
+                if isinstance(element, (Struct, Enum, Field, Value, Define)):
+                    element.doc = self._doc_buffer.strip()
+                self._doc_buffer = None
+            return
+
         if name == "condition":
             element = self.context[-1]
             if not isinstance(element, Condition) and not isinstance(element, Struct):

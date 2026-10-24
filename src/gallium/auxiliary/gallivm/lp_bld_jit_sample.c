@@ -67,6 +67,15 @@ struct lp_bld_llvm_image_soa
 };
 
 static LLVMValueRef
+build_monotonic_load(LLVMBuilderRef builder, LLVMTypeRef type, LLVMValueRef ptr)
+{
+   LLVMValueRef value = LLVMBuildLoad2(builder, type, ptr, "");
+   LLVMSetOrdering(value, LLVMAtomicOrderingMonotonic);
+   LLVMSetAlignment(value, sizeof(void *));
+   return value;
+}
+
+static LLVMValueRef
 load_texture_functions_ptr(struct gallivm_state *gallivm, LLVMValueRef descriptor,
                            uint32_t offset1, uint32_t offset2)
 {
@@ -189,7 +198,7 @@ lp_bld_llvm_sampler_soa_emit_fetch_texel(const struct lp_build_sampler_soa *base
       LLVMTypeRef texture_base_ptr_type = LLVMPointerType(texture_base_type, 0);
 
       texture_base_ptr = LLVMBuildIntToPtr(builder, texture_base_ptr, texture_base_ptr_type, "");
-      LLVMValueRef texture_base = LLVMBuildLoad2(builder, texture_base_type, texture_base_ptr, "");
+      LLVMValueRef texture_base = build_monotonic_load(builder, texture_base_type, texture_base_ptr);
 
       LLVMValueRef texture_functions;
       LLVMValueRef sampler_desc_ptr;
@@ -209,12 +218,12 @@ lp_bld_llvm_sampler_soa_emit_fetch_texel(const struct lp_build_sampler_soa *base
          LLVMValueRef sampler_index = LLVMBuildLoad2(builder, sampler_index_type, sampler_index_ptr, "");
 
          LLVMValueRef texture_functions_ptr = LLVMBuildGEP2(builder, texture_functions_type, texture_base, &sampler_index, 1, "");
-         texture_functions = LLVMBuildLoad2(builder, texture_functions_type, texture_functions_ptr, "");
+         texture_functions = build_monotonic_load(builder, texture_functions_type, texture_functions_ptr);
       }
 
       LLVMValueRef sample_key = lp_build_const_int32(gallivm, params->sample_key);
       LLVMValueRef texture_function_ptr = LLVMBuildGEP2(builder, texture_function_ptr_type, texture_functions, &sample_key, 1, "");
-      LLVMValueRef texture_function = LLVMBuildLoad2(builder, texture_function_ptr_type, texture_function_ptr, "");
+      LLVMValueRef texture_function = build_monotonic_load(builder, texture_function_ptr_type, texture_function_ptr);
 
       LLVMValueRef args[LP_MAX_TEX_FUNC_ARGS];
       uint32_t num_args = 0;
@@ -377,7 +386,7 @@ lp_bld_llvm_sampler_soa_emit_size_query(const struct lp_build_sampler_soa *base,
       LLVMTypeRef texture_function_ptr_ptr_type = LLVMPointerType(texture_function_ptr_type, 0);
 
       texture_base_ptr = LLVMBuildIntToPtr(builder, texture_base_ptr, texture_function_ptr_ptr_type, "");
-      LLVMValueRef texture_function = LLVMBuildLoad2(builder, texture_function_ptr_type, texture_base_ptr, "");
+      LLVMValueRef texture_function = build_monotonic_load(builder, texture_function_ptr_type, texture_base_ptr);
 
       LLVMValueRef args[LP_MAX_TEX_FUNC_ARGS];
       uint32_t num_args = 0;
@@ -499,7 +508,7 @@ lp_bld_llvm_image_soa_emit_op(const struct lp_build_image_soa *base,
       LLVMValueRef function_index = lp_build_const_int32(gallivm, params->packed_op);
 
       LLVMValueRef image_function_ptr = LLVMBuildGEP2(builder, image_function_ptr_type, image_functions, &function_index, 1, "");
-      LLVMValueRef image_function = LLVMBuildLoad2(builder, image_function_ptr_type, image_function_ptr, "");
+      LLVMValueRef image_function = build_monotonic_load(builder, image_function_ptr_type, image_function_ptr);
 
       LLVMValueRef args[LP_MAX_TEX_FUNC_ARGS] = { 0 };
       uint32_t num_args = 0;

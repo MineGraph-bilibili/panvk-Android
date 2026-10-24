@@ -48,6 +48,6 @@ ir3_shader_descriptor_set(mesa_shader_stage shader)
    }
 }
 
-bool ir3_nir_lower_io_to_bindless(nir_shader *shader);
+bool ir3_nir_lower_io_gallium(nir_shader *shader, bool lower_to_bindless);
 
 #endif /* IR3_DESCRIPTOR_H_ */

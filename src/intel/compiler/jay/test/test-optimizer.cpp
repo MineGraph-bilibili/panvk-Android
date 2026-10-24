@@ -233,10 +233,10 @@ TEST_F(Optimizer, IfNot)
       jay_CMP(b, JAY_TYPE_S32, GEN_CONDITION_LT, flag, 0, wx);
 
       if (after) {
-         jay_add_predicate(b, jay_IF(b), jay_negate(flag));
+         jay_add_predicate(b, jay_IF(b), jay_negate(flag), jay_null());
       } else {
          jay_NOT(b, flag2, flag);
-         jay_add_predicate(b, jay_IF(b), flag2);
+         jay_add_predicate(b, jay_IF(b), flag2, jay_null());
       }
    });
 }
@@ -332,8 +332,7 @@ TEST_F(Optimizer, PredicateLogic)
 
          if (after) {
             cmp2->cond_flag = flag3;
-            jay_add_predicate_else(b, cmp2, and_ ? flag : jay_negate(flag),
-                                   flag);
+            jay_add_predicate(b, cmp2, and_ ? flag : jay_negate(flag), flag);
          } else if (and_) {
             jay_AND(b, JAY_TYPE_U1, flag3, flag, flag2);
          } else {

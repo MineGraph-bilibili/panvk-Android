@@ -41,4 +41,20 @@ void panfrost_blitter_clear_render_target(struct pipe_context *pipe,
                                           unsigned width, unsigned height,
                                           bool render_condition_enabled);
 
+bool panfrost_blitter_generate_mipmap(struct pipe_context *pipe,
+                                      struct pipe_resource *tex,
+                                      enum pipe_format format,
+                                      unsigned base_level,
+                                      unsigned last_level,
+                                      unsigned first_layer,
+                                      unsigned last_layer);
+
+void panfrost_blitter_resource_copy_region(struct pipe_context *pipe,
+                                           struct pipe_resource *dst,
+                                           unsigned dst_level, unsigned dst_x,
+                                           unsigned dst_y, unsigned dst_z,
+                                           struct pipe_resource *src,
+                                           unsigned src_level,
+                                           const struct pipe_box *src_box);
+
 #endif

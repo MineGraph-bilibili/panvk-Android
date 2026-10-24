@@ -194,6 +194,8 @@ struct d3d12_video_decoder
    // Holds pointers to current decode output target texture and reference textures from upper layer
    struct pipe_video_buffer *m_pCurrentDecodeTarget;
    struct pipe_video_buffer **m_pCurrentReferenceTargets;
+   // AV1 film grain applied-output surface (distinct from the grain-free reconstruction target)
+   struct pipe_video_buffer *m_pCurrentFilmGrainTarget = nullptr;
 
    // Indicates if GPU commands have not been flushed and are pending.
    bool m_needsGPUFlush = false;

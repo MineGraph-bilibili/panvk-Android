@@ -21,9 +21,13 @@
 void
 rc_init(struct radeon_compiler *c, const struct rc_regalloc_state *rs)
 {
+   const linear_opts pool_opts = {
+      .min_buffer_size = 8192,
+   };
+
    memset(c, 0, sizeof(*c));
 
-   memory_pool_init(&c->Pool);
+   c->Pool = linear_context_with_opts(NULL, &pool_opts);
    c->Program.Instructions.Prev = &c->Program.Instructions;
    c->Program.Instructions.Next = &c->Program.Instructions;
    c->Program.Instructions.U.I.Opcode = RC_OPCODE_ILLEGAL_OPCODE;
@@ -35,7 +39,7 @@ void
 rc_destroy(struct radeon_compiler *c)
 {
    rc_constants_destroy(&c->Program.Constants);
-   memory_pool_destroy(&c->Pool);
+   linear_free_context(c->Pool);
    free(c->ErrorMsg);
 }
 

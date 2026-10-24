@@ -31,9 +31,12 @@ if [ -n "${ANGLE_TAG:-}" ]; then
   export LD_LIBRARY_PATH=/angle:$LD_LIBRARY_PATH
 fi
 
-if [ -n "${FLUSTER_TAG:-}" ]; then
-  # Are we using the right Fluster version?
-  ci_tag_test_time_check "FLUSTER_TAG"
+if [ -n "${FLUSTER_TAG:-}" ] || [ -n "${VAAPI:-}" ]; then
+  if [ -n "${FLUSTER_TAG:-}" ]; then
+    # Are we using the right Fluster version?
+    ci_tag_test_time_check "FLUSTER_TAG"
+  fi
+
   export LIBVA_DRIVERS_PATH=$INSTALL/lib/dri/
   # libva spams driver open info by default, and that happens per testcase.
   export LIBVA_MESSAGING_LEVEL=1

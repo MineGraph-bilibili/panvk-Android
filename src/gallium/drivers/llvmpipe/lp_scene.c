@@ -535,60 +535,34 @@ lp_scene_is_resource_referenced(const struct lp_scene *scene,
 }
 
 
-/** advance curr_x,y to the next bin */
-static bool
-next_bin(struct lp_scene *scene)
-{
-   scene->curr_x++;
-   if (scene->curr_x >= scene->tiles_x) {
-      scene->curr_x = 0;
-      scene->curr_y++;
-   }
-   if (scene->curr_y >= scene->tiles_y) {
-      /* no more bins */
-      return false;
-   }
-   return true;
-}
-
-
 void
 lp_scene_bin_iter_begin(struct lp_scene *scene)
 {
    scene->curr_x = scene->curr_y = -1;
+   p_atomic_set(&scene->curr_bin, 0);
 }
 
 
 /**
  * Return pointer to next bin to be rendered.
- * The lp_scene::curr_x and ::curr_y fields will be advanced.
  * Multiple rendering threads will call this function to get a chunk
  * of work (a bin) to work on.
  */
 struct cmd_bin *
 lp_scene_bin_iter_next(struct lp_scene *scene , int *x, int *y)
 {
-   struct cmd_bin *bin = NULL;
+   const int total_tiles = (int)(scene->tiles_x * scene->tiles_y);
+   int idx = p_atomic_fetch_add(&scene->curr_bin, 1);
 
-   mtx_lock(&scene->mutex);
+   if (idx >= total_tiles)
+      return NULL;
 
-   if (scene->curr_x < 0) {
-      /* first bin */
-      scene->curr_x = 0;
-      scene->curr_y = 0;
-   } else if (!next_bin(scene)) {
-      /* no more bins left */
-      goto end;
-   }
+   int bx = idx % scene->tiles_x;
+   int by = idx / scene->tiles_x;
 
-   bin = lp_scene_get_bin(scene, scene->curr_x, scene->curr_y);
-   *x = scene->curr_x;
-   *y = scene->curr_y;
-
-end:
-   /*printf("return bin %p at %d, %d\n", (void *) bin, *bin_x, *bin_y);*/
-   mtx_unlock(&scene->mutex);
-   return bin;
+   *x = bx;
+   *y = by;
+   return lp_scene_get_bin(scene, bx, by);
 }
 
 

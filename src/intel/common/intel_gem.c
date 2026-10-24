@@ -163,6 +163,20 @@ intel_gem_supports_protected_context(int fd, enum intel_kmd_type kmd_type)
 }
 
 bool
+intel_gem_supports_huc(int fd, enum intel_kmd_type kmd_type)
+{
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_gem_supports_huc(fd);
+   case INTEL_KMD_TYPE_XE:
+      return xe_gem_supports_huc(fd);
+   default:
+      UNREACHABLE("Missing");
+      return false;
+   }
+}
+
+bool
 intel_gem_wait_on_get_param(int fd, uint32_t param, int target_val,
                             uint32_t timeout_ms)
 {

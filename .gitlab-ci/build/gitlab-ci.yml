@@ -58,6 +58,49 @@ debian-x86_64:
     reports:
       junit: artifacts/ci_scripts_report.xml
 
+debian-x86_64-no_gfx_compute:
+  extends:
+    - .meson-build-for-tests
+    - .use-debian/x86_64_build
+  variables:
+    UNWIND: "disabled"
+    C_ARGS: >
+      -Wno-error=stringop-overread
+      -Wno-error=deprecated-declarations
+    CPP_ARGS: >
+      -Wno-error=deprecated-declarations
+    RUN_MESON_TESTS: "false"
+    VIDEO_CODECS: "h264dec,h265dec,av1dec,vp9dec,jpegdec"
+    GALLIUM_DRIVERS: "radeonsi"
+    VULKAN_DRIVERS: ""
+    BUILDTYPE: "debugoptimized"
+    DRI_LOADERS: >
+      -D egl=disabled
+      -D gles1=disabled
+      -D gles2=disabled
+      -D gbm=disabled
+      -D glvnd=disabled
+      -D glx=disabled
+      -D opengl=false
+      -D platforms=
+    GALLIUM_ST: >
+      -D gallium-rusticl=false
+      -D gallium-va=enabled
+    EXTRA_OPTION: >
+      -D llvm=disabled
+      -D allow-fallback-for=libdrm,libva
+      -D libva:with_glx=no
+      -D libva:with_wayland=no
+      -D libva:with_x11=no
+      -D valgrind=disabled
+      -D spirv-tools=disabled
+      -D zlib=disabled
+      -D zstd=disabled
+      -D shader-cache=disabled
+      -D expat=disabled
+      -D perfetto=false
+    S3_ARTIFACT_NAME: mesa-x86_64-no_gfx_compute-${BUILDTYPE}
+
 debian-x86_64-asan:
   extends:
     - debian-x86_64
@@ -428,6 +471,7 @@ debian-arm32:
       -D gallium-rusticl=false
       -D mesa-clc=system
       -D precomp-compiler=system
+      -D tools=drm-shim
     HOST_BUILD_OPTIONS: >
       -D build-tests=false
       -D enable-glcpp-tests=false
@@ -484,6 +528,7 @@ debian-arm64:
       -D perfetto=true
       -D vulkan-layers=screenshot
       -D panfrost-rust=true
+      -D tools=drm-shim
     GALLIUM_ST:
       -D gallium-rusticl=true
       -D legacy-wayland=bind-wayland-display

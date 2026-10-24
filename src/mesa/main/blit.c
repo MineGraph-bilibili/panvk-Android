@@ -30,6 +30,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#include "util/format/u_format.h"
+
 #include "context.h"
 #include "enums.h"
 #include "blit.h"
@@ -216,6 +218,22 @@ validate_color_buffer(struct gl_context *ctx, struct gl_framebuffer *readFb,
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "%s(source and destination color buffer cannot be the "
                      "same)", func);
+         return false;
+      }
+
+      /* GL_EXT_YUV_target spec, Issue 6:
+       *
+       *   "Is BlitFramebuffer or CopyTex[Sub]Image supported with YUV
+       *   renderable surfaces?
+       *
+       *   RESOLVED: No. There is a lot of driver complexity in supporting
+       *   and testing case. Using these calls with a YUV source or
+       *   destination will cause an INVALID_OPERATION error."
+       */
+      if (util_format_is_yuv(colorReadRb->Format) ||
+          util_format_is_yuv(colorDrawRb->Format)) {
+         _mesa_error(ctx, GL_INVALID_OPERATION,
+                     "%s(YUV source or destination not supported)", func);
          return false;
       }
 
@@ -585,6 +603,12 @@ do_blit_framebuffer(struct gl_context *ctx,
 
    if (mask & depthStencil) {
       /* depth and/or stencil blit */
+
+      /* Reset any per-channel swizzle set by a prior color sub-blit;
+       * ZS blits never need channel remapping.
+       */
+      blit.swizzle_enable = false;
+      memset(blit.swizzle, 0, sizeof(blit.swizzle));
 
       /* get src/dst depth surfaces */
       struct gl_renderbuffer *srcDepthRb =

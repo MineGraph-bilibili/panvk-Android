@@ -30,10 +30,6 @@ spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvu420,Fail
 #Expected CL error: CL_LINK_PROGRAM_FAILURE -17
 api@cllinkprogram,Fail
 
-# https://gitlab.freedesktop.org/mesa/mesa/-/issues/8408
-program@execute@global-offset,Fail
-program@execute@global-offset@3d- input dependent,Fail
-
 # Regressed between https://gitlab.freedesktop.org/mesa/mesa/-/jobs/70146138 and https://gitlab.freedesktop.org/mesa/mesa/-/jobs/70217173
 program@execute@vector-conversion,Fail
 
@@ -71,14 +67,62 @@ angle-dEQP-GLES2.functional.shaders.algorithm.rgb_to_hsl_vertex,Fail
 # https://github.com/HansKristian-Work/vkd3d-proton/blob/master/docs/sampler_feedback.md
 vkd3d-test_sampler_feedback_implicit_lod_aniso,Fail
 
-# VKCTS 1.4.5.3 -> 1.4.6.1 uprev
-# deqp-vk: ../src/freedreno/ir3/ir3_image.c:101: ir3_get_type_for_image_intrinsic: Assertion `bit_size != 64 || instr->intrinsic == nir_intrinsic_bindless_image_atomic || instr->intrinsic == nir_intrinsic_bindless_image_atomic_swap' failed.
-dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.storage_texel_buffer_sparse_read_size_2_10_r64ui_strict,Crash
-dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.storage_texel_buffer_sparse_read_size_2_16_r64ui,Crash
-dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.storage_texel_buffer_sparse_read_size_2_16_r64ui_strict,Crash
+vkd3d-test_query_heap_cpu_resolve_timestamp,Fail
 
-# VKCTS 1.4.5.3 -> 1.4.6.1 uprev
-# deqp-vk: ../src/freedreno/vulkan/tu_knl_drm_msm.cc:1373: VkResult msm_queue_submit(tu_queue*, void*, vk_sync_wait*, uint32_t, vk_sync_signal*, uint32_t, tu_u_trace_submission_data*): Assertion `errno_ != EINVAL' failed.
-dEQP-VK.synchronization2.internally_synchronized_queues.bind_sparse_large2,Crash
-dEQP-VK.synchronization2.internally_synchronized_queues.bind_sparse_small2,Crash
-gmem-dEQP-VK.synchronization2.internally_synchronized_queues.bind_sparse_small2,Crash
+#
+# OpenCL-CTS
+#
+
+# Test bug, doesn't check for CL_FP_DENORM:
+SPIRV new,Fail
+SPIRV new@op_neg_half,Fail
+SPIRV new@op_spec_constant_half_simple,Fail
+
+# Test bug, doesn't properly compute wave divergence point with wave128:
+Subgroups,Fail
+Subgroups@subgroup_functions_clustered_reduce,Fail
+Subgroups@subgroup_functions_ballot,Fail
+
+# timestamp queries seem problematic on a750:
+Device timer,Fail
+Device timer@device_and_host_timers,Fail
+Profiling,Fail
+Profiling@copy_array,Fail
+Profiling@copy_image,Fail
+Profiling@copy_partial_array,Fail
+Profiling@execute,Fail
+Profiling@profiling_timebase,Fail
+Profiling@read_array_char,Fail
+Profiling@read_array_float,Fail
+Profiling@read_array_int,Fail
+Profiling@read_array_long,Fail
+Profiling@read_array_short,Fail
+Profiling@read_array_struct,Fail
+Profiling@read_array_uchar,Fail
+Profiling@read_array_uint,Fail
+Profiling@read_array_ulong,Fail
+Profiling@read_array_ushort,Fail
+Profiling@read_image_char,Fail
+Profiling@read_image_float,Fail
+Profiling@read_image_uchar,Fail
+Profiling@write_array_char,Fail
+Profiling@write_array_float,Fail
+Profiling@write_array_int,Fail
+Profiling@write_array_long,Fail
+Profiling@write_array_short,Fail
+Profiling@write_array_struct,Fail
+Profiling@write_array_uchar,Fail
+Profiling@write_array_uint,Fail
+Profiling@write_array_ulong,Fail
+Profiling@write_array_ushort,Fail
+Profiling@write_image_char,Fail
+Profiling@write_image_float,Fail
+Profiling@write_image_uchar,Fail
+
+#
+# OpenCL-CTS uprev
+#
+
+# https://github.com/KhronosGroup/OpenCL-CTS/issues/2765
+Basic,Fail
+Basic@bufferreadwriterect,Fail

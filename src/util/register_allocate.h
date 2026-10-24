@@ -105,11 +105,18 @@ unsigned int ra_add_node(struct ra_graph *g, struct ra_class *c);
  *            contains *all* registers, but registers of different
  *            classes will not have their corresponding bit set.
  *  - data    callback data specified in ra_set_select_reg_callback()
+ * - optimistic whether the node is being colored optimistically,
+ *              which implies that allocation isn't guaranteed to
+ *              succeed irrespective of the coloring of neighboring
+ *              nodes, so a selection heuristic that minimizes
+ *              fragmentation may be needed for the graph to be
+ *              colored successfully.
  */
 typedef unsigned int (*ra_select_reg_callback)(
       unsigned int n,        /* virtual variable to choose a physical reg for */
       BITSET_WORD *regs,     /* available physical regs to choose from */
-      void *data);
+      void *data,
+      bool optimistic);
 
 void ra_set_select_reg_callback(struct ra_graph *g,
                                 ra_select_reg_callback callback,

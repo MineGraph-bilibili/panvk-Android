@@ -566,3 +566,36 @@ dump_debug_control_string(char *output,
       }
    }
 }
+
+void
+parse_debug_bitset(const char *env, const struct debug_control_bitset *tbl, BITSET_WORD *result)
+{
+   /* Check if env is NULL or empty */
+   if (!env || !*env)
+      return;
+
+   char *copy = strdup(env);
+   if (!copy)
+      return;
+
+   /* Tokenize the string by space, comma, or newline */
+   char *saveptr;
+   for (char *tok = strtok_r(copy, ", \n", &saveptr); tok; tok = strtok_r(NULL, ", \n", &saveptr)) {
+      /* Check for negation prefix, useful if user would like to disable certian flags */
+      bool negate = (*tok == '~' || *tok == '-');
+      if (negate)
+         tok++;
+
+      for (unsigned i = 0; tbl[i].string; i++) {
+         if (strcasecmp(tok, tbl[i].string) != 0 && strcasecmp(tok, "all"))
+            continue;
+
+         if (negate)
+            BITSET_CLEAR_RANGE(result, tbl[i].range[0], tbl[i].range[1]);
+         else
+            BITSET_SET_RANGE(result, tbl[i].range[0], tbl[i].range[1]);
+         break;
+      }
+   }
+   free(copy);
+}

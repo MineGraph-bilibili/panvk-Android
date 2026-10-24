@@ -28,6 +28,7 @@
 #ifndef DD_UTIL_H
 #define DD_UTIL_H
 
+#include <stdbool.h>
 #include <stdio.h>
 
 struct pipe_screen;

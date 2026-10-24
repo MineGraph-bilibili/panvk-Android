@@ -174,7 +174,8 @@ tu_cs_add_bo(struct tu_cs *cs, uint32_t size)
       tu_bo_init_new(cs->device, NULL, &new_bo, size * sizeof(uint32_t),
                      (enum tu_bo_alloc_flags)(COND(!cs->writeable,
                                                    TU_BO_ALLOC_GPU_READ_ONLY) |
-                                              TU_BO_ALLOC_ALLOW_DUMP),
+                                              TU_BO_ALLOC_ALLOW_DUMP |
+                                              tu_bo_ib_flags(cs->device)),
                      cs->name);
    if (result != VK_SUCCESS) {
       return result;

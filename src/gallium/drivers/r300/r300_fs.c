@@ -53,6 +53,31 @@ static void allocate_hardware_inputs(
     }
 }
 
+static rc_wrap_mode r300_get_npot_wrap_mode(enum pipe_tex_wrap wrap)
+{
+    switch (wrap) {
+    case PIPE_TEX_WRAP_REPEAT:
+        return RC_WRAP_REPEAT;
+
+    case PIPE_TEX_WRAP_MIRROR_REPEAT:
+        return RC_WRAP_MIRRORED_REPEAT;
+
+    case PIPE_TEX_WRAP_MIRROR_CLAMP:
+    case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE:
+    case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER:
+        return RC_WRAP_MIRRORED_CLAMP;
+
+    default:
+        return RC_WRAP_NONE;
+    }
+}
+
+static bool r300_npot_wrap_clamps_to_edge(enum pipe_tex_wrap wrap)
+{
+    return wrap == PIPE_TEX_WRAP_CLAMP_TO_EDGE ||
+           wrap == PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE;
+}
+
 void r300_fragment_program_get_external_state(
     struct r300_context* r300,
     struct r300_fragment_program_external_state* state)
@@ -74,6 +99,10 @@ void r300_fragment_program_get_external_state(
 
         t = r300_resource(v->base.texture);
 
+        if (s->state.unnormalized_coords &&
+            (r300_fs(r300)->samplers_2d & (1u << i)))
+            state->unnormalized_coords_mask |= 1u << i;
+
         if (s->state.compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE) {
             state->unit[i].compare_mode_enabled = 1;
 
@@ -88,29 +117,34 @@ void r300_fragment_program_get_external_state(
                                 v->swizzle[2], v->swizzle[3]);
         }
 
-        /* XXX this should probably take into account STR, not just S. */
         if (t->tex.is_npot) {
-            switch (s->state.wrap_s) {
-            case PIPE_TEX_WRAP_REPEAT:
-                state->unit[i].wrap_mode = RC_WRAP_REPEAT;
-                break;
-
-            case PIPE_TEX_WRAP_MIRROR_REPEAT:
-                state->unit[i].wrap_mode = RC_WRAP_MIRRORED_REPEAT;
-                break;
-
-            case PIPE_TEX_WRAP_MIRROR_CLAMP:
-            case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE:
-            case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER:
-                state->unit[i].wrap_mode = RC_WRAP_MIRRORED_CLAMP;
-                break;
-
-            default:
-                state->unit[i].wrap_mode = RC_WRAP_NONE;
+            if (t->b.target == PIPE_TEXTURE_CUBE) {
+                /* Cube coordinates are directions, so the generic STR wrap
+                 * lowering cannot be applied to them. */
+                state->unit[i].scale_cube_coords_before_fetch = true;
+                state->unit[i].clamp_cube_coords_before_fetch =
+                    s->state.min_img_filter == PIPE_TEX_FILTER_LINEAR ||
+                    s->state.mag_img_filter == PIPE_TEX_FILTER_LINEAR;
+                state->unit[i].bias_cube_lod_at_edge =
+                    s->state.min_img_filter != s->state.mag_img_filter;
+            } else {
+                state->unit[i].wrap_mode_s =
+                    r300_get_npot_wrap_mode(s->state.wrap_s);
+                state->unit[i].wrap_mode_t =
+                    r300_get_npot_wrap_mode(s->state.wrap_t);
+                state->unit[i].wrap_mode_r =
+                    r300_get_npot_wrap_mode(s->state.wrap_r);
             }
 
-            if (t->b.target == PIPE_TEXTURE_3D)
+            if (t->b.target == PIPE_TEXTURE_3D) {
                 state->unit[i].clamp_and_scale_before_fetch = true;
+                state->unit[i].clamp_to_edge_s =
+                    r300_npot_wrap_clamps_to_edge(s->state.wrap_s);
+                state->unit[i].clamp_to_edge_t =
+                    r300_npot_wrap_clamps_to_edge(s->state.wrap_t);
+                state->unit[i].clamp_to_edge_r =
+                    r300_npot_wrap_clamps_to_edge(s->state.wrap_r);
+            }
         }
     }
 }

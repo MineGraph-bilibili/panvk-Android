@@ -927,8 +927,6 @@ Anvil(ANV) driver environment variables
 
   Accepts the following comma-separated list of flags:
 
-  ``bindless``
-    Forces all descriptor sets to use the internal :ref:`Bindless model`
   ``desc-dirty``
     Print out what dirties descriptors
   ``experimental``
@@ -1446,9 +1444,6 @@ RADV driver environment variables
       dump fragment shader epilogs
    ``extra_md``
       add extra information in bo metadata to help tools (umr)
-   ``forcecompress``
-      Enables DCC,FMASK,CMASK,HTILE in situations where the driver supports it
-      but normally does not deem it beneficial.
    ``fullsync``
       synchronize all pending work after all draws/dispatches (this includes
       syncshaders but also flushes all caches)
@@ -1467,8 +1462,6 @@ RADV driver environment variables
       disable primitive binning
    ``nocache``
       disable shaders cache
-   ``nocompute``
-      disable compute queue
    ``nodcc``
       disable Delta Color Compression (DCC) on images
    ``nodisplaydcc``
@@ -1590,7 +1583,7 @@ RADV driver environment variables
 .. envvar:: RADV_FORCE_VRS_CONFIG_FILE
 
    similar to ``RADV_FORCE_VRS`` but allow to configure from a file. If present,
-   this supersedes ``RADV_FORCE_VRS``.
+   this supersedes ``RADV_FORCE_VRS``. This only affects GFX10.3 APUs.
 
 .. envvar:: RADV_PERFTEST
 
@@ -1627,10 +1620,6 @@ RADV driver environment variables
    ``sam``
       enable optimizations to move more driver internal objects to VRAM.
 
-   Note that bfloat16, emulate_rt, hic, sparse, transfer_queue, video_decode
-   and video_encode are deprecated and RADV_EXPERIMENTAL should be
-   used instead.
-
 .. envvar:: RADV_EXPERIMENTAL
 
    a comma-separated list of named flags, which do various things:
@@ -1653,6 +1642,8 @@ RADV driver environment variables
       enable experimental video decoding support on GFX6-9
    ``video_encode``
       enable experimental video encoding support on GFX6-9
+   ``elf``
+      Use the ELF format internally for shader binaries. Requires RADV to be compiled with LLVM support.
 
 .. envvar:: RADV_TEX_ANISO
 
@@ -1961,6 +1952,14 @@ RadeonSI driver environment variables
    ``export_modifier``
       Export real modifier instead of DRM_FORMAT_MOD_INVALID to user. For example
       by eglExportDMABUFImageQueryMESA.
+   ``safe``
+      Disable basic optimizations.
+   ``safer``
+      Disable basic and medium optimizations.
+   ``safest``
+      Disable all optimizations.
+   ``ibcachesflush``
+      Flush all caches at the beginning of IBs.
 
 r600 driver environment variables
 ---------------------------------
@@ -2264,6 +2263,9 @@ PowerVR driver environment variables
    ``ra_skip_opt``
       Skip attempting to allocate temps with the optimal amount during RA.
 
+   ``no_dma_cache``
+      Disable DMA cache.
+
 .. envvar:: PCO_SKIP_PASSES
 
    A comma-separated list of passes to skip.
@@ -2299,6 +2301,29 @@ PowerVR driver environment variables
 .. envvar:: PCO_COLOR
 
    if set to ``auto`` PCO IR will be colorized if stdout is not a pipe.
+   Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
+   Defaults to ``auto``.
+
+.. envvar:: PDSC_DEBUG
+
+   A comma-separated list of named flags for the PDS compiler,
+   which control various compilation options:
+
+   ``val_skip``
+      Skip IR validation.
+
+   ``print``
+      Print the PDS IR.
+
+   ``raw_regs``
+      Print raw regs, not names.
+
+   ``print_binary``
+      Print the PDS binary.
+
+.. envvar:: PDSC_COLOR
+
+   if set to ``auto`` PDSC IR will be colorized if stdout is not a pipe.
    Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
    Defaults to ``auto``.
 

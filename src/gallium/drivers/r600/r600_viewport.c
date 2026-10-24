@@ -420,17 +420,9 @@ static void r600_emit_viewport_states(struct r600_common_context *rctx,
  * called to emit the rest.
  */
 void r600_update_vs_writes_viewport_index(struct r600_common_context *rctx,
-					  struct tgsi_shader_info *info)
+					  bool vs_window_space,
+					  bool writes_viewport_index)
 {
-	bool vs_window_space;
-
-	if (!info)
-		return;
-
-	/* When the VS disables clipping and viewport transformation. */
-	vs_window_space =
-		info->properties[TGSI_PROPERTY_VS_WINDOW_SPACE_POSITION];
-
 	if (rctx->vs_disables_clipping_viewport != vs_window_space) {
 		rctx->vs_disables_clipping_viewport = vs_window_space;
 		rctx->scissors.dirty_mask = (1 << R600_MAX_VIEWPORTS) - 1;
@@ -438,7 +430,7 @@ void r600_update_vs_writes_viewport_index(struct r600_common_context *rctx,
 	}
 
 	/* Viewport index handling. */
-	rctx->vs_writes_viewport_index = info->writes_viewport_index;
+	rctx->vs_writes_viewport_index = writes_viewport_index;
 	if (!rctx->vs_writes_viewport_index)
 		return;
 

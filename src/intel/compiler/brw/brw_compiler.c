@@ -91,13 +91,8 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
    brw_init_isa_info(&compiler->isa, devinfo);
 
-   compiler->threads_per_eu_min =
-      debug_get_unsigned_option("INTEL_THREADS_PER_EU_MIN", -1);
-   compiler->threads_per_eu_srchash =
-      debug_get_unsigned_option("INTEL_THREADS_PER_EU_SRCHASH", BRW_SRCHASH_EMPTY);
-
    brw_alloc_reg_sets(compiler, 0);
-   if (compiler->threads_per_eu_min != -1 && compiler->threads_per_eu_min != 0)
+   if (intel_threads_per_eu_min != -1)
       brw_alloc_reg_sets(compiler, 1);
 
    compiler->precise_trig = debug_get_bool_option("INTEL_PRECISE_TRIG", false);
@@ -174,6 +169,12 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
    struct nir_shader_compiler_options *nir_options = &compiler->nir_options[0];
    *nir_options = brw_scalar_nir_options;
 
+   /* Weigh gcm loop hoist pressure against the same number the backend uses
+    * to decide a shader is under too much pressure.
+    */
+   nir_options->max_gcm_loop_pressure = compiler->register_pressure_threshold;
+   nir_options->gcm_divergent_pressure_scale = devinfo->ver >= 30 ? 2 : 1;
+
    /* Gfx11 loses LRP. */
    nir_options->lower_flrp32 = devinfo->ver >= 11;
 
@@ -207,6 +208,8 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
    if (devinfo->ver < 12)
       nir_options->divergence_analysis_options |=
          nir_divergence_single_prim_per_subgroup;
+
+   nir_options->has_tanh = devinfo->ver >= 35;
 
    for (int i = 0; i < MESA_ALL_SHADER_STAGES; i++) {
       bool jay = intel_use_jay(compiler->devinfo, i);
@@ -392,15 +395,4 @@ brw_write_shader_relocs(const struct brw_isa_info *isa,
          }
       }
    }
-}
-
-unsigned
-brw_register_blocks(const struct intel_device_info *devinfo,
-                    unsigned grf_used)
-{
-   if (INTEL_DEBUG(DEBUG_NO_VRT))
-      return (BRW_MAX_GRF / 32) - 1;
-
-   const unsigned n = DIV_ROUND_UP(grf_used, 32) - 1;
-   return (n < 6 ? n : 7);
 }

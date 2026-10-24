@@ -2059,7 +2059,7 @@
     <src/>
   </ins>
 
-  <ins name="CLZ.u32" title="Count leading zeroes" dests="1" unused="true" unit="CVT">
+  <ins name="CLZ.u32" title="Count leading zeroes" dests="1" unused="true" unit="SFU">
     <opcode>
       <op val="0x91" start="48" mask="0x1FF"/>
       <op val="0x4" start="16" mask="0x1F"/> <!-- opcode2 -->
@@ -2070,7 +2070,7 @@
     <src/>
   </ins>
 
-  <ins name="CLZ.v2u16" title="Count leading zeroes" dests="1" unused="true" unit="CVT">
+  <ins name="CLZ.v2u16" title="Count leading zeroes" dests="1" unused="true" unit="SFU">
     <opcode>
       <op val="0x91" start="48" mask="0x1FF"/>
       <op val="0x5" start="16" mask="0x1F"/> <!-- opcode2 -->
@@ -2081,7 +2081,7 @@
     <src swizzle="true"/>
   </ins>
 
-  <ins name="CLZ.v4u8" title="Count leading zeroes" dests="1" unused="true" unit="CVT">
+  <ins name="CLZ.v4u8" title="Count leading zeroes" dests="1" unused="true" unit="SFU">
     <opcode>
       <op val="0x91" start="48" mask="0x1FF"/>
       <op val="0x6" start="16" mask="0x1F"/> <!-- opcode2 -->
@@ -2573,6 +2573,38 @@
     <src lane="28">A</src>
     <src lane="26">B</src>
   </ins>
+
+  <group name="MMUL" title="Cooperative matrix multiply" dests="1" unit="FMA">
+    <ins name="MMUL.v4s8">
+      <opcode>
+        <op val="0x100" start="48" mask="0x1FF"/>
+      </opcode>
+    </ins>
+    <ins name="MMUL.v4u8">
+      <opcode>
+        <op val="0x101" start="48" mask="0x1FF"/>
+      </opcode>
+    </ins>
+    <ins name="MMUL.f32">
+      <opcode>
+        <op val="0x102" start="48" mask="0x1FF"/>
+      </opcode>
+    </ins>
+    <ins name="MMUL.v2f16">
+      <opcode>
+        <op val="0x103" start="48" mask="0x1FF"/>
+      </opcode>
+    </ins>
+    <desc>
+      4x4 cooperative matrix multiply and accumulate, calculating
+      $A \cdot B + C$. The matrices are spread across the subgroup with one
+      element per lane. The destination register must differ from A and B
+      (it may reuse the accumulator C).
+    </desc>
+    <src>A</src>
+    <src>B</src>
+    <src>C</src>
+  </group>
 
   <group name="ISUB" title="Integer subtract" dests="1" unused="true" unit="CVT">
     <ins name="ISUB.u32">
@@ -3195,7 +3227,7 @@
     <src>CD</src>
   </ins>
 
-  <ins name="CUBEFACE1" title="Cube map transform step 1" dests="1" unused="true" unit="SFU">
+  <ins name="CUBEFACE1" title="Cube map transform step 1" dests="1" unused="true" unit="CVT">
     <opcode>
       <op val="0xC0" start="48" mask="0x1FF"/>
     </opcode>
@@ -3205,7 +3237,7 @@
     <src absneg="true">Z coordinate as 32-bit floating point</src>
   </ins>
 
-  <ins name="CUBEFACE2_V9" title="Cube map transform step 2" dests="1" unit="SFU">
+  <ins name="CUBEFACE2_V9" title="Cube map transform step 2" dests="1" unit="CVT">
     <opcode>
       <op val="0xC1" start="48" mask="0x1FF"/>
     </opcode>

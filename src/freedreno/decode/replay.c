@@ -25,6 +25,7 @@
 #elif FD_REPLAY_MSM
 #include <xf86drm.h>
 #include "drm-uapi/msm_drm.h"
+#include "drm/msm/msm_common.h"
 #elif FD_REPLAY_WSL
 #define __KERNEL__
 #include "drm-uapi/d3dkmthk.h"
@@ -407,15 +408,6 @@ device_dump_wrbuf(struct device *dev)
 }
 
 #if FD_REPLAY_MSM
-static inline void
-get_abs_timeout(struct drm_msm_timespec *tv, uint64_t ns)
-{
-   struct timespec t;
-   clock_gettime(CLOCK_MONOTONIC, &t);
-   tv->tv_sec = t.tv_sec + ns / 1000000000;
-   tv->tv_nsec = t.tv_nsec + ns % 1000000000;
-}
-
 static struct device *
 device_create(uint64_t base_addr)
 {
@@ -427,22 +419,9 @@ device_create(uint64_t base_addr)
    }
 
    uint64_t va_start, va_size;
-
-   struct drm_msm_param req = {
-      .pipe = MSM_PIPE_3D0,
-      .param = MSM_PARAM_VA_START,
-   };
-
-   int ret = drmCommandWriteRead(dev->fd, DRM_MSM_GET_PARAM, &req, sizeof(req));
-   va_start = req.value;
-
-   if (!ret) {
-      req.param = MSM_PARAM_VA_SIZE;
-      ret = drmCommandWriteRead(dev->fd, DRM_MSM_GET_PARAM, &req, sizeof(req));
-      va_size = req.value;
-
+   int ret = msm_common_get_va_prop(dev->fd, MSM_PIPE_3D0, &va_start, &va_size);
+   if (!ret)
       dev->has_set_iova = true;
-   }
 
    if (ret) {
       printf("MSM_INFO_SET_IOVA is not supported!\n");

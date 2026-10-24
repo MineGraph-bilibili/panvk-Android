@@ -44,7 +44,8 @@ radv-raven = { checksum = "256017105d46cb1e924c47686de1e48bad798282f78ecb3e9a4f4
 [[traces]]
 path = "angle/angle_trace_tests/pubg_mobile_battle_royale"
 [traces.devices]
-radv-raven = { checksum = "c1c56cc417fbcc0a775d4ed0a123f5800a39e087b71d949f88c3d03771e79e23" }
+# https://gitlab.freedesktop.org/mesa/mesa/-/work_items/16143
+radv-raven = { checksum = "d0eadbc0051b81c8e5011621d965d01279b99b5a9789de0eb333ce927f0f9884" }
 
 [[traces]]
 path = "angle/angle_trace_tests/temple_run_300"

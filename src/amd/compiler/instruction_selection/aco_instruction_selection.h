@@ -286,7 +286,7 @@ Temp create_vec_from_array(isel_context* ctx, Temp arr[], unsigned cnt, RegType 
 void emit_interp_instr(isel_context* ctx, unsigned idx, unsigned component, Temp src, Temp dst,
                        Temp prim_mask, bool high_16bits);
 void emit_interp_mov_instr(isel_context* ctx, unsigned idx, unsigned component, unsigned vertex_id,
-                           Temp dst, Temp prim_mask, bool high_16bits);
+                           Temp dst, Temp prim_mask);
 std::vector<Temp> emit_pack_v1(isel_context* ctx, const std::vector<Temp>& unpacked);
 MIMG_instruction* emit_mimg(Builder& bld, aco_opcode op, std::vector<Temp> dsts, Temp rsrc,
                             Operand samp, std::vector<Temp> coords, bool disable_wqm,

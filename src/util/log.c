@@ -386,7 +386,6 @@ logger_android(enum mesa_log_level level,
          format, va);
 
    __android_log_write(level_to_android(level), tag, msg);
-   fprintf(stderr, "[%s-PANVK] %s\n", tag, msg);
 
    if (msg != local_msg)
       free(msg);

@@ -44,4 +44,15 @@ static inline uint32_t pvr_get_max_user_vertex_output_components(
    return 128U;
 }
 
+static inline uint32_t
+pvr_get_texture_extent_max_z(const struct pvr_device_info *dev_info)
+{
+   assert(dev_info->ident.arch <= PVR_DEVICE_ARCH_ROGUE);
+
+   /* FIXME: This should ideally be making use of
+    * ROGUE_TEXSTATE_IMAGE_WORD1_DEPTH_MAX_SIZE.
+    */
+   return 2048;
+}
+
 #endif /* PVR_HW_UTILS_H */

@@ -437,16 +437,18 @@ try_opt_atomic_exchange_to_store(nir_builder *b, nir_intrinsic_instr *intrin)
    }
    case nir_intrinsic_shared_atomic:
       nir_store_shared(b, intrin->src[1].ssa, intrin->src[0].ssa,
-                       .access = ACCESS_ATOMIC,
+                       .access = nir_intrinsic_access(intrin) | ACCESS_ATOMIC,
                        .base = nir_intrinsic_base(intrin));
       break;
    case nir_intrinsic_global_atomic:
       nir_store_global(b, intrin->src[1].ssa, intrin->src[0].ssa,
-                       .access = ACCESS_ATOMIC | ACCESS_COHERENT);
+                       .access = nir_intrinsic_access(intrin) |
+                                 ACCESS_ATOMIC | ACCESS_COHERENT);
       break;
    case nir_intrinsic_global_atomic_amd:
       nir_store_global_amd(b, intrin->src[1].ssa, intrin->src[0].ssa, intrin->src[2].ssa,
-                           .access = ACCESS_ATOMIC | ACCESS_COHERENT,
+                           .access = nir_intrinsic_access(intrin) |
+                                     ACCESS_ATOMIC | ACCESS_COHERENT,
                            .base = nir_intrinsic_base(intrin));
       break;
    case nir_intrinsic_ssbo_atomic:
@@ -564,16 +566,18 @@ try_opt_atomic_to_load(nir_builder *b, nir_intrinsic_instr *intrin)
    }
    case nir_intrinsic_shared_atomic:
       def = nir_load_shared(b, 1, bit_size, intrin->src[0].ssa,
-                            .access = ACCESS_ATOMIC,
+                            .access = nir_intrinsic_access(intrin) | ACCESS_ATOMIC,
                             .base = nir_intrinsic_base(intrin));
       break;
    case nir_intrinsic_global_atomic:
       def = nir_load_global(b, 1, bit_size, intrin->src[0].ssa,
-                            .access = ACCESS_ATOMIC | ACCESS_COHERENT);
+                            .access = nir_intrinsic_access(intrin) |
+                                      ACCESS_ATOMIC | ACCESS_COHERENT);
       break;
    case nir_intrinsic_global_atomic_amd:
       def = nir_load_global_amd(b, 1, bit_size, intrin->src[0].ssa, intrin->src[2].ssa,
-                                .access = ACCESS_ATOMIC | ACCESS_COHERENT,
+                                .access = nir_intrinsic_access(intrin) |
+                                          ACCESS_ATOMIC | ACCESS_COHERENT,
                                 .base = nir_intrinsic_base(intrin));
       break;
    case nir_intrinsic_ssbo_atomic:

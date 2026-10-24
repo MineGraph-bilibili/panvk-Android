@@ -882,7 +882,7 @@ fn fill_qmd<Q: QMD>(
     qmd
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_qmd_size_B(dev: &nv_device_info) -> u32 {
     let size_B = if dev.cls_compute >= clcdc0::BLACKWELL_COMPUTE_A {
         size_of::<Qmd5_0>().try_into().unwrap()
@@ -905,7 +905,7 @@ pub extern "C" fn nak_qmd_size_B(dev: &nv_device_info) -> u32 {
     size_B
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_fill_qmd(
     dev: *const nv_device_info,
     info: *const nak_shader_info,
@@ -969,7 +969,7 @@ fn set_dependent_qmd<Q: QMD>(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_set_dependent_qmd(
     dev: *const nv_device_info,
     qmd_out: *mut ::std::os::raw::c_void,
@@ -1034,7 +1034,7 @@ fn set_invalidate_shader_constants<Q: QMD>(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_set_invalidate_cache(
     dev: *const nv_device_info,
     qmd_out: *mut ::std::os::raw::c_void,
@@ -1140,7 +1140,7 @@ pub extern "C" fn nak_set_invalidate_cache(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_get_qmd_dispatch_size_layout(
     dev: &nv_device_info,
 ) -> nak_qmd_dispatch_size_layout {
@@ -1163,7 +1163,7 @@ pub extern "C" fn nak_get_qmd_dispatch_size_layout(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn nak_get_qmd_cbuf_desc_layout(
     dev: &nv_device_info,
     idx: u8,

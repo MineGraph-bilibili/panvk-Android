@@ -171,19 +171,17 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 
       nir_def *mask =
          nir_bcsel(b, small_workgroup, nir_imm_int(b, radv_nggc_none),
-                   nir_imm_int(b, radv_nggc_front_face | radv_nggc_back_face | radv_nggc_small_primitives));
+                   nir_imm_int(b, radv_nggc_cull_face_negative_determinant | radv_nggc_cull_face_positive_determinant |
+                                     radv_nggc_small_primitives));
       nir_def *settings = ac_nir_load_arg(b, &s->args->ac, s->args->nggc_settings);
       replacement = nir_ine_imm(b, nir_iand(b, settings, mask), 0);
       break;
    }
-   case nir_intrinsic_load_cull_front_face_enabled_amd:
-      replacement = nggc_bool_setting(b, radv_nggc_front_face, s);
+   case nir_intrinsic_load_cull_face_negative_determinant_enabled_amd:
+      replacement = nggc_bool_setting(b, radv_nggc_cull_face_negative_determinant, s);
       break;
-   case nir_intrinsic_load_cull_back_face_enabled_amd:
-      replacement = nggc_bool_setting(b, radv_nggc_back_face, s);
-      break;
-   case nir_intrinsic_load_cull_ccw_amd:
-      replacement = nggc_bool_setting(b, radv_nggc_face_is_ccw, s);
+   case nir_intrinsic_load_cull_face_positive_determinant_enabled_amd:
+      replacement = nggc_bool_setting(b, radv_nggc_cull_face_positive_determinant, s);
       break;
    case nir_intrinsic_load_cull_small_triangles_enabled_amd:
       replacement = nggc_bool_setting(b, radv_nggc_small_primitives, s);
@@ -314,7 +312,7 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
          unsigned provoking_vertex = 0;
          if (s->gfx_state->rs.provoking_vtx_last) {
             if (stage == MESA_SHADER_VERTEX) {
-               provoking_vertex = radv_get_num_vertices_per_prim(s->gfx_state) - 1;
+               provoking_vertex = radv_get_num_vertices_per_prim(s->gfx_level, s->gfx_state) - 1;
             } else if (stage == MESA_SHADER_GEOMETRY) {
                provoking_vertex = b->shader->info.gs.vertices_in - 1;
             } else {
@@ -386,7 +384,7 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
          if (s->info->vs.dynamic_num_verts_per_prim) {
             replacement = GET_SGPR_FIELD_NIR(s->args->ngg_state, NGG_STATE_NUM_VERTS_PER_PRIM);
          } else {
-            replacement = nir_imm_int(b, radv_get_num_vertices_per_prim(s->gfx_state));
+            replacement = nir_imm_int(b, radv_get_num_vertices_per_prim(s->gfx_level, s->gfx_state));
          }
       } else if (stage == MESA_SHADER_TESS_EVAL) {
          if (s->info->tes.point_mode) {

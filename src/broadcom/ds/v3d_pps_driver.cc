@@ -11,6 +11,7 @@
 
 #include "perfcntrs/v3d_perfcntrs.h"
 #include "util/os_misc.h"
+#include "util/u_string.h"
 #include <xf86drm.h>
 
 namespace pps
@@ -45,7 +46,8 @@ V3DDriver::init_perfcnt()
    CounterGroup group = {};
 
    char *dup = strdup(v3d_ds_counter_env);
-   char *name = strtok(dup, ",");
+   char *saveptr;
+   char *name = strtok_r(dup, ",", &saveptr);
    while (name != NULL && createreq.ncounters < DRM_V3D_MAX_PERF_COUNTERS) {
       const struct v3d_perfcntr_desc *desc = v3d_perfcntrs_get_by_name(perfcntrs, name);
       if (desc) {
@@ -66,7 +68,7 @@ V3DDriver::init_perfcnt()
          PERFETTO_ELOG("Unkown performance counter name: %s", name);
       }
 
-      name = strtok(NULL, ",");
+      name = strtok_r(NULL, ",", &saveptr);
    }
 
    free(dup);

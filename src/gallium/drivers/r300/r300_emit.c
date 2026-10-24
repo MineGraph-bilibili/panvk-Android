@@ -173,6 +173,18 @@ static void get_rc_constant_state(
             vec[3] = 1;
             break;
 
+        case RC_STATE_R300_TEXSCALE_UPPER:
+            tex = r300_resource(texstate->sampler_views[constant->u.State[1]]->base.texture);
+            /* NPOT 3D and cube textures occupy the beginning of a POT
+             * allocation. Unlike the general scale above, this must be the
+             * exact center of the last logical texel; biasing it further
+             * inward can change filtering results at the edge. */
+            vec[0] = (tex->b.width0  - 0.5f) / tex->tex.width0;
+            vec[1] = (tex->b.height0 - 0.5f) / tex->tex.height0;
+            vec[2] = (tex->b.depth0  - 0.5f) / tex->tex.depth0;
+            vec[3] = 1;
+            break;
+
         case RC_STATE_R300_VIEWPORT_SCALE:
             vec[0] = r300->viewport.scale[0];
             vec[1] = r300->viewport.scale[1];

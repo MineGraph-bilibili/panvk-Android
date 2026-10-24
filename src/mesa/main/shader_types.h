@@ -536,7 +536,8 @@ struct gl_program
    GLbitfield ShadowSamplers;
    /** Texture units used for samplerExternalOES */
    GLbitfield ExternalSamplersUsed;
-
+   /** Texture units used for samplerExternal2DY2YEXT (bypass YUV conversion) */
+   GLbitfield Y2YSamplersUsed;
    /** Named parameters, constants, etc. from program text */
    struct gl_program_parameter_list *Parameters;
 

@@ -12,6 +12,11 @@ PanVK, the Vulkan implementation in the Panfrost driver stack, is currently
 **conformant** on `Mali-G610 <https://www.khronos.org/conformance/adopters/conformant-products#submission_939>`__,
 but *non-conformant* on other GPUs.
 
+On GPUs where PanVK support is experimental, the driver refuses to load by
+default. Setting PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 enables it. Experimental
+support comes with no guarantees: it may be broken, may require newer kernel
+driver versions, and may be removed.
+
 The following hardware is currently supported:
 
 +--------------------+---------------+-----------+--------+--------+
@@ -26,9 +31,11 @@ The following hardware is currently supported:
 +--------------------+---------------+-----------+--------+--------+
 | G31, G51, G52, G76 | Bifrost (v7)  | 3.1       | 3.1    | 1.3    |
 +--------------------+---------------+-----------+--------+--------+
-| G57                | Valhall (v9)  | 3.1       | 3.1    |        |
+| G57, G68           | Valhall (v9)  | 3.1       | 3.1    |        |
 +--------------------+---------------+-----------+--------+--------+
 | G310, G610         | Valhall (v10) | 3.1       | 3.1    | 1.4    |
++--------------------+---------------+-----------+--------+--------+
+| G615, G715         | Valhall (v11) | 3.1       | 3.1    | 1.4    |
 +--------------------+---------------+-----------+--------+--------+
 | G720               | 5th Gen (v12) | 3.1       | 3.1    | 1.4    |
 +--------------------+---------------+-----------+--------+--------+

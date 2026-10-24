@@ -417,9 +417,18 @@ private:
    {
       assert(inst->opcode == GEN_OP_MATH);
 
+      if (inst->math.func == GEN_MATH_FDIV || inst->math.func == GEN_MATH_TANH) {
+         /* Same value as GEN_MATH_TANH but TANH is only supported in GFX35+
+          * while FDIV is only supported up to GFX12.5.
+          * TAHN don't require src1 while FDIV requries.
+          */
+         if (devinfo->verx10 >= 350)
+            return false;
+         return true;
+      }
+
       switch (inst->math.func) {
       case GEN_MATH_POW:
-      case GEN_MATH_FDIV:
       case GEN_MATH_INT_DIV_BOTH:
       case GEN_MATH_INT_DIV_QUOTIENT:
       case GEN_MATH_INT_DIV_REMAINDER:
@@ -435,6 +444,8 @@ private:
       case GEN_MATH_COS:
       case GEN_MATH_RSQRTM:
          return false;
+      default:
+         UNREACHABLE("unhandles math function");
       }
 
       return true;
@@ -542,8 +553,8 @@ private:
                   "AccWrControl is not present on Gfx20+.");
       }
 
-      /* TODO: Consider Large GRF for certain Xe platforms that support it. */
-      const unsigned max_grf = devinfo->ver >= 20 ? 256 : 128;
+      /* DG2-Xe2: 256 (Large GRF), Xe3: 256 (VRT) */
+      const unsigned max_grf = devinfo->verx10 >= 125 ? 256 : 128;
 
       if (gen_inst_has_dst(inst->opcode)) {
          ERROR_IF(!inst->dst.indirect &&
@@ -1589,11 +1600,13 @@ private:
             const bool two_srcs =
                inst->math.func == GEN_MATH_INVM ||
                inst->math.func == GEN_MATH_POW ||
-               inst->math.func == GEN_MATH_FDIV;
+               (inst->math.func == GEN_MATH_FDIV && devinfo->verx10 < 350);
 
             ERROR_IF(devinfo->verx10 >= 125 &&
-                     (inst->math.func == GEN_MATH_POW ||
-                      inst->math.func == GEN_MATH_FDIV),
+                     inst->math.func == GEN_MATH_POW,
+                     "MATH POW and FDIV are not supported on Gfx12.5+.");
+            ERROR_IF(devinfo->verx10 >= 125 && devinfo->verx10 < 350 &&
+                     inst->math.func == GEN_MATH_FDIV,
                      "MATH POW and FDIV are not supported on Gfx12.5+.");
 
             if (ieee_macro && devinfo->verx10 >= 125) {
@@ -1896,9 +1909,32 @@ private:
                   "UGM 2D block messages require flat A64 addressing.");
          ERROR_IF(!lsc_data_size_is_2d_block(desc.data_size),
                   "UGM 2D block messages require d8, d16, d32, or d64 data size.");
+
+         if (desc.op == LSC_OP_STORE_2D_BLOCK) {
+            ERROR_IF(desc.transpose || desc.vnni,
+                     "Transpose and VNNI transform operations are not allowed for "
+                     "Block Store messages. Bspec 57329 (r75199).");
+         } else if (desc.transpose) {
+            if (devinfo->ver < 35) {
+               ERROR_IF(desc.data_size != LSC_DATA_SIZE_D32,
+                        "GFX20+: UGM 2D block load message only support D32 "
+                        "transpose. Bspec 63972 (r66758)");
+            } else {
+               ERROR_IF(desc.data_size != LSC_DATA_SIZE_D32 &&
+                        desc.data_size != LSC_DATA_SIZE_D64,
+                        "GFX35+: UGM 2D block load message only support D32 and D64 "
+                        "transpose. Bspec 63972 (r66758)");
+            }
+         }
       }
 
       /* TODO: Add TGM 2D block message restrictions. */
+   }
+
+   static void
+   sendg_descriptor_restrictions()
+   {
+      /* TODO: add sendg validations */
    }
 
    void
@@ -1906,6 +1942,11 @@ private:
    {
       if (!gen_inst_is_send(inst) || inst->send.desc_is_reg)
          return;
+
+      if (inst->opcode == GEN_OP_SENDG) {
+         sendg_descriptor_restrictions();
+         return;
+      }
 
       const uint32_t desc = inst->send.desc_imm;
 
@@ -2097,8 +2138,8 @@ private:
                ERROR_IF(inst->cmod != GEN_CONDITION_NONE,
                         "Scalar-register MOV with an immediate source cannot use a condition modifier.");
             }
-            ERROR_IF((inst->dst.subnr / 32) !=
-                     ((inst->dst.subnr + gen_type_size_bytes(inst->dst.type)) / 32),
+            ERROR_IF((inst->dst.subnr / 64) !=
+                     ((inst->dst.subnr + gen_type_size_bytes(inst->dst.type) - 1) / 64),
                      "Scalar-register destinations must not cross the lower/upper 8-dword boundary.");
             break;
          }

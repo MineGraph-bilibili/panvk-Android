@@ -108,7 +108,7 @@ prepare_driver_set(struct panvk_cmd_buffer *cmdbuf)
       return VK_SUCCESS;
 
    const struct panvk_shader_desc_info *cs_desc_info =
-      &panvk_shader_only_variant(cmdbuf->state.compute.shader)->desc_info;
+      &cmdbuf->state.compute.shader->desc_info;
    const struct panvk_descriptor_state *desc_state =
       &cmdbuf->state.compute.desc_state;
    struct panvk_shader_desc_state *cs_desc_state =
@@ -299,6 +299,7 @@ panvk_per_arch(cmd_dispatch_shader)(
       }
    }
 
+   panvk_per_arch(rp_trace)("DISPATCH indirect", indirect, 0, 0, 0);
    panvk_per_arch(kbase_mark_progress)(
       cmdbuf, PANVK_SUBQUEUE_COMPUTE,
       PANVK_KBASE_PROGRESS_COMPUTE_BEFORE_ITER);
@@ -354,12 +355,24 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
       panvk_shader_only_variant(cmdbuf->state.compute.shader);
    VkResult result;
 
+   panvk_per_arch(cmd_pstats_dispatch)(cmdbuf, cs, info);
+   panvk_per_arch(dispatch_stats_record)(cs->reads_images, cs->writes_memory);
+
+   /* A deferred compute wait on the fragment subqueue (see lazy_wait in
+    * panvk_vX_cmd_buffer.c) is needed before a shader that may read images
+    * or, unless D3D12 rules apply, write memory. */
+   if (cmdbuf->state.lazy_wait[PANVK_SUBQUEUE_COMPUTE].pending &&
+       (cs->reads_images ||
+        (cs->writes_memory && !panvk_per_arch(cmd_d3d12_semantics)(cmdbuf))))
+      panvk_per_arch(cmd_lazy_flush)(cmdbuf, PANVK_SUBQUEUE_COMPUTE,
+                                     PANVK_LAZY_VT_DISPATCH);
+
    /* If there's no compute shader, we can skip the dispatch. */
    if (!panvk_priv_mem_check_alloc(cs->spd))
       return;
 
    const struct panvk_shader_desc_info *cs_desc_info =
-      &panvk_shader_only_variant(cmdbuf->state.compute.shader)->desc_info;
+      &cmdbuf->state.compute.shader->desc_info;
    struct panvk_descriptor_state *desc_state =
       &cmdbuf->state.compute.desc_state;
    struct panvk_shader_desc_state *cs_desc_state =

@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#![allow(dead_code)]
+
 use std::ops::Range;
 
 pub trait BitViewable {

@@ -76,6 +76,12 @@ vk_image_init(struct vk_device *device,
    image->usage = vk_image_usage_flags(pCreateInfo);
    image->sharing_mode = pCreateInfo->sharingMode;
 
+   /* Since VK_KHR_maintenance11, it's possible to create a concurrent image
+    * with only one queue family and this image can be considered exclusive.
+    */
+   if (pCreateInfo->queueFamilyIndexCount == 1)
+      image->sharing_mode = VK_SHARING_MODE_EXCLUSIVE;
+
    if (image->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
       const VkImageStencilUsage2CreateInfoKHR *stencil_usage2_info =
          vk_find_struct_const(pCreateInfo->pNext,
@@ -574,19 +580,8 @@ vk_image_view_init(struct vk_device *device,
                                  VK_IMAGE_ASPECT_STENCIL_BIT))
          assert(image_view->format == image->format);
 
-      /* Yuzu/Eden's texture cache only sets VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT
-       * when it pre-declares more than one view format at image creation time.
-       * A runtime reinterpretation it did not foresee then creates views whose
-       * format differs from the image format without the mutable bit.  Release
-       * builds of upstream drivers never abort here (NDEBUG hides this assert)
-       * and simply consume the view format as given; tolerate the mismatch the
-       * same way instead of killing the process.
-       */
-      if (!(image->create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
-          image_view->format != image->format)
-         mesa_logd("vk_image_view_init: view format (%d) != image format (%d) "
-                   "without VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, tolerating",
-                   (int)image_view->format, (int)image->format);
+      if (!(image->create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT))
+         assert(image_view->format == image->format);
 
       /* Restrict the format to only the planes chosen.
        *

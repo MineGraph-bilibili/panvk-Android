@@ -52,7 +52,7 @@ push_node(uint32_t children[2], vk_aabb bounds[2])
    total_bounds.min = vec3(INFINITY);
    total_bounds.max = vec3(-INFINITY);
 
-   uint32_t dst_flags = VK_BVH_BOX_FLAG_ONLY_OPAQUE | VK_BVH_BOX_FLAG_NO_OPAQUE;
+   uint32_t dst_flags = 0xffffffff;
 
    for (uint i = 0; i < 2; ++i) {
       total_bounds.min = min(total_bounds.min, bounds[i].min);

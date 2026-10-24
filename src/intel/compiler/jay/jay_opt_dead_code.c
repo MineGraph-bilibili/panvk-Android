@@ -23,10 +23,9 @@ pass(jay_function *f)
             if (!BITSET_TEST_COUNT(live_set, dst, jay_num_values(I->dst)) &&
                 I->op != JAY_OPCODE_SEND) {
 
-               if (I->predication == JAY_PREDICATED_DEFAULT &&
-                   !jay_is_null(I->dst)) {
+               if (I->predication == 2 && !jay_is_null(I->dst)) {
                   jay_shrink_sources(I, I->num_srcs - 1);
-                  I->predication = JAY_PREDICATED;
+                  I->predication = 1;
                }
 
                I->dst = jay_null();
@@ -38,7 +37,8 @@ pass(jay_function *f)
                 I->op != JAY_OPCODE_SEND) {
 
                I->cond_flag = jay_null();
-               I->conditional_mod = 0;
+               I->conditional_mod = GEN_CONDITION_NONE;
+               I->zero_inactive = false;
             }
 
             bool no_dest = jay_is_null(I->dst) && jay_is_null(I->cond_flag);

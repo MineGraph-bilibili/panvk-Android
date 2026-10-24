@@ -42,6 +42,7 @@ pub enum NumericType {
 }
 
 /// Data type
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, DataType)]
 pub enum PartialDataType {
     None,
@@ -68,6 +69,7 @@ pub enum PartialDataType {
     U16,
     U32,
     U64,
+    X32,
     V2A16,
     V2F16,
     V2IN,
@@ -84,6 +86,7 @@ pub enum PartialDataType {
     VNI8,
     V3A16,
     V3F16,
+    V3I16,
     V3S16,
     V3U16,
     V2A32,
@@ -93,6 +96,7 @@ pub enum PartialDataType {
     V2U32,
     V4A16,
     V4F16,
+    V4I16,
     V4S16,
     V4U16,
     V3A32,
@@ -102,6 +106,7 @@ pub enum PartialDataType {
     V3U32,
     V4A32,
     V4F32,
+    V4I32,
     V4S32,
     V4U32,
     V2I64,
@@ -110,6 +115,7 @@ pub enum PartialDataType {
 impl PartialDataType {
     pub const DEFAULT: PartialDataType = PartialDataType::None;
 
+    #[allow(dead_code)]
     pub fn bits(&self) -> Option<NonZeroU8> {
         NonZeroU8::new(self.to_pieces().2)
     }
@@ -189,6 +195,7 @@ pub enum DataType {
     V4U8,
     V3A16,
     V3F16,
+    V3I16,
     V3S16,
     V3U16,
     V2A32,
@@ -198,6 +205,7 @@ pub enum DataType {
     V2U32,
     V4A16,
     V4F16,
+    V4I16,
     V4S16,
     V4U16,
     V3A32,
@@ -207,6 +215,7 @@ pub enum DataType {
     V3U32,
     V4A32,
     V4F32,
+    V4I32,
     V4S32,
     V4U32,
     V2I64,

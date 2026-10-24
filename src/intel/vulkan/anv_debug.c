@@ -265,8 +265,10 @@ anv_push_fault_addr_khr(void *_info, struct intel_pagefault_info *pagefault)
       anv_translate_address_info(pagefault, &el->faultAddressInfo);
       snprintf(el->description, sizeof(el->description),
                "GPU VM Fault - Page Address: 0x%016"PRIx64", "
-               "Page Size: 0x%04x, Access: %s, Type: %s, Level: %s",
+               "Page Size: 0x%04x, Description: %s (%s), "
+               "Type: %s, Level: %s",
                pagefault->address, pagefault->precision,
+               intel_pagefault_src_to_string(pagefault->src),
                intel_pagefault_access_to_string(pagefault->access),
                intel_pagefault_type_to_string(pagefault->type),
                intel_pagefault_level_to_string(pagefault->level));
@@ -434,11 +436,13 @@ anv_device_print_vm_faults(struct anv_device *device)
 
    for (unsigned i = 0; i < faults->size; ++i) {
       mesa_loge("[GPU-VM-FAULT] Page Address: 0x%016"PRIx64", "
-                "Page Size: 0x%04x, Access: %s, Type: %s, Level: %s",
-                 faults->items[i].address, faults->items[i].precision,
-                 intel_pagefault_access_to_string(faults->items[i].access),
-                 intel_pagefault_type_to_string(faults->items[i].type),
-                 intel_pagefault_level_to_string(faults->items[i].level));
+                "Page Size: 0x%04x, Description: %s (%s), "
+                "Type: %s, Level: %s",
+                faults->items[i].address, faults->items[i].precision,
+                intel_pagefault_src_to_string(faults->items[i].src),
+                intel_pagefault_access_to_string(faults->items[i].access),
+                intel_pagefault_type_to_string(faults->items[i].type),
+                intel_pagefault_level_to_string(faults->items[i].level));
    }
 
    free(faults);

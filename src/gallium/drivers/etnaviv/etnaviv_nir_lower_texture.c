@@ -320,6 +320,43 @@ legalize_txf_lod(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 }
 
 static bool
+lower_txf_ms_dynamic(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
+{
+   if (tex->op != nir_texop_txf_ms)
+      return false;
+
+   int ms_index = nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
+   assert(ms_index >= 0);
+
+   if (nir_src_is_const(tex->src[ms_index].src))
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   nir_def *index = tex->src[ms_index].src.ssa;
+   nir_def *fetches[ETNA_MAX_SAMPLES];
+
+   for (unsigned s = 0; s < ARRAY_SIZE(fetches); s++) {
+      nir_def *sample = nir_imm_int(b, s);
+      nir_tex_instr *fetch =
+         nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
+
+      nir_builder_instr_insert(b, &fetch->instr);
+      nir_src_rewrite(&fetch->src[ms_index].src, sample);
+
+      fetches[s] = &fetch->def;
+   }
+
+   nir_def_rewrite_uses(&tex->def,
+                        nir_select_from_ssa_def_array(b, fetches,
+                                                      ARRAY_SIZE(fetches),
+                                                      index));
+   nir_instr_remove(&tex->instr);
+
+   return true;
+}
+
+static bool
 legalize_txd_derivatives(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 {
    if (tex->op != nir_texop_txd)
@@ -456,7 +493,15 @@ etna_nir_lower_texture(nir_shader *s, struct etna_shader_key *key, const struct 
       .lower_txs_lod = true,
       .lower_invalid_implicit_lod = true,
       .lower_offset_filter = lower_offset_filter,
+      .swizzle_result = key->tex_is_128bit,
    };
+
+   u_foreach_bit(i, key->tex_is_128bit) {
+      lower_tex_options.swizzles[i][0] = key->tex_swizzle[i].swizzle_r;
+      lower_tex_options.swizzles[i][1] = key->tex_swizzle[i].swizzle_g;
+      lower_tex_options.swizzles[i][2] = key->tex_swizzle[i].swizzle_b;
+      lower_tex_options.swizzles[i][3] = key->tex_swizzle[i].swizzle_a;
+   }
 
    NIR_PASS(progress, s, nir_lower_tex, &lower_tex_options);
 
@@ -482,6 +527,9 @@ etna_nir_lower_texture(nir_shader *s, struct etna_shader_key *key, const struct 
       nir_metadata_control_flow, NULL);
 
    NIR_PASS(progress, s, nir_shader_tex_pass, legalize_txf_lod,
+      nir_metadata_control_flow, NULL);
+
+   NIR_PASS(progress, s, nir_shader_tex_pass, lower_txf_ms_dynamic,
       nir_metadata_control_flow, NULL);
 
    NIR_PASS(progress, s, nir_shader_tex_pass, legalize_txd_derivatives,

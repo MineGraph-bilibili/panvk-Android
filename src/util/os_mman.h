@@ -42,10 +42,6 @@
 
 #if DETECT_OS_POSIX
 #  include <sys/mman.h>
-#elif DETECT_OS_WINDOWS
-/* Windows host builds only build the Panfrost/PanVK build-time tools, which
- * never call the mmap family. <sys/mman.h> is provided by the build shim. */
-#  include <sys/mman.h>
 #else
 #  error Unsupported OS
 #endif

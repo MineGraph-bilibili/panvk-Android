@@ -1,5 +1,6 @@
 /*
  * Copyright © 2026 Amazon.com, Inc. or its affiliates.
+ * Copyright © 2026 NXP
  *
  * SPDX-License-Identifier: MIT
  */
@@ -7,17 +8,7 @@
 #include "pan_trace.h"
 
 #include "util/os_misc.h"
-
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include <unwind.h>
-#include <dlfcn.h>
-
-struct android_backtrace_state {
-    void** current;
-    void** end;
-};
+#include "util/u_call_once.h"
 
 #define PAN_TRACE_ENV_VAR "PAN_CPU_TRACE"
 
@@ -81,8 +72,8 @@ is_separator(char c)
    return c == ',' || c == ';' || c == ' ';
 }
 
-void
-pan_trace_init(void)
+static void
+pan_trace_enable_categories(void)
 {
    const char *list = os_get_option(PAN_TRACE_ENV_VAR);
    const char *str = NULL;
@@ -112,53 +103,10 @@ pan_trace_init(void)
    pan_trace_categories = categories;
 }
 
-static _Unwind_Reason_Code android_unwind_callback(struct _Unwind_Context* context, void* arg) {
-    struct android_backtrace_state* state = (struct android_backtrace_state*)arg;
-    uintptr_t pc = _Unwind_GetIP(context);
-    if (pc) {
-        if (state->current == state->end) {
-            return _URC_END_OF_STACK;
-        } else {
-            *state->current++ = (void*)pc;
-        }
-    }
-    return _URC_NO_REASON;
-}
+void
+pan_trace_init(void)
+{
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
 
-void print_stack_trace(void) {
-    void* buffer[32];
-    struct android_backtrace_state state = {buffer, buffer + 32};
-    _Unwind_Backtrace(android_unwind_callback, &state);
-
-    int count = state.current - buffer;
-    fprintf(stderr, "--- Backtrace (%d frames) ---\n", count);
-    bool prev_is_panvk = false;
-
-    for (int i = 0; i < count; i++) {
-        void* addr = buffer[i];
-        const char* symbol = "";
-        Dl_info info;
-        if (dladdr(addr, &info) && info.dli_sname) {
-            symbol = info.dli_sname;
-        }
-        int64_t fbase = (int64_t) info.dli_fbase;
-        int64_t faddr = (int64_t) addr;
-        bool is_panvk = strstr(info.dli_fname, "vulkan_panfrost");
-        if (!is_panvk) {
-            if (prev_is_panvk) fprintf(stderr, "\n");
-            fprintf(stderr, "  #%02d pc %p  %s (%s:%p @ %lx)\n",
-                     i,
-                     addr,
-                     info.dli_fname ? info.dli_fname : "unknown",
-                     symbol[0] ? symbol : "unknown symbol",
-                     info.dli_fbase,
-                     faddr - fbase);
-        } else {
-            if (!prev_is_panvk) {
-                fprintf(stderr, "  panvk: ");
-            }
-            fprintf(stderr, "%lx ", faddr - fbase);
-        }
-        prev_is_panvk = is_panvk;
-    }
+   util_call_once(&once, pan_trace_enable_categories);
 }

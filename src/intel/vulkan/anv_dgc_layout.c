@@ -394,7 +394,7 @@ anv_dgc_fill_gfx_state(struct anv_dgc_gfx_state *state,
 
             switch (range->set) {
             case ANV_DESCRIPTOR_SET_DESCRIPTORS:
-               if (bind_map->layout_type == ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_BUFFER) {
+               if (bind_map->binding_mode == ANV_SHADER_BINDING_MODE_BUFFER) {
                   state->push_constants.stages[gen_stage].addresses[i] =
                      anv_cmd_buffer_descriptor_buffer_address(
                         cmd_buffer,

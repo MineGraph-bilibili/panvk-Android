@@ -1783,6 +1783,28 @@
     <field name="MI Command Opcode" dword="0" bits="28:23" type="uint" default="5" />
     <field name="Command Type" dword="0" bits="31:29" type="uint" default="0" />
   </instruction>
+  <instruction name="MI_CONDITIONAL_BATCH_BUFFER_END" bias="2" length="4">
+    <field name="DWord Length" dword="0" bits="7:0" type="uint" default="2" />
+    <field name="Compare Operation" dword="0" bits="14:12" type="uint">
+      <value name="MAD Greater Than IDD" value="0" />
+      <value name="MAD Greater Than Or Equal IDD" value="1" />
+      <value name="MAD Less Than IDD" value="2" />
+      <value name="MAD Less Than Or Equal IDD" value="3" />
+      <value name="MAD Equal IDD" value="4" />
+      <value name="MAD Not Equal IDD" value="5" />
+    </field>
+    <field name="End Current Batch Buffer Level" dword="0" bits="18:18" type="uint" />
+    <field name="Compare Mask Mode" dword="0" bits="19:19" type="uint">
+      <value name="Compare Mask Mode Disabled" value="0" />
+      <value name="Compare Mask Mode Enabled" value="1" />
+    </field>
+    <field name="Compare Semaphore" dword="0" bits="21:21" type="uint" default="0" />
+    <field name="Use Global GTT" dword="0" bits="22:22" type="bool" />
+    <field name="MI Command Opcode" dword="0" bits="28:23" type="uint" default="54" />
+    <field name="Command Type" dword="0" bits="31:29" type="uint" default="0" />
+    <field name="Compare Data Dword" dword="1" bits="31:0" type="uint" />
+    <field name="Compare Address" dword="2" bits="63:3" type="address" />
+  </instruction>
   <instruction name="MI_FORCE_WAKEUP" bias="2" length="2">
     <field name="DWord Length" dword="0" bits="7:0" type="uint" default="0" />
     <field name="MI Command Opcode" dword="0" bits="28:23" type="uint" default="29" />

@@ -28,6 +28,8 @@ struct ac_rtld_options {
    bool halt_at_entry : 1;
 
    bool waitcnt_wa : 1;
+
+   bool exact_float_mode : 1;
 };
 
 /* Lightweight wrapper around underlying ELF objects. */

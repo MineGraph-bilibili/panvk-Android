@@ -23,6 +23,10 @@ struct panvk_priv_bo {
       uint64_t dev;
       void *host;
    } addr;
+   /* High-water mark of CPU-written bytes in this BO since it was last
+    * recycled.  Used to flush only the populated prefix instead of the whole
+    * BO on command buffer end. */
+   size_t flush_end;
 };
 
 VkResult panvk_priv_bo_create(struct panvk_device *dev, uint64_t size,

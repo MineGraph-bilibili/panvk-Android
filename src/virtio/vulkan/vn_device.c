@@ -12,7 +12,7 @@
 
 #include "util/disk_cache.h"
 #include "util/hex.h"
-#include "venus-protocol/vn_protocol_driver_device.h"
+#include "vn_protocol_driver_device.h"
 
 #include "vn_android.h"
 #include "vn_instance.h"
@@ -111,6 +111,10 @@ vn_device_init_queues(struct vn_device *dev,
                       const VkDeviceCreateInfo *create_info)
 {
    const VkAllocationCallbacks *alloc = &dev->base.vk.alloc;
+
+   /* allowed in maintenance9 */
+   if (!create_info->queueCreateInfoCount)
+      return VK_SUCCESS;
 
    uint32_t count = 0;
    for (uint32_t i = 0; i < create_info->queueCreateInfoCount; i++)

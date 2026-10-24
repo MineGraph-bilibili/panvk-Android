@@ -45,6 +45,7 @@
 #include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
+#include "util/u_sample_positions.h"
 #include "util/u_upload_mgr.h"
 
 static void
@@ -76,6 +77,16 @@ etna_set_sample_mask(struct pipe_context *pctx, unsigned sample_mask)
    struct etna_context *ctx = etna_context(pctx);
 
    ctx->sample_mask = sample_mask;
+   ctx->dirty |= ETNA_DIRTY_SAMPLE_MASK;
+}
+
+static void
+etna_set_sample_coverage(struct pipe_context *pctx, float value, bool invert)
+{
+   struct etna_context *ctx = etna_context(pctx);
+
+   ctx->sample_coverage = value;
+   ctx->sample_coverage_invert = invert;
    ctx->dirty |= ETNA_DIRTY_SAMPLE_MASK;
 }
 
@@ -245,7 +256,7 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
       struct etna_resource_level *level = &res->levels[surf->level];
 
       bool color_supertiled = (res->layout & ETNA_LAYOUT_BIT_SUPER) != 0;
-      uint32_t fmt = translate_pe_format(surf->format);
+      uint32_t fmt = translate_pe_format(surf->format, screen);
       bool rt_use_ts = etna_framebuffer_rt_use_ts(ctx, i);
 
       /* Resolve TS if this target cannot use it */
@@ -717,6 +728,7 @@ etna_vertex_elements_state_create(struct pipe_context *pctx,
 
       elements = &dummy_element;
       num_elements = 1;
+      cs->dummy_element = true;
    }
 
    cs->num_elements = num_elements;
@@ -771,8 +783,13 @@ etna_vertex_elements_state_create(struct pipe_context *pctx,
             COND(nonconsecutive, VIVS_NFE_GENERIC_ATTRIB_CONFIG1_NONCONSECUTIVE) |
             VIVS_NFE_GENERIC_ATTRIB_CONFIG1_END(end_offset - start_offset);
       }
-      cs->FE_VERTEX_STREAM_CONTROL[buffer_idx] =
-            FE_VERTEX_STREAM_CONTROL_VERTEX_STRIDE(elements[idx].src_stride);
+
+      if (screen->info->halti >= 2)
+         cs->FE_VERTEX_STREAM_CONTROL[buffer_idx] =
+               VIVS_NFE_VERTEX_STREAMS_CONTROL_VERTEX_STRIDE(elements[idx].src_stride);
+      else
+         cs->FE_VERTEX_STREAM_CONTROL[buffer_idx] =
+               FE_VERTEX_STREAM_CONTROL_VERTEX_STRIDE(elements[idx].src_stride);
 
       if (util_format_is_pure_integer(elements[idx].src_format))
          cs->NFE_GENERIC_ATTRIB_SCALE[idx] = 1;
@@ -1100,24 +1117,6 @@ etna_update_zsa(struct etna_context *ctx)
    return true;
 }
 
-static bool
-etna_record_flush_resources(struct etna_context *ctx)
-{
-   struct pipe_framebuffer_state *fb = &ctx->framebuffer_s.base;
-
-   for (unsigned i = 0; i < fb->nr_cbufs; i++) {
-      if (!fb->cbufs[i].texture)
-         continue;
-
-      struct etna_resource *rsc = etna_resource(fb->cbufs[i].texture);
-
-      if (rsc->shared && !rsc->explicit_flush)
-         etna_context_add_flush_resource(ctx, &rsc->base);
-   }
-
-   return true;
-}
-
 static int
 compare_xfb_outputs(const void *a, const void *b) {
    const nir_xfb_output_info *out_a = a;
@@ -1236,8 +1235,6 @@ static const struct etna_state_updater etna_state_updates[] = {
                        ETNA_DIRTY_FRAMEBUFFER,
    },
    {
-      etna_record_flush_resources, ETNA_DIRTY_FRAMEBUFFER,
-   }, {
       etna_update_hwxfb, ETNA_DIRTY_STREAMOUT,
    }
 };
@@ -1256,10 +1253,15 @@ etna_state_update(struct etna_context *ctx)
 void
 etna_state_init(struct pipe_context *pctx)
 {
+   struct etna_screen *screen = etna_context(pctx)->screen;
+
    pctx->set_blend_color = etna_set_blend_color;
    pctx->set_stencil_ref = etna_set_stencil_ref;
    pctx->set_clip_state = etna_set_clip_state;
    pctx->set_sample_mask = etna_set_sample_mask;
+   pctx->get_sample_position = u_default_get_sample_position;
+   if (VIV_FEATURE(screen, ETNA_FEATURE_MSAA_FRAGMENT_OPERATION))
+      pctx->set_sample_coverage = etna_set_sample_coverage;
    pctx->set_constant_buffer = etna_set_constant_buffer;
    pctx->set_framebuffer_state = etna_set_framebuffer_state;
    pctx->set_polygon_stipple = etna_set_polygon_stipple;

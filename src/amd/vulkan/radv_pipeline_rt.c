@@ -472,13 +472,13 @@ radv_rt_nir_to_asm(const struct radv_compiler_info *compiler_info, struct radv_r
       radv_optimize_nir(temp_stage.nir, temp_stage.key.optimisations_disabled);
       radv_postprocess_nir(compiler_info, NULL, &temp_stage);
 
-      NIR_PASS(_, stage->nir, radv_nir_lower_call_abi, stage->info.wave_size);
-      NIR_PASS(_, stage->nir, nir_lower_global_vars_to_local);
-      NIR_PASS(_, stage->nir, nir_lower_vars_to_ssa);
-      NIR_PASS(_, stage->nir, nir_opt_copy_prop);
-      NIR_PASS(_, stage->nir, nir_opt_remove_phis);
-      if (!stage->key.optimisations_disabled && !radv_is_traversal_shader(stage->nir))
-         NIR_PASS(_, stage->nir, nir_minimize_call_live_states);
+      NIR_PASS(_, temp_stage.nir, radv_nir_lower_call_abi, stage->info.wave_size);
+      NIR_PASS(_, temp_stage.nir, nir_lower_global_vars_to_local);
+      NIR_PASS(_, temp_stage.nir, nir_lower_vars_to_ssa);
+      NIR_PASS(_, temp_stage.nir, nir_opt_copy_prop);
+      NIR_PASS(_, temp_stage.nir, nir_opt_remove_phis);
+      if (!stage->key.optimisations_disabled && !radv_is_traversal_shader(temp_stage.nir))
+         NIR_PASS(_, temp_stage.nir, nir_minimize_call_live_states);
 
       stage->info.nir_shared_size = MAX2(stage->info.nir_shared_size, temp_stage.info.nir_shared_size);
       if (stage_info && mode == RADV_RT_LOWERING_MODE_CPS)
@@ -766,6 +766,10 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
          ++ahit_isec_stage_count;
    }
    inline_any_hit_shaders &= ahit_isec_stage_count < 20;
+   /* TODO: CPS mode could compile any-hit/isec shaders separately, but doing so would require moving the payload
+    * from scratch to registers and back.
+    */
+   inline_any_hit_shaders |= recursive_lowering_mode == RADV_RT_LOWERING_MODE_CPS;
    /* Monolithic pipelines always inline any-hit/isec shaders. */
    inline_any_hit_shaders |= raygen_lowering_mode == RADV_RT_LOWERING_MODE_MONOLITHIC && !raygen_imported;
 
@@ -1031,6 +1035,7 @@ combine_config(struct ac_shader_config *config, const struct ac_shader_config *o
    config->spilled_vgprs = MAX2(config->spilled_vgprs, other->spilled_vgprs);
    config->lds_size = MAX2(config->lds_size, other->lds_size);
    config->scratch_bytes_per_wave = MAX2(config->scratch_bytes_per_wave, other->scratch_bytes_per_wave);
+   config->mem_ordered |= other->mem_ordered;
 
    assert(config->float_mode == other->float_mode);
 }
@@ -1042,6 +1047,9 @@ postprocess_rt_config(struct ac_shader_config *config, const struct radeon_info 
       (config->rsrc1 & C_00B848_VGPRS) | S_00B848_VGPRS((config->num_vgprs - 1) / (wave_size == 32 ? 8 : 4));
    if (info->gfx_level < GFX10)
       config->rsrc1 = (config->rsrc1 & C_00B848_SGPRS) | S_00B848_SGPRS((config->num_sgprs - 1) / 8);
+
+   if (info->gfx_level >= GFX10 && info->gfx_level < GFX12)
+      config->rsrc1 = (config->rsrc1 & C_00B848_MEM_ORDERED) | S_00B848_MEM_ORDERED(config->mem_ordered);
 
    unsigned lds_alloc = ac_shader_encode_lds_size(config->lds_size, info->gfx_level, MESA_SHADER_COMPUTE);
    config->rsrc2 = (config->rsrc2 & C_00B84C_LDS_SIZE) | S_00B84C_LDS_SIZE(lds_alloc);

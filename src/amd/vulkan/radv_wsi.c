@@ -52,7 +52,7 @@ radv_wsi_get_prime_blit_queue(VkDevice _device)
       return &device->private_sdma_queue->vk;
    }
 
-   if (pdev->info.gfx_level >= GFX9 && !(instance->debug_flags & RADV_DEBUG_NO_DMA_BLIT)) {
+   if (pdev->info.gfx_level >= GFX9 && !RADV_DEBUG(instance, NO_DMA_BLIT)) {
 
       uint32_t queue_family_index = pdev->num_queues;
       for (uint32_t i = 0; i < pdev->num_queues; i++) {
@@ -97,11 +97,11 @@ radv_init_wsi(struct radv_physical_device *pdev)
 
    VkResult result =
       wsi_device_init(&pdev->wsi_device, radv_physical_device_to_handle(pdev), radv_wsi_proc_addr, &instance->vk.alloc,
-                      pdev->wsi_master_fd, &instance->drirc.options, &(struct wsi_device_options){.sw_device = false});
+                      pdev->wsi_master_fd, &pdev->drirc.options, &(struct wsi_device_options){.sw_device = false});
    if (result != VK_SUCCESS)
       return result;
 
-   pdev->wsi_device.supports_modifiers = pdev->info.gfx_level >= GFX9;
+   pdev->wsi_device.supports_modifiers = true;
    pdev->wsi_device.set_memory_ownership = radv_wsi_set_memory_ownership;
    pdev->wsi_device.get_blit_queue = radv_wsi_get_prime_blit_queue;
 
@@ -120,6 +120,9 @@ void
 radv_finish_wsi(struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   if (!pdev->vk.wsi_device)
+      return;
 
    pdev->vk.wsi_device = NULL;
    wsi_device_finish(&pdev->wsi_device, &instance->vk.alloc);

@@ -370,9 +370,7 @@ vlVaDeriveImage(VADriverContextP ctx, VASurfaceID surface, VAImage *image)
    img_buf->num_elements = 1;
 
    pipe_resource_reference(&img_buf->derived_surface.resource, buf_resources[0]);
-
-   if (surf->ctx)
-      img_buf->derived_surface.entrypoint = surf->ctx->templat.entrypoint;
+   img_buf->derived_surface.entrypoint = surf->entrypoint;
 
    img->buf = handle_table_add(VL_VA_DRIVER(ctx)->htab, img_buf);
    mtx_unlock(&drv->mutex);
@@ -674,6 +672,8 @@ vlVaPutImage(VADriverContextP ctx, VASurfaceID surface, VAImageID image,
       return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
    }
 
+   surf->entrypoint = PIPE_VIDEO_ENTRYPOINT_PROCESSING;
+
    if (format != surf->buffer->buffer_format ||
        dest_width != src_width || dest_height != src_height ||
        src_x != 0 || dest_x != 0 || src_y != 0 || dest_y != 0) {
@@ -699,10 +699,9 @@ vlVaPutImage(VADriverContextP ctx, VASurfaceID surface, VAImageID image,
          mtx_unlock(&drv->mutex);
          return ret;
       }
-      struct pipe_fence_handle *fence = NULL;
       struct pipe_vpp_desc param = {
          .base = {
-            .out_fence = &fence,
+            .out_fence = &surf->fence,
             .out_pipe_fence = &surf->pipe_fence,
          },
          .src_region = {
@@ -725,10 +724,8 @@ vlVaPutImage(VADriverContextP ctx, VASurfaceID surface, VAImageID image,
          .out_matrix_coefficients = PIPE_VIDEO_VPP_MCF_BT709,
       };
       ret = vlVaPostProc(drv, NULL, tmp_surf->buffer, surf->buffer, &param);
-      if (fence) {
-         drv->proc->fence_wait(drv->proc, fence, UINT64_MAX);
-         drv->proc->destroy_fence(drv->proc, fence);
-      }
+      if (drv->proc && drv->proc->destroy_fence)
+         pipe_video_codec_reference(&surf->codec, drv->proc);
       vlVaDestroySurface(drv, tmp_surf);
       mtx_unlock(&drv->mutex);
       return ret;

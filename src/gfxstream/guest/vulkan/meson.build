@@ -24,6 +24,10 @@ if with_platform_wayland
     gfxstream_vk_wsi_args += '-DGFXSTREAM_VK_WAYLAND'
 endif
 
+if with_platform_macos
+    gfxstream_vk_wsi_args += '-DGFXSTREAM_VK_METAL'
+endif
+
 files_vulkan_gfxstream = files_lib_vulkan_gfxstream + files_lib_vulkan_enc
 files_vulkan_gfxstream += gfxstream_vk_entrypoints
 
@@ -31,12 +35,20 @@ if with_platform_android or with_gfxstream_emulated_android
     files_vulkan_gfxstream += files_lib_vulkan_enc_android
 endif
 
+# The entrypoint table leaves the entrypoints this driver does not implement
+# undefined. ELF resolves those at load time; Mach-O rejects them at link time.
+# weak_import does not help - it wants a symbol missing from a dylib, not one
+# missing everywhere - so defer the lookup instead.
+gfxstream_vk_link_args = []
+if host_machine.system() == 'darwin'
+  gfxstream_vk_link_args += '-Wl,-undefined,dynamic_lookup'
+endif
+
 lib_vulkan_gfxstream = shared_library(
     'vulkan_gfxstream',
     files_vulkan_gfxstream,
     cpp_args: gfxstream_guest_args + gfxstream_vk_wsi_args,
     include_directories: [
-        inc_vulkan_headers,
         inc_guest_iostream,
         inc_vulkan_enc,
         inc_goldfish_address_space,
@@ -52,7 +64,7 @@ lib_vulkan_gfxstream = shared_library(
         libconnection_manager,
         libaemu,
     ],
-    link_args: [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections],
+    link_args: [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections] + gfxstream_vk_link_args,
     link_depends: vulkan_icd_link_depends,
     dependencies: gfxstream_deps,
     install: true,

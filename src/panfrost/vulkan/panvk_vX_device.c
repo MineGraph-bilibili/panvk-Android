@@ -20,6 +20,9 @@
 #include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_device.h"
+#if PAN_ARCH >= 9
+#include "panvk_gpu_prerast.h"
+#endif
 #include "panvk_cmd_draw.h"
 #include "panvk_entrypoints.h"
 #include "panvk_instance.h"
@@ -34,15 +37,11 @@
 #include "genxml/decode.h"
 #include "genxml/gen_macros.h"
 
-#include <errno.h>
-#include <string.h>
-
 #ifdef HAVE_PAN_KMOD_KBASE
 #include <fcntl.h>
 #endif
 
 #include "kmod/pan_kmod.h"
-#include "util/log.h"
 #include "util/os_file.h"
 #include "util/u_printf.h"
 #include "pan_props.h"
@@ -80,7 +79,7 @@ panvk_device_init_mempools(struct panvk_device *dev)
    struct panvk_pool_properties rw_pool_props = {
       .create_flags =
          panvk_device_adjust_bo_flags(dev, PAN_KMOD_BO_FLAG_WB_MMAP),
-      .slab_size = 256 * 1024,
+      .slab_size = 16 * 1024,
       .label = "Device RW cached memory pool",
       .owns_bos = false,
       .needs_locking = true,
@@ -92,7 +91,7 @@ panvk_device_init_mempools(struct panvk_device *dev)
    struct panvk_pool_properties rw_nc_pool_props = {
       .create_flags =
          panvk_device_adjust_bo_flags(dev, PAN_KMOD_BO_FLAG_GPU_UNCACHED),
-      .slab_size = 256 * 1024,
+      .slab_size = 16 * 1024,
       .label = "Device RW uncached memory pool",
       .owns_bos = false,
       .needs_locking = true,
@@ -104,7 +103,7 @@ panvk_device_init_mempools(struct panvk_device *dev)
    struct panvk_pool_properties exec_pool_props = {
       .create_flags = panvk_device_adjust_bo_flags(
          dev, PAN_KMOD_BO_FLAG_EXECUTABLE | PAN_KMOD_BO_FLAG_WB_MMAP),
-      .slab_size = 256 * 1024,
+      .slab_size = 16 * 1024,
       .label = "Device executable memory pool (shaders)",
       .owns_bos = false,
       .needs_locking = true,
@@ -121,6 +120,37 @@ panvk_device_cleanup_mempools(struct panvk_device *dev)
    panvk_pool_cleanup(&dev->mempools.rw_nc);
    panvk_pool_cleanup(&dev->mempools.exec);
 }
+
+static void
+panvk_device_cleanup_tls(struct panvk_device *dev)
+{
+   util_dynarray_foreach(&dev->tls.bos, struct panvk_priv_bo *, bo)
+      panvk_priv_bo_unref(*bo);
+   util_dynarray_fini(&dev->tls.bos);
+   simple_mtx_destroy(&dev->tls.lock);
+}
+
+#if PAN_ARCH >= 9
+/* Commit the gpu_prerast arenas at creation.  On MediaTek kbase (CSF 1.21),
+ * GPU-fault growth loses the first gpu_prerast draw's output: PanProbe
+ * gs_viewport_depth case A drew nothing on every run; without alloc-on-fault,
+ * 6/6 runs pass.
+ * ponytail: commits 160 MiB per VkDevice enabling GS/tess/XFB features;
+ * upgrade path = KBASE_IOCTL_MEM_COMMIT on first gpu_prerast use. */
+static struct panvk_priv_mem
+alloc_gpu_prerast_arena(struct panvk_device *dev, uint64_t size)
+{
+   uint32_t flags =
+      panvk_device_adjust_bo_flags(dev, PAN_KMOD_BO_FLAG_WB_MMAP);
+   struct panvk_priv_bo *bo;
+
+   if (panvk_priv_bo_create(dev, size, flags, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE,
+                            &bo) != VK_SUCCESS)
+      return (struct panvk_priv_mem){0};
+
+   return (struct panvk_priv_mem){.bo = (uintptr_t)bo};
+}
+#endif
 
 static VkResult
 panvk_meta_cmd_bind_map_buffer(struct vk_command_buffer *cmd,
@@ -453,12 +483,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
    result = vk_device_init(&device->vk, &physical_device->vk, &dispatch_table,
                            pCreateInfo, pAllocator);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: vk_device_init failed: %s (%d)",
-                vk_Result_to_str(result), (int)result);
+   if (result != VK_SUCCESS)
       goto err_free_dev;
-   }
 
    /* Must be done after vk_device_init() because this function memset(0) the
     * whole struct.
@@ -468,21 +494,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    device->vk.shader_ops = &panvk_per_arch(device_shader_ops);
    device->vk.check_status = panvk_device_check_status;
    device->vk.get_timestamp = panvk_device_get_timestamp;
-#ifdef HAVE_PAN_KMOD_KBASE
-   if (physical_device->kbase_node_path[0]) {
-      /* kbase syncs are kbase_cpu_sync (payload = GPU seqno targets), not DRM
-       * syncobjs: vk_drm_syncobj_copy_payloads() asserts in to_drm_syncobj()
-       * when the Android WSI present path calls
-       * vk_common_QueueSignalReleaseImageANDROID (Eden SIGABRT at
-       * vk_drm_syncobj.c:43).  Leave copy_sync_payloads NULL so the ANB
-       * release path falls back to a plain QueueSubmit2; the signal payload
-       * then materializes into a real sync_file on export
-       * (kbase_export_sync_targets -> kbase_kmod_csf_export_sync_file). */
-   } else
-#endif
-   {
-      device->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
-   }
+   device->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
 
    device->kmod.allocator = (struct pan_kmod_allocator){
       .zalloc = panvk_kmod_zalloc,
@@ -503,16 +515,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
          device->kmod.dev = pan_kmod_dev_create_with_driver(
             kbase_fd, physical_device->kmod.dev->flags, "kbase", NULL,
             &device->kmod.allocator);
-         if (!device->kmod.dev) {
+         if (!device->kmod.dev)
             close(kbase_fd);
-            /* PANVK_DBG: temporary diagnostics, remove before release */
-            mesa_loge("panvk: create_device: kbase context create failed "
-                      "(fd handshake/set_flags/mmap/gpuprops)");
-         }
-      } else {
-         /* PANVK_DBG: temporary diagnostics, remove before release */
-         mesa_loge("panvk: create_device: failed to open kbase node '%s': %s",
-                   physical_device->kbase_node_path, strerror(errno));
       }
    } else
 #endif
@@ -523,8 +527,6 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    }
 
    if (!device->kmod.dev) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: kmod device create failed");
       result = panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
                             "cannot create device");
       goto err_finish_dev;
@@ -555,11 +557,6 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
                          user_va_start, user_va_end - user_va_start);
 
    if (!device->kmod.vm) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: pan_kmod_vm_create failed "
-               "[%llx, %llx)",
-               (unsigned long long)user_va_start,
-               (unsigned long long)user_va_end);
       result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto err_destroy_kdev;
    }
@@ -608,8 +605,6 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
                          user_va_end - low_va_end);
       device->as.priv_heap = malloc(sizeof(*device->as.priv_heap));
       if (device->as.priv_heap == NULL) {
-         /* PANVK_DBG: temporary diagnostics, remove before release */
-         mesa_loge("panvk: create_device: priv_heap alloc failed");
          result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
          goto err_free_heaps;
       }
@@ -619,6 +614,56 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    }
 
    panvk_device_init_mempools(device);
+   simple_mtx_init(&device->tls.lock, mtx_plain);
+   util_dynarray_init(&device->tls.bos, NULL);
+
+#if PAN_ARCH >= 9
+   if (PANVK_DEBUG(GPU_PRERAST) || device->vk.enabled_features.fillModeNonSolid ||
+       device->vk.enabled_features.geometryShader ||
+       device->vk.enabled_features.transformFeedback ||
+       device->vk.enabled_features.shaderOutputViewportIndex ||
+       device->vk.enabled_features.vertexPipelineStoresAndAtomics) {
+      device->gpu_prerast_arena =
+         alloc_gpu_prerast_arena(device, PANVK_GPU_PRERAST_ARENA_SIZE);
+      if (!panvk_priv_mem_check_alloc(device->gpu_prerast_arena)) {
+         result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         goto err_free_priv_bos;
+      }
+      panvk_priv_mem_write(device->gpu_prerast_arena, 0,
+                           struct panvk_gpu_prerast_arena, arena) {
+         memset(arena, 0, sizeof(*arena));
+      }
+   }
+   if (device->vk.enabled_features.tessellationShader) {
+      device->gpu_prerast_tess_arena =
+         alloc_gpu_prerast_arena(device, PANVK_GPU_PRERAST_TESS_ARENA_SIZE);
+      if (!panvk_priv_mem_check_alloc(device->gpu_prerast_tess_arena)) {
+         result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         goto err_free_priv_bos;
+      }
+      panvk_priv_mem_write(device->gpu_prerast_tess_arena, 0,
+                           struct panvk_gpu_prerast_arena, arena) {
+         memset(arena, 0, sizeof(*arena));
+      }
+   }
+   if (panvk_priv_mem_check_alloc(device->gpu_prerast_arena) ||
+       panvk_priv_mem_check_alloc(device->gpu_prerast_tess_arena)) {
+      result = panvk_priv_bo_create(
+         device, sizeof(struct panvk_gpu_prerast_syncs),
+         device->kmod.dev->props.supported_bo_flags &
+            PAN_KMOD_BO_FLAG_CSF_EVENT,
+         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->gpu_prerast_syncs);
+      if (result != VK_SUCCESS)
+         goto err_free_priv_bos;
+
+      struct panvk_gpu_prerast_syncs *syncs =
+         device->gpu_prerast_syncs->addr.host;
+      *syncs = (struct panvk_gpu_prerast_syncs){
+         .arena = {1},
+         .tess_arena = {1},
+      };
+   }
+#endif
 
 #if PAN_ARCH >= 10
    /* The only reason this is a heap allocation is that PANVK_SUBQUEUE_COUNT
@@ -627,8 +672,6 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
       vk_zalloc(&device->vk.alloc, PANVK_SUBQUEUE_COUNT * sizeof(uint32_t),
                 alignof(uint32_t), VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!device->dump_region_size) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: dump_region_size alloc failed");
       result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto err_free_priv_bos;
    }
@@ -641,6 +684,15 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->tiler_heap);
    if (result != VK_SUCCESS)
       goto err_free_priv_bos;
+
+#if PAN_ARCH == 9
+   result = panvk_priv_bo_create(
+      device, 128 * 1024 * 1024,
+      PAN_KMOD_BO_FLAG_NO_MMAP | PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT,
+      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->tiler_heap2);
+   if (result != VK_SUCCESS)
+      goto err_free_priv_bos;
+#endif
 
    result = panvk_priv_bo_create(
       device,
@@ -655,12 +707,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
       device, pan_sample_positions_buffer_size(),
       panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP),
       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->sample_positions);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: sample_positions bo create failed: %s",
-                vk_Result_to_str(result));
+   if (result != VK_SUCCESS)
       goto err_free_priv_bos;
-   }
 
    pan_upload_sample_positions(device->sample_positions->addr.host);
    panvk_priv_bo_flush(device->sample_positions, 0,
@@ -668,23 +716,15 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
 #if PAN_ARCH >= 10
    result = panvk_per_arch(init_tiler_oom)(device);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: init_tiler_oom failed: %s",
-                vk_Result_to_str(result));
+   if (result != VK_SUCCESS)
       goto err_free_priv_bos;
-   }
 #endif
 
    result = panvk_priv_bo_create(device, PAN_PRINTF_BUFFER_SIZE, 0,
                                  VK_SYSTEM_ALLOCATION_SCOPE_DEVICE,
                                  &device->printf.bo);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: printf bo create failed: %s",
-                vk_Result_to_str(result));
+   if (result != VK_SUCCESS)
       goto err_free_priv_bos;
-   }
 
    u_printf_init(&device->printf.ctx, device->printf.bo,
                  device->printf.bo->addr.host);
@@ -694,74 +734,51 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
 
    result = panvk_precomp_init(device);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: precomp_init failed: %s",
-                vk_Result_to_str(result));
+   if (result != VK_SUCCESS)
       goto err_free_priv_bos;
-   }
 
    struct vk_pipeline_cache_create_info cache_info = {
       .weak_ref = true,
    };
    device->vk.mem_cache = vk_pipeline_cache_create(&device->vk, &cache_info, NULL);
    if (device->vk.mem_cache == NULL) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: mem_cache create failed");
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto err_free_precomp;
    }
 
 #if PAN_ARCH >= 10 && PAN_ARCH < 14
    result = panvk_per_arch(device_draw_context_init)(device);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: draw_context_init failed: %s",
-                vk_Result_to_str(result));
+   if (result != VK_SUCCESS)
       goto err_free_mem_cache;
-   }
 #endif
 
    result = panvk_meta_init(device);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: meta_init failed: %s",
-                vk_Result_to_str(result));
+   if (result != VK_SUCCESS)
       goto err_free_draw_ctx;
-   }
+
+   result = panvk_per_arch(create_depth_bounds_fs)(device);
+   if (result != VK_SUCCESS)
+      goto err_finish_queues;
 
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create =
          &pCreateInfo->pQueueCreateInfos[i];
 
       result = check_global_priority(physical_device, queue_create);
-      if (result != VK_SUCCESS) {
-         /* PANVK_DBG: temporary diagnostics, remove before release */
-         mesa_loge("panvk: create_device: queue %u global priority check "
-                   "failed: %s", i, vk_Result_to_str(result));
+      if (result != VK_SUCCESS)
          goto err_finish_queues;
-      }
 
       for (unsigned q = 0; q < queue_create->queueCount; q++) {
          struct vk_queue *queue;
          result = panvk_queue_create(device, queue_create, q, &queue);
-         if (result != VK_SUCCESS) {
-            /* PANVK_DBG: temporary diagnostics, remove before release */
-            mesa_loge("panvk: create_device: queue %u/%u (family %u) create "
-                      "failed: %s", i, q, queue_create->queueFamilyIndex,
-                      vk_Result_to_str(result));
+         if (result != VK_SUCCESS)
             goto err_finish_queues;
-         }
       }
    }
 
    result = panvk_per_arch(utrace_context_init)(device);
-   if (result != VK_SUCCESS) {
-      /* PANVK_DBG: temporary diagnostics, remove before release */
-      mesa_loge("panvk: create_device: utrace_context_init failed: %s",
-                vk_Result_to_str(result));
+   if (result != VK_SUCCESS)
       goto err_finish_queues;
-   }
 
 #if PAN_ARCH >= 10
    panvk_utrace_perfetto_init(device, PANVK_SUBQUEUE_COUNT);
@@ -776,6 +793,8 @@ err_finish_queues:
    vk_foreach_queue_safe(queue, &device->vk)
       panvk_queue_destroy(queue);
 
+   if (device->depth_bounds_fs)
+      vk_shader_destroy(&device->vk, &device->depth_bounds_fs->vk, NULL);
    panvk_meta_cleanup(device);
 
 err_free_draw_ctx:
@@ -787,13 +806,19 @@ err_free_mem_cache:
 err_free_precomp:
    panvk_precomp_cleanup(device);
 err_free_priv_bos:
+   panvk_device_cleanup_tls(device);
+   panvk_priv_bo_unref(device->gpu_prerast_syncs);
+   panvk_pool_free_mem(&device->gpu_prerast_tess_arena);
+   panvk_pool_free_mem(&device->gpu_prerast_arena);
    if (device->printf.bo)
       u_printf_destroy(&device->printf.ctx);
    panvk_priv_bo_unref(device->printf.bo);
    panvk_priv_bo_unref(device->tiler_oom.handlers_bo);
    panvk_priv_bo_unref(device->sample_positions);
+   panvk_priv_bo_unref(device->bc_eac_lut);
    panvk_priv_bo_unref(device->indirect_varying_buffer);
    panvk_priv_bo_unref(device->tiler_heap);
+   panvk_priv_bo_unref(device->tiler_heap2);
    panvk_device_cleanup_mempools(device);
    vk_free(&device->vk.alloc, device->dump_region_size);
 err_free_heaps:
@@ -838,16 +863,24 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
 #if PAN_ARCH >= 10 && PAN_ARCH < 14
    panvk_per_arch(device_draw_context_cleanup)(device);
 #endif
+   if (device->depth_bounds_fs)
+      vk_shader_destroy(&device->vk, &device->depth_bounds_fs->vk, NULL);
    panvk_meta_cleanup(device);
    vk_pipeline_cache_destroy(device->vk.mem_cache, NULL);
    pan_kmod_bo_put(device->sparse_mem.blackhole);
    u_printf_destroy(&device->printf.ctx);
    panvk_priv_bo_unref(device->printf.bo);
    panvk_priv_bo_unref(device->tiler_oom.handlers_bo);
-   panvk_priv_bo_unref(device->indirect_varying_buffer);
-   panvk_priv_bo_unref(device->tiler_heap);
-   panvk_priv_bo_unref(device->sample_positions);
-   panvk_device_cleanup_mempools(device);
+    panvk_priv_bo_unref(device->indirect_varying_buffer);
+    panvk_priv_bo_unref(device->tiler_heap);
+    panvk_priv_bo_unref(device->tiler_heap2);
+    panvk_priv_bo_unref(device->sample_positions);
+    panvk_priv_bo_unref(device->bc_eac_lut);
+    panvk_device_cleanup_tls(device);
+    panvk_priv_bo_unref(device->gpu_prerast_syncs);
+    panvk_pool_free_mem(&device->gpu_prerast_tess_arena);
+    panvk_pool_free_mem(&device->gpu_prerast_arena);
+    panvk_device_cleanup_mempools(device);
    vk_free(&device->vk.alloc, device->dump_region_size);
    pan_kmod_vm_destroy(device->kmod.vm);
    util_vma_heap_finish(&device->as.heap);

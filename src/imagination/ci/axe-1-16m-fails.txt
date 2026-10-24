@@ -35,11 +35,9 @@ dEQP-VK.image.qualifiers.volatile.cube.r32ui,Crash
 dEQP-VK.pipeline.monolithic.multisample_interpolation.nonuniform_interpolant_indexing.centroid,Fail
 dEQP-VK.pipeline.monolithic.multisample_interpolation.nonuniform_interpolant_indexing.sample,Fail
 dEQP-VK.rasterization.line_continuity.line-strip,Crash
-
-# VKCTS 1.4.5.3 -> 1.4.6.1 uprev
-dEQP-VK.binding_model.shader_access.secondary_cmd_buf.bind.with_template.uniform_buffer_dynamic.no_access.multiple_discontiguous_descriptor_sets.multiple_arbitrary_descriptors.offset_view_zero_dynamic_nonzero,Crash
-
-# Nightly run expectations update
-dEQP-VK.robustness.buffer_access.compute.vec4_copy.r32_sfloat.oob_storage_write.range_32_bytes,Fail
-dEQP-VK.robustness.buffer_access.compute.vec4_copy.r32_sint.oob_storage_write.range_32_bytes,Fail
-dEQP-VK.robustness.buffer_access.compute.vec4_copy.r32_uint.oob_storage_write.range_32_bytes,Fail
+dEQP-VK.memory_model.write_after_read.core11.u32.coherent.fence_fence.atomicwrite.workgroup.payload_local.image.guard_local.image.comp,Crash
+dEQP-VK.memory_model.write_after_read.core11.u32.coherent.fence_fence.atomicwrite.subgroup.payload_local.image.guard_local.image.comp,Crash
+dEQP-VK.memory_model.write_after_read.core11.u32.coherent.fence_fence.atomicwrite.device.payload_local.image.guard_local.image.comp,Crash
+dEQP-VK.binding_model.shader_access.secondary_cmd_buf.bind.uniform_buffer_dynamic.vertex.multiple_contiguous_descriptors.offset_view_nonzero_dynamic_nonzero,Crash
+dEQP-VK.binding_model.shader_access.primary_cmd_buf.bind.with_template.uniform_buffer_dynamic.fragment.multiple_contiguous_descriptors.offset_view_nonzero_dynamic_nonzero,Crash
+dEQP-VK.binding_model.shader_access.secondary_cmd_buf.bind.uniform_buffer_dynamic.fragment.multiple_descriptor_sets.descriptor_array.offset_view_zero_dynamic_nonzero,Crash

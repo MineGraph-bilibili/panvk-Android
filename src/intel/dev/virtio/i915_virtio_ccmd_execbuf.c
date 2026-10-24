@@ -81,7 +81,11 @@ i915_virtio_gem_execbuffer2_submit(struct virtio_gem_execbuffer_params *params)
       return EINVAL;
    }
 
-   req->hdr = I915_CCMD(GEM_EXECBUFFER2, req_len);
+   if (dev->vdrm->caps.wire_format_version == 1)
+      req->hdr = I915_CCMD(GEM_EXECBUFFER2, req_len);
+   else
+      req->hdr = I915_CCMD(GEM_EXECBUFFER2_V2, req_len);
+
    req->relocs_count = relocs_count;
    req->buffer_count = exec->buffer_count;
    req->batch_start_offset = exec->batch_start_offset;
@@ -91,9 +95,29 @@ i915_virtio_gem_execbuffer2_submit(struct virtio_gem_execbuffer_params *params)
 
    rsp = vdrm_alloc_rsp(dev->vdrm, &req->hdr, sizeof(*rsp));
 
+   /* 0 reserved for cpu sync */
+   unsigned ring_idx = 1 + (flags & I915_EXEC_RING_MASK);
+
+   /*
+    * Android build of ANV driver uses 2 sub-contexts on same render ring
+    * for graphics and compute queues. In all other cases i915 driver has one
+    * sub-context per DRM context. First protocol version reserved 64 rings
+    * (fence contexts) per DRM context, i915 driver doesn't need that many rings.
+    * Split reserved 64 rings by 8 HW engines per sub-context, this makes each
+    * sub-context have own fence contexts needed for correct multi-queue syncing.
+    */
+   if (dev->vdrm->caps.wire_format_version > 1) {
+      ring_idx += (req->context_id - 1) * 8;
+
+      if (ring_idx >= 64) {
+         mesa_loge("too many contexts");
+         return EINVAL;
+      }
+   }
+
    struct vdrm_execbuf_params p = {
       .req = &req->hdr,
-      .ring_idx = 1 + (flags & I915_EXEC_RING_MASK),
+      .ring_idx = ring_idx,
       .in_syncobjs = params->in_syncobjs,
       .num_in_syncobjs = params->num_in_syncobjs,
       .out_syncobjs = params->out_syncobjs,

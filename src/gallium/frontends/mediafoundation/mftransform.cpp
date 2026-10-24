@@ -601,7 +601,7 @@ CDX12EncHMFT::UpdateAvailableInputType()
    if( m_spOutputType )
    {
       // Update the encoder's input available media type by the changed output type
-      CHECKHR_GOTO( m_spAvailableInputType.Get()->SetGUID( MF_MT_SUBTYPE, ConvertProfileToSubtype( m_outputPipeProfile ) ), done );
+      CHECKHR_GOTO( m_spAvailableInputType.Get()->SetGUID( MF_MT_SUBTYPE, ConvertAVEncVProfileToSubtype( m_uiProfile ) ), done );
 
       CHECKHR_GOTO( MFSetAttributeSize( m_spAvailableInputType.Get(), MF_MT_FRAME_SIZE, m_uiOutputWidth, m_uiOutputHeight ), done );
       CHECKHR_GOTO(
@@ -943,7 +943,7 @@ CDX12EncHMFT::InitializeEncoder( pipe_video_profile videoProfile, UINT32 Width, 
       // Calculate and cache the expected output buffer max bitstream size for a single frame
       m_uiMaxOutputBitstreamSize = CalculateMaxOutputBitstreamSize( encoderSettings.width,
                                                                     encoderSettings.height,
-                                                                    ConvertProfileToFormat( encoderSettings.profile ) );
+                                                                    ConvertAVEncVProfileToPipeFormat( m_uiProfile ) );
 
       debug_printf( "[dx12 hmft 0x%p] Calculated max output bitstream size: %u bytes (%u Kb, %u Mb) for %ux%u pipe_format %u\n",
                     this,
@@ -952,7 +952,7 @@ CDX12EncHMFT::InitializeEncoder( pipe_video_profile videoProfile, UINT32 Width, 
                     m_uiMaxOutputBitstreamSize / ( 1024 * 1024 ),
                     encoderSettings.width,
                     encoderSettings.height,
-                    ConvertProfileToFormat( encoderSettings.profile ) );
+                    ConvertAVEncVProfileToPipeFormat( m_uiProfile ) );
 
       // Create DX12 fence and share it as handle for using it with DX11/create_fence_win32
       CHECKHR_GOTO( m_spDevice->CreateFence( 0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS( &m_spStagingFence12 ) ), done );

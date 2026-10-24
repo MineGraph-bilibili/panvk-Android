@@ -78,6 +78,7 @@
 #include "c11/threads.h"
 #include "util/u_debug.h"
 #include "util/u_cpu_detect.h"
+#include "util/u_string.h"
 
 #include "lp_bld_misc.h"
 #include "lp_bld_debug.h"
@@ -118,7 +119,9 @@ void lp_bld_init_native_targets()
          char *option;
          char *options[64] = {(char *) "llc"};      // Warning without cast
          int   n;
-         for (n = 0, option = strtok(env_llc_options, " "); option; n++, option = strtok(NULL, " ")) {
+         char *saveptr;
+         for (n = 0, option = strtok_r(env_llc_options, " ", &saveptr); option;
+              n++, option = strtok_r(NULL, " ", &saveptr)) {
             options[n + 1] = option;
          }
          if (gallivm_debug & (GALLIVM_DEBUG_IR | GALLIVM_DEBUG_ASM | GALLIVM_DEBUG_DUMP_BC)) {
@@ -373,6 +376,7 @@ lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
    MAttrs.push_back(util_get_cpu_caps()->has_avx512dq ? "+avx512dq"  : "-avx512dq");
    MAttrs.push_back(util_get_cpu_caps()->has_avx512vl ? "+avx512vl"  : "-avx512vl");
    MAttrs.push_back(util_get_cpu_caps()->has_avx512vbmi ? "+avx512vbmi"  : "-avx512vbmi");
+   MAttrs.push_back(util_get_cpu_caps()->has_avx512fp16 ? "+avx512fp16"  : "-avx512fp16");
 #endif
 #if DETECT_ARCH_ARM
    if (!util_get_cpu_caps()->has_neon) {
@@ -414,7 +418,7 @@ lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
    MAttrs.push_back(util_get_cpu_caps()->has_rv_v ? "+v" : "-v");
    MAttrs.push_back(util_get_cpu_caps()->has_rv_zba ? "+zba" : "-zba");
    MAttrs.push_back(util_get_cpu_caps()->has_rv_zbb ? "+zbb" : "-zbb");
-   MAttrs.push_back(util_get_cpu_caps()->has_rv_zbs ? "+zbb" : "-zbs");
+   MAttrs.push_back(util_get_cpu_caps()->has_rv_zbs ? "+zbs" : "-zbs");
 #endif
 
 #if DETECT_ARCH_LOONGARCH64 == 1

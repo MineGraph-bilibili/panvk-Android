@@ -74,12 +74,12 @@ phi_src_is_compatible(nir_def *def, uint32_t max_vec)
     * the whole source: all components are constants, or all components come
     * from the same def and remain within the same max_vec.
     */
-   const nir_scalar first = nir_scalar_chase_movs(nir_get_scalar(def, 0));
+   const nir_scalar first = nir_scalar_resolved(def, 0);
    const bool first_is_const = nir_scalar_is_const(first);
    const uint32_t mask = ~(max_vec - 1);
 
    for (uint8_t i = 1; i < def->num_components; i++) {
-      const nir_scalar chased = nir_scalar_chase_movs(nir_get_scalar(def, i));
+      const nir_scalar chased = nir_scalar_resolved(def, i);
       const bool chased_is_const = nir_scalar_is_const(chased);
 
       if (first_is_const || chased_is_const) {
@@ -102,7 +102,7 @@ hash_phi_src(uint32_t hash, const nir_phi_instr *phi, const nir_phi_src *src,
 {
    hash = HASH(hash, src->pred);
 
-   nir_scalar chased = nir_scalar_chase_movs(nir_get_scalar(src->src.ssa, 0));
+   nir_scalar chased = nir_scalar_resolved(src->src.ssa, 0);
    uint32_t swizzle = chased.comp & ~(max_vec - 1);
    hash = HASH(hash, swizzle);
 
@@ -206,8 +206,8 @@ phi_srcs_equal(nir_block *block, const nir_phi_src *src1,
    /* Since phi sources don't have swizzles, they are swizzled using movs.
     * Get the real sources first.
     */
-   nir_scalar chased1 = nir_scalar_chase_movs(nir_get_scalar(src1->src.ssa, 0));
-   nir_scalar chased2 = nir_scalar_chase_movs(nir_get_scalar(src2->src.ssa, 0));
+   nir_scalar chased1 = nir_scalar_resolved(src1->src.ssa, 0);
+   nir_scalar chased2 = nir_scalar_resolved(src2->src.ssa, 0);
 
    if (nir_scalar_is_const(chased1) && nir_scalar_is_const(chased2))
       return true;

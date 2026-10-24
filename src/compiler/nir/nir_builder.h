@@ -1126,6 +1126,18 @@ nir_umin_imm(nir_builder *build, nir_def *x, uint64_t y)
 }
 
 static inline nir_def *
+nir_fmax_imm(nir_builder *build, nir_def *x, double y)
+{
+   return nir_fmax(build, x, nir_imm_floatN_t(build, y, x->bit_size));
+}
+
+static inline nir_def *
+nir_fmin_imm(nir_builder *build, nir_def *x, double y)
+{
+   return nir_fmin(build, x, nir_imm_floatN_t(build, y, x->bit_size));
+}
+
+static inline nir_def *
 _nir_mul_imm(nir_builder *build, nir_def *x, uint64_t y, bool amul)
 {
    assert(x->bit_size <= 64);
@@ -1254,6 +1266,15 @@ nir_ishl_imm(nir_builder *build, nir_def *x, uint32_t y)
       assert(y < x->bit_size);
       return nir_ishl(build, x, nir_imm_int(build, y));
    }
+}
+
+static inline nir_def *
+nir_ishl_nuw(nir_builder *b, nir_def *x, nir_def *y)
+{
+   nir_def *d = nir_ishl(b, x, y);
+   if (nir_def_is_alu(d))
+      nir_def_as_alu(d)->no_unsigned_wrap = true;
+   return d;
 }
 
 static inline nir_def *
@@ -1720,11 +1741,6 @@ nir_get_ptr_bitsize(nir_shader *shader)
 {
    if (shader->info.stage == MESA_SHADER_KERNEL)
       return shader->info.cs.ptr_size;
-
-   if (shader->info.stage == MESA_SHADER_COMPUTE &&
-       shader->info.cs.ptr_size)
-      return shader->info.cs.ptr_size;
-
    return 32;
 }
 
@@ -2086,6 +2102,12 @@ nir_memcpy_deref(nir_builder *build, nir_deref_instr *dest,
    nir_memcpy_deref_with_access(build, dest, src, size,
                                 (enum gl_access_qualifier)0,
                                 (enum gl_access_qualifier)0);
+}
+
+static inline nir_def *
+nir_load_struct_field(nir_builder *build, nir_deref_instr *deref, int field)
+{
+   return nir_load_deref(build, nir_build_deref_struct(build, deref, field));
 }
 
 static inline nir_def *

@@ -27,7 +27,7 @@
 #include "pan_fb.h"
 #include "pan_props.h"
 
-#define MAX_VBS 32
+#define MAX_VBS 16
 
 #if PAN_ARCH < 10
 #define MAX_FRAMEBUFFER_DIMENSION (1 << 14)
@@ -38,7 +38,6 @@
 #endif
 
 #define MAX_FRAMEBUFFER_LAYERS 256
-#define PANVK_MAX_XFB_BUFFERS 4
 
 struct panvk_cmd_buffer;
 
@@ -97,6 +96,8 @@ struct panvk_rendering_state {
 #if PAN_ARCH < 9
       uint32_t bo_count;
       struct pan_kmod_bo *bos[(MAX_RTS * PANVK_MAX_PLANES) + 2];
+#endif
+#if PAN_ARCH < 10
       bool needs_load;
       bool needs_store;
 #endif
@@ -109,6 +110,12 @@ struct panvk_rendering_state {
    /* When a secondary command buffer has to flush draws, it disturbs the
     * inherited context, and the primary command buffer needs to know. */
    bool invalidate_inherited_ctx;
+
+   /* Attachment-less secondary: rasterizationSamples of the CS segment being
+    * recorded, the count the primary has to give the inherited context. A
+    * secondary cannot change the context in the middle, it cuts its CS where
+    * the count changes (cmd_cut_vmr_segment). */
+   uint8_t vmr_samples;
 
    /* True if the last render pass was suspended. */
    bool suspended;
@@ -128,6 +135,11 @@ struct panvk_rendering_state {
       uint64_t last;
    } oq;
 
+   /* Pipeline statistics queries that ended inside this render pass and
+    * are signalled once its fragment jobs are issued. */
+   struct panvk_pstats_pending pstats_pending[PANVK_PSTATS_MAX_PENDING];
+   uint32_t pstats_pending_count;
+
    struct {
       uint64_t fbds[3];
    } ir;
@@ -137,17 +149,12 @@ struct panvk_rendering_state {
 enum panvk_cmd_graphics_dirty_state {
    PANVK_CMD_GRAPHICS_DIRTY_BASE_INSTANCE,
    PANVK_CMD_GRAPHICS_DIRTY_VS,
-   PANVK_CMD_GRAPHICS_DIRTY_TCS,
-   PANVK_CMD_GRAPHICS_DIRTY_TES,
-   PANVK_CMD_GRAPHICS_DIRTY_GS,
    PANVK_CMD_GRAPHICS_DIRTY_FS,
    PANVK_CMD_GRAPHICS_DIRTY_VB,
    PANVK_CMD_GRAPHICS_DIRTY_OQ,
    PANVK_CMD_GRAPHICS_DIRTY_DESC_STATE,
    PANVK_CMD_GRAPHICS_DIRTY_RENDER_STATE,
    PANVK_CMD_GRAPHICS_DIRTY_VS_PUSH_UNIFORMS,
-   PANVK_CMD_GRAPHICS_DIRTY_TCS_PUSH_UNIFORMS,
-   PANVK_CMD_GRAPHICS_DIRTY_TES_PUSH_UNIFORMS,
    PANVK_CMD_GRAPHICS_DIRTY_FS_PUSH_UNIFORMS,
    PANVK_CMD_GRAPHICS_DIRTY_IDVS,
    PANVK_CMD_GRAPHICS_DIRTY_STATE_COUNT,
@@ -156,29 +163,52 @@ enum panvk_cmd_graphics_dirty_state {
 struct panvk_cmd_graphics_state {
    struct panvk_descriptor_state desc_state;
 
+#if PAN_ARCH >= 10
+   /* An occlusion query availability chain may hold nodes from a suspended
+    * render pass: the next fragment job must drain it even if the resumed
+    * pass adds no node of its own (render.oq.chain is per pass instance). */
+   bool oq_chain_pending;
+
+   /* PANVK_PASS_STATS=1 per-pass bookkeeping. */
+   struct panvk_pass_stats {
+      uint32_t draws;
+      uint8_t pre_color, pre_zs;
+      bool clean_tile, frame_shaders_set;
+   } pass_stats;
+   /* PANVK_RP_MERGE=1: a render pass that ends with a compatible pass right
+    * behind it is kept open (suspended) and the next one resumes it, so the
+    * fragment job runs once for the whole run of passes. */
+   struct panvk_rp_merge {
+      bool pending;       /* last pass ended as a suspended merge candidate */
+      bool flushing;      /* finishing a pending pass, no merging */
+      bool cur_mergeable; /* the current pass may be continued */
+      VkRenderingInfo info;
+      VkRenderingAttachmentInfo color[8];
+      VkRenderingAttachmentInfo depth, stencil;
+   } rp_merge;
+#endif
+
    struct {
       struct vk_vertex_input_state vi;
       struct vk_sample_locations_state sl;
    } dynamic;
 
    struct panvk_occlusion_query_state occlusion_query;
-#if PAN_ARCH >= 10
+#if PAN_ARCH >= 9
    struct panvk_prims_generated_query_state prims_generated_query;
-   /* Active VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT query (stream 0). */
-   struct panvk_prims_generated_query_state xfb_stream_query;
-#endif
-   struct panvk_graphics_sysvals sysvals;
+   struct panvk_pstats_query_state pstats_query;
 
    struct {
+      bool active;
+      uint64_t offsets;
       struct {
-         uint64_t address;
-         uint64_t size;
-      } buffers[PANVK_MAX_XFB_BUFFERS];
-      struct pan_ptr offsets;
-      struct panvk_shader_desc_state desc;
-      uint64_t push_uniforms;
-      bool enabled;
+         uint64_t addr;
+         uint32_t size;
+      } buffers[4];
+      uint64_t queries[4];
    } xfb;
+#endif
+   struct panvk_graphics_sysvals sysvals;
 
 #if PAN_ARCH < 9
    struct panvk_shader_link link;
@@ -210,7 +240,6 @@ struct panvk_cmd_graphics_state {
       uint64_t indirect_attribs_infos;
       uint64_t indirect_attrib_bufs_infos;
       uint64_t indirect_varying_bufs_infos;
-      bool previous_draw_was_indirect;
 #else
       /* The number of times desc is repeated.  Zero means that it is not
        * repeated but also that it's re-usable across draws and we're not
@@ -220,34 +249,12 @@ struct panvk_cmd_graphics_state {
 #endif
    } vs;
 
-   struct {
-      struct {
-         const struct panvk_shader *shader;
-         struct panvk_shader_desc_state desc;
-         uint64_t push_uniforms;
-      } tcs;
-
-      struct {
-         const struct panvk_shader *shader;
-         struct panvk_shader_desc_state desc;
-         uint64_t push_uniforms;
-      } tes;
-
-      /* VkDrawIndexedIndirectCommand emitted by the tessellator. */
-      uint64_t out_draws;
-   } tess;
-
-   /*
-    * Geometry is split by libpoly into physical variants.  Descriptor and FAU
-    * state is per variant; never collapse this back to shader-wide state.
-    */
+#if PAN_ARCH >= 9
    struct {
       const struct panvk_shader *shader;
-      struct {
-         struct panvk_shader_desc_state desc;
-         uint64_t push_uniforms;
-      } variants[PANVK_GS_VARIANTS];
-   } gs;
+      struct panvk_shader_desc_state desc;
+   } gs, tcs, tes;
+#endif
 
    struct {
       struct panvk_attrib_buf bufs[MAX_VBS];
@@ -287,6 +294,25 @@ struct panvk_cmd_graphics_state {
    BITSET_DECLARE(dirty, PANVK_CMD_GRAPHICS_DIRTY_STATE_COUNT);
 };
 
+#if PAN_ARCH >= 9
+/* Last pre-raster stage whose passthrough selects a viewport (GS, else
+ * TES, else VS), or NULL.
+ */
+static inline const struct panvk_shader *
+panvk_prerast_viewport_shader(const struct panvk_cmd_graphics_state *gfx)
+{
+   const struct panvk_shader *gs = gfx->gs.shader;
+
+   if (gs)
+      return gs->gpu_prerast.gs.scissor_clip_loc ? gs : NULL;
+
+   const struct panvk_shader *last =
+      gfx->tes.shader ? gfx->tes.shader : gfx->vs.shader;
+
+   return last && last->gpu_prerast.vp_scissor_loc ? last : NULL;
+}
+#endif
+
 #define dyn_gfx_state_dirty(__cmdbuf, __name)                                  \
    BITSET_TEST((__cmdbuf)->vk.dynamic_graphics_state.dirty,                    \
                MESA_VK_DYNAMIC_##__name)
@@ -321,6 +347,54 @@ struct panvk_device_draw_context {
    uint64_t fn_set_fbds_provoking_vertex_stride;
 };
 #endif
+
+/* dEQP-VK.draw.renderpass.inverted_depth_ranges.nodepthclamp_deltazero.
+ * A zero depth range flattens clip-space Z before the viewport clip.
+ */
+#define PANVK_MIN_DEPTH_CLIP_RANGE 37.7E-06f
+
+static inline void
+panvk_viewport_z_coeffs(const struct vk_viewport_state *vp,
+                        const struct vk_rasterization_state *rs,
+                        unsigned index, float *scale_z, float *offset_z)
+{
+   const VkViewport *viewport = &vp->viewports[index];
+   float z_min = viewport->minDepth;
+   float z_max = viewport->maxDepth;
+
+   if (vk_rasterization_state_depth_clip_enable(rs)) {
+      float dz = z_max - z_min;
+
+      if (dz < 0.0f)
+         dz = -dz;
+      /* minDepth == maxDepth keeps the exact flat depth (D3D MinZ == MaxZ
+       * sky boxes and HUDs). Its window Z cannot cull clip-space Z, so such
+       * a viewport does not depth clip: inverted_depth_ranges deltazero
+       * draws its out-of-range pixels at minDepth.
+       */
+      if (dz > 0.0f && dz < PANVK_MIN_DEPTH_CLIP_RANGE) {
+         float z_sign = z_min <= z_max ? 1.0f : -1.0f;
+         float z_center = 0.5f * (z_max + z_min);
+         float lo = 0.5f * PANVK_MIN_DEPTH_CLIP_RANGE;
+         float hi = 1.0f - lo;
+
+         if (z_center < lo)
+            z_center = lo;
+         else if (z_center > hi)
+            z_center = hi;
+         z_min = z_center - 0.5f * z_sign * PANVK_MIN_DEPTH_CLIP_RANGE;
+         z_max = z_center + 0.5f * z_sign * PANVK_MIN_DEPTH_CLIP_RANGE;
+      }
+   }
+
+   if (vp->depth_clip_negative_one_to_one) {
+      *scale_z = 0.5f * (z_max - z_min);
+      *offset_z = 0.5f * (z_min + z_max);
+   } else {
+      *scale_z = z_max - z_min;
+      *offset_z = z_min;
+   }
+}
 
 static inline void
 panvk_depth_range(const struct panvk_cmd_graphics_state *state,
@@ -369,6 +443,11 @@ fs_required(const struct panvk_cmd_graphics_state *state,
 
    if (rs->rasterizer_discard_enable || !fs_info)
       return false;
+
+   if (fs->fs.depth_bounds_only)
+      return dyn_state->ds.depth.bounds_test.enable &&
+             (state->render.bound_attachments &
+              MESA_VK_RP_ATTACHMENT_DEPTH_BIT);
 
    /* If we generally have side effects */
    if (fs_info->fs.sidefx)
@@ -428,7 +507,9 @@ cached_fs_required(ASSERTED const struct panvk_cmd_graphics_state *state,
     dyn_gfx_state_dirty(cmdbuf, CB_ATTACHMENT_COUNT) ||                        \
     dyn_gfx_state_dirty(cmdbuf, CB_COLOR_WRITE_ENABLES) ||                     \
     dyn_gfx_state_dirty(cmdbuf, CB_WRITE_MASKS) ||                             \
-    dyn_gfx_state_dirty(cmdbuf, MS_ALPHA_TO_COVERAGE_ENABLE))
+    dyn_gfx_state_dirty(cmdbuf, MS_ALPHA_TO_COVERAGE_ENABLE) ||               \
+    dyn_gfx_state_dirty(cmdbuf, DS_DEPTH_BOUNDS_TEST_ENABLE) ||               \
+    gfx_state_dirty(cmdbuf, RENDER_STATE))
 
 /* After a draw, all dirty flags are cleared except the FS dirty flag which
  * needs to be set again if the draw didn't use the fragment shader. */
@@ -489,14 +570,31 @@ struct panvk_draw_info {
       uint64_t count_buffer_dev_addr;
       uint32_t draw_count;
       uint32_t stride;
-      /* CPU-unrolled tess indirect record; count activation remains GPU-side. */
-      uint32_t record_index;
+      uint32_t draw_index;
    } indirect;
 
    enum mesa_prim prim;
+   bool gpu_prerast_generated;
+   /* INDEX_COUNT and INDEX_OFFSET were loaded from a GPU run header. */
+   bool index_sr_set;
+   /* Already counted by a pipeline statistics query (split chunks). */
+   bool pstats_counted;
+   /* The primitives generated query was updated by the tessellation kernels. */
+   bool prims_generated_counted;
+   uint32_t gpu_prerast_prim_base;
 
-#if PAN_ARCH < 9
+#if PAN_ARCH <= 9
    uint32_t layer_id;
+#endif
+#if PAN_ARCH == 9
+   /* GPU-side gpu_prerast_prim_base (a tessellation output range), or 0. */
+   uint64_t gpu_prerast_prim_base_addr;
+   /* 1 + the viewport whose depth range clamps this draw, 0 for viewport 0
+    * (the draws of one viewport each of a multi-viewport draw). */
+   uint32_t viewport_clamp;
+   /* An indirect gpu_prerast draw known to fit the arena (a tessellation
+    * output range): lowered as is, without GPU chunks. */
+   bool fits_arena;
 #endif
 };
 

@@ -6,6 +6,7 @@ use crate::isa::*;
 use proc_macro2::Ident;
 use proc_macro2::TokenStream as TokenStream2;
 
+#[derive(Clone)]
 pub struct FieldIdent {
     pub name: String,
     pub ident: Ident,
@@ -182,6 +183,32 @@ impl Expr {
         match self {
             Expr::Enum(lit) => Some(lit),
             _ => None,
+        }
+    }
+
+    pub fn fields(&self) -> Vec<FieldIdent> {
+        match self {
+            Expr::Ident(ident) => vec![ident.clone()],
+            Expr::If(args) => args.iter().flat_map(Expr::fields).collect(),
+            Expr::BitwiseAnd([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::BitwiseOr([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::BitwiseXor([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Equal([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LessThan([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LessEqual([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::NotEqual([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LogicalAnd([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Add([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Sub([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::RShift([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::LShift([x, y]) => [x.fields(), y.fields()].concat(),
+            Expr::Inside(args) => args.iter().flat_map(Expr::fields).collect(),
+            Expr::CountOnes(x) => x.fields(),
+            Expr::Mask(x) => x.fields(),
+            Expr::Slice([v, h, l]) => {
+                [v.fields(), h.fields(), l.fields()].concat()
+            }
+            _ => vec![],
         }
     }
 }

@@ -103,8 +103,9 @@ vtest_connect_socket(struct vn_instance *instance, const char *path)
 static void
 vtest_read(struct vtest *vtest, void *buf, size_t size)
 {
+   char *ptr = buf;
    do {
-      const ssize_t ret = read(vtest->sock_fd, buf, size);
+      const ssize_t ret = read(vtest->sock_fd, ptr, size);
       if (unlikely(ret < 0)) {
          vn_log(vtest->instance,
                 "lost connection to rendering server on %zu read %zi %d",
@@ -112,7 +113,7 @@ vtest_read(struct vtest *vtest, void *buf, size_t size)
          abort();
       }
 
-      buf += ret;
+      ptr += ret;
       size -= ret;
    } while (size);
 }
@@ -151,8 +152,9 @@ vtest_receive_fd(struct vtest *vtest)
 static void
 vtest_write(struct vtest *vtest, const void *buf, size_t size)
 {
+   const char *ptr = buf;
    do {
-      const ssize_t ret = write(vtest->sock_fd, buf, size);
+      const ssize_t ret = write(vtest->sock_fd, ptr, size);
       if (unlikely(ret < 0)) {
          vn_log(vtest->instance,
                 "lost connection to rendering server on %zu write %zi %d",
@@ -160,7 +162,7 @@ vtest_write(struct vtest *vtest, const void *buf, size_t size)
          abort();
       }
 
-      buf += ret;
+      ptr += ret;
       size -= ret;
    } while (size);
 }
@@ -286,7 +288,7 @@ vtest_vcmd_get_capset(struct vtest *vtest,
    size_t read_size = (vtest_hdr[VTEST_CMD_LEN] - 1) * 4;
    if (capset_size >= read_size) {
       vtest_read(vtest, capset, read_size);
-      memset(capset + read_size, 0, capset_size - read_size);
+      memset((char *)capset + read_size, 0, capset_size - read_size);
    } else {
       vtest_read(vtest, capset, capset_size);
 

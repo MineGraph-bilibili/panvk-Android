@@ -58,6 +58,8 @@ llvmpipe_destroy(struct pipe_context *pipe)
    struct llvmpipe_screen *lp_screen = llvmpipe_screen(pipe->screen);
    uint i;
 
+   llvmpipe_finish(pipe, __func__);
+
    mtx_lock(&lp_screen->ctx_mutex);
    list_del(&llvmpipe->list);
    mtx_unlock(&lp_screen->ctx_mutex);
@@ -110,8 +112,6 @@ llvmpipe_destroy(struct pipe_context *pipe)
    lp_destroy_cs_variants(llvmpipe);
 
    llvmpipe_destroy_fs_funcs(llvmpipe);
-
-   llvmpipe_sampler_matrix_destroy(llvmpipe);
 
    lp_context_destroy(&llvmpipe->context);
 
@@ -311,8 +311,6 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    llvmpipe_init_context_resource_funcs(&llvmpipe->pipe);
    llvmpipe_init_surface_functions(llvmpipe);
 
-   llvmpipe_init_sampler_matrix(llvmpipe);
-
 #ifdef HAVE_LIBDRM
    llvmpipe_init_fence_funcs(&llvmpipe->pipe);
 #endif
@@ -395,6 +393,9 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
     * See https://bugs.freedesktop.org/show_bug.cgi?id=101709
     */
    llvmpipe->dirty |= LP_NEW_SCISSOR;
+
+   p_atomic_set(&llvmpipe->sampler_matrix_update_count.value,
+                p_atomic_read(&lp_screen->sampler_matrix.update_count.value));
 
    mtx_lock(&lp_screen->ctx_mutex);
    list_addtail(&llvmpipe->list, &lp_screen->ctx_list);

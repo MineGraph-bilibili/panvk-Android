@@ -32,7 +32,6 @@ a306-piglit:
   variables:
     DEQP_SUITE: freedreno-a306-piglit
     HWCI_START_WESTON: 1
-    TEST_PHASE_TIMEOUT_MINUTES: 35
 
 # Something happened and now this hangchecks and doesn't recover.  Unkown when
 # it started.
@@ -77,8 +76,16 @@ a530-gl:
     - .collabora-freedreno-rules
   variables:
     DEQP_SUITE: freedreno-a530
+    DEQP_FRACTION: 2
     FDO_CI_CONCURRENT: 3  # if 4, sometimes "deqp-gles31, not enough memory for the allocation" appears
-  parallel: 6
+  parallel: 4
+
+a530-gl-full:
+  extends:
+    - a530-gl
+    - .collabora-freedreno-manual-rules
+  variables:
+    DEQP_FRACTION: 1
 
 a530-traces:
   extends:
@@ -95,11 +102,19 @@ a530-piglit:
     - .lava-arm64-test-gl
     - .lava-dragonboard-820c:arm64
     - .test-piglit
-    - .collabora-freedreno-manual-rules
+    - .collabora-freedreno-rules
   parallel: 2
   variables:
     DEQP_SUITE: freedreno-a530-piglit
+    DEQP_FRACTION: 2
     HWCI_START_WESTON: 1
+
+a530-piglit-full:
+  extends:
+    - a530-piglit
+    - .collabora-freedreno-manual-rules
+  variables:
+    DEQP_FRACTION: 1
 
 a618-angle:
   extends:
@@ -259,6 +274,16 @@ a618-android-cts:
     CUTTLEFISH_GPU_MODE: drm_nctx_guest_angle
     DEVICE_HANGING_TIMEOUT_SEC: 5400  # Android CTS might not print anything for minutes
 
+a618-opencl-cts-quick:
+  extends:
+    - .lava-arm64-test-gl
+    - .lava-sc7180-trogdor-kingoftown:arm64
+    - .freedreno-opencl-cts
+    - .collabora-freedreno-manual-rules
+  rules:
+    - !reference [.collabora-freedreno-manual-rules, rules]
+    - !reference [.rusticl-manual-rules, rules]
+
 a660-angle:
   extends:
     - .lava-arm64-test-gl
@@ -282,6 +307,16 @@ a660-gl-cl:
   variables:
     DEQP_SUITE: freedreno-a660
     HWCI_START_WESTON: 1
+
+a660-opencl-cts-quick:
+  extends:
+    - .lava-arm64-test-gl
+    - .lava-sm8350-hdk:arm64
+    - .freedreno-opencl-cts
+    - .collabora-freedreno-manual-rules
+  rules:
+    - !reference [.collabora-freedreno-manual-rules, rules]
+    - !reference [.rusticl-manual-rules, rules]
 
 a660-vk:
   extends:
@@ -330,6 +365,17 @@ a702-gl-cl:
     DEQP_SUITE: freedreno-a702
     HWCI_START_WESTON: 1
 
+a702-opencl-cts-quick:
+  extends:
+    - .lava-arm64-test-gl
+    - .lava-qcom-rb1:arm64
+    - .freedreno-opencl-cts
+    - .qualcomm-freedreno-manual-rules
+  timeout: 3h  # 2hr is just right on the limit, so give this job and extra 1h
+  rules:
+    - !reference [.qualcomm-freedreno-manual-rules, rules]
+    - !reference [.rusticl-manual-rules, rules]
+
 a702-vk:
   extends:
     - .lava-arm64-test-vk
@@ -367,6 +413,18 @@ a750-gl-cl:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 25
     HWCI_START_WESTON: 1
     DEQP_SUITE: freedreno-a750
+
+a750-opencl-cts-quick:
+  extends:
+    - .ci-tron-arm64-test-gl
+    - .a750-mupuf
+    - .freedreno-opencl-cts
+    - .valve-freedreno-manual-rules
+  rules:
+    - !reference [.valve-freedreno-manual-rules, rules]
+    - !reference [.rusticl-manual-rules, rules]
+  variables:
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 30
 
 a750-vk:
   extends:

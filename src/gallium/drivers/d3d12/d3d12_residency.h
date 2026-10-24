@@ -26,7 +26,7 @@
 struct d3d12_screen;
 struct d3d12_batch;
 
-void
+bool
 d3d12_process_batch_residency(struct d3d12_screen *screen, struct d3d12_batch *batch);
 
 bool

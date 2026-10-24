@@ -86,6 +86,12 @@ objects. They all follow simple, one-method binding calls, e.g.
   that this takes effect even if multisampling is not explicitly enabled if
   the framebuffer surface(s) are multisampled.  Also, this mask is AND-ed
   with the optional fragment shader sample mask output (when emitted).
+* ``set_sample_coverage`` sets the sample coverage as the API states it, for
+  hardware that takes a coverage fraction rather than a per sample bitmask.
+  Optional. When a driver leaves this unset the frontend folds the coverage
+  into ``set_sample_mask`` instead, which quantizes it to the sample count.
+  A driver implementing this gets the unquantized value and receives only the
+  explicit sample mask through ``set_sample_mask``.
 * ``set_sample_locations`` sets the sample locations used for rasterization.
   ```get_sample_position``` still returns the default locations. When NULL,
   the default locations are used.

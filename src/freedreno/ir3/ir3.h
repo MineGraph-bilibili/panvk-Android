@@ -37,15 +37,15 @@ struct ir3_info {
    /* byte offset from start of the shader to the NIR constant data. */
    uint32_t constant_data_offset;
    /* Size in dwords of the instructions. */
-   uint16_t sizedwords;
-   uint16_t instrs_count; /* expanded to account for rpt's */
-   uint16_t preamble_instrs_count;
-   uint16_t nops_count;   /* # of nop instructions, including nopN */
-   uint16_t mov_count;
-   uint16_t cov_count;
-   uint16_t loops;
-   uint16_t stp_count;
-   uint16_t ldp_count;
+   uint32_t sizedwords;
+   uint32_t instrs_count; /* expanded to account for rpt's */
+   uint32_t preamble_instrs_count;
+   uint32_t nops_count;   /* # of nop instructions, including nopN */
+   uint32_t mov_count;
+   uint32_t cov_count;
+   uint32_t loops;
+   uint32_t stp_count;
+   uint32_t ldp_count;
    /* NOTE: max_reg, etc, does not include registers not touched
     * by the shader (ie. vertex fetched via VFD_DECODE but not
     * touched by shader)
@@ -64,19 +64,19 @@ struct ir3_info {
    bool uses_ray_intersection;
 
    /* number of sync bits: */
-   uint16_t ss, sy;
+   uint32_t ss, sy;
 
    /* estimate of number of cycles stalled on (ss) */
-   uint16_t sstall;
+   uint32_t sstall;
    /* estimate of number of cycles stalled on (sy) */
-   uint16_t systall;
+   uint32_t systall;
 
-   uint16_t last_baryf; /* instruction # of last varying fetch */
+   uint32_t last_baryf; /* instruction # of last varying fetch */
 
-   uint16_t last_helper; /* last instruction to use helper invocations */
+   uint32_t last_helper; /* last instruction to use helper invocations */
 
    /* Number of instructions of a given category: */
-   uint16_t instrs_per_cat[8];
+   uint32_t instrs_per_cat[8];
 };
 
 struct ir3_merge_set {
@@ -710,7 +710,7 @@ struct ir3_array {
    /* extra stuff used in RA pass: */
    unsigned base; /* base vreg name */
    unsigned reg;  /* base physical reg */
-   uint16_t start_ip, end_ip;
+   uint32_t start_ip, end_ip;
 
    /* Indicates if half-precision */
    bool half;
@@ -750,7 +750,7 @@ struct ir3_block {
    DECLARE_ARRAY(struct ir3_block *, physical_predecessors);
    DECLARE_ARRAY(struct ir3_block *, physical_successors);
 
-   uint16_t start_ip, end_ip;
+   uint32_t start_ip, end_ip;
 
    /**
     * Is the block a reconvergence point within a wave:
@@ -1082,6 +1082,9 @@ unsigned ir3_get_min_reg_count(const struct ir3_shader_variant *v,
 
 bool ir3_should_double_threadsize(struct ir3_shader_variant *v,
                                   unsigned regs_count);
+
+unsigned ir3_get_waves_per_wg(struct ir3_shader_variant *v,
+                              bool double_threadsize);
 
 struct ir3_block *ir3_block_create(struct ir3 *shader);
 
@@ -2299,7 +2302,8 @@ void ir3_ra_predicates(struct ir3_shader_variant *v);
 bool ir3_lower_subgroups(struct ir3 *ir);
 
 /* legalize: */
-bool ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary);
+bool ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary,
+                  bool is_preamble_speculatable);
 bool ir3_legalize_relative(struct ir3 *ir);
 
 static inline bool
@@ -3422,5 +3426,8 @@ ir3_required_sync_flags(struct ir3_legalize_state *state,
 unsigned ir3_required_delay(struct ir3_legalize_state *state,
                             struct ir3_compiler *compiler,
                             struct ir3_instruction *instr);
+
+bool ir3_prefetch_sam_needs_helpers(struct ir3_compiler *compiler,
+                                    struct ir3_instruction *sam);
 
 #endif /* IR3_H_ */

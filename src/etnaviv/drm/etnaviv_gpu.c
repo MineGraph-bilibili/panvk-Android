@@ -138,6 +138,7 @@ query_features_from_kernel(struct etna_gpu *gpu)
 	ETNA_FEATURE(chipMinorFeatures5, RA_WRITE_DEPTH);
 
 	ETNA_FEATURE(chipMinorFeatures6, CACHE128B256BPERLINE);
+	ETNA_FEATURE(chipMinorFeatures6, PE_32BPC_COLORMASK_FIX);
 	ETNA_FEATURE(chipMinorFeatures6, NEW_GPIPE);
 	ETNA_FEATURE(chipMinorFeatures6, NO_ASTC);
 	ETNA_FEATURE(chipMinorFeatures6, V4_COMPRESSION);

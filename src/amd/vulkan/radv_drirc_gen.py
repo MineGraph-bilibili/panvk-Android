@@ -25,14 +25,14 @@ def declare_options():
           "Disable anisotropic filtering for single level images",
           c_name="disable_aniso_single_level"),
         B("radv_disable_dcc", False,
-          "Disable DCC for color images on GFX8-GFX11.5",
-          c_name="disable_dcc"),
+          "Disable DCC for color images on GFX8-GFX11.7",
+          c_name="disable_dcc", min_device_version=80, max_device_version=117),
         B("radv_disable_dcc_mips", False,
-          "Disable DCC for color images with mips on GFX8-GFX11.5",
-          c_name="disable_dcc_mips"),
+          "Disable DCC for color images with mips on GFX8-GFX11.7",
+          c_name="disable_dcc_mips", min_device_version=80, max_device_version=117),
         B("radv_disable_dcc_stores", False,
-          "Disable DCC for color storage images on GFX10-GFX11.5",
-          c_name="disable_dcc_stores"),
+          "Disable DCC for color storage images on GFX10-GFX11.7",
+          c_name="disable_dcc_stores", min_device_version=100, max_device_version=117),
         B("radv_disable_shrink_image_store", False,
           "Disabling shrinking of image stores based on the format",
           c_name="disable_shrink_image_store"),
@@ -90,6 +90,9 @@ def declare_options():
         B("radv_force_nan_preserve_min_max", False,
           "Treat FMax/FMin/FClamp like NMax/NMin/NClamp.",
           c_name="force_nan_preserve_min_max"),
+        B("radv_gfx10_descriptor_alias_robust", False,
+          "Shader based workaround to make reading storage/uniform/texel buffers as images robust.",
+          c_name="gfx10_descriptor_alias_robust"),
     ]
 
     performance_options = [
@@ -105,9 +108,19 @@ def declare_options():
         B("radv_prefer_2d_swizzle_for_3d_storage", False,
           "Prefer 2D swizzle mode for 3D storage images.",
           c_name="prefer_2d_swizzle_for_3d_storage"),
+        B("radv_enable_transfer_queue", False,
+          "Expose a dedicated SDMA transfer queue so transfer-queue copies run on the async DMA engine.",
+          c_name="enable_transfer_queue"),
         S("radv_gfx12_hiz_wa",
           description="Choose the specific HiZ workaround to apply on GFX12 (RDNA4). Accepted values are: disabled, partial or full",
           c_name="gfx12_hiz_wa"),
+        B("radv_force_exclusive_image", False,
+          description="Force using exclusive images for apps that incorrectly use concurrent for everything.",
+          c_name="force_exclusive_image"),
+        I("radv_image_meta_path", 0, 0, 3,
+          ("Override the codepath for framebuffer clears, image clears, copies, blits, and MSAA resolves. " +
+           "(0 = default, 1 = fragment shader, 2 = compute shader, 3 = fast clear)"),
+          c_name="image_meta_path"),
     ]
 
     features_options = [
@@ -123,6 +136,9 @@ def declare_options():
         B("radv_enable_float16_gfx8", False,
           "Expose float16 on GFX8, where it's supported but usually not beneficial.",
           c_name="enable_float16_gfx8"),
+        B("radv_enable_custom_border_on_compute_queue", False,
+          "Force enable custom border color on compute queue.",
+          c_name="enable_custom_border_on_compute_queue"),
     ]
 
     misc_options = [

@@ -288,6 +288,7 @@ struct intel_batch_decode_ctx {
    struct intel_spec *spec;
    enum intel_batch_decode_flags flags;
 
+   bool use_efficient_64bit;
    bool use_256B_binding_tables;
    uint64_t surface_base;
    uint64_t bt_pool_base;
@@ -307,7 +308,7 @@ struct intel_batch_decode_ctx {
    struct intel_batch_decode_hash shader_hash;
 
    void (*disassemble_program)(struct intel_batch_decode_ctx *ctx,
-                               uint32_t ksp,
+                               uint64_t ksp,
                                const char *short_name,
                                const char *name);
 };

@@ -24,6 +24,7 @@ struct fd5_blend_stateobj {
    } rb_mrt[A5XX_MAX_RENDER_TARGETS];
    uint32_t rb_blend_cntl;
    uint32_t sp_blend_cntl;
+   bool use_dual_src_blend;
    bool lrz_write;
 };
 

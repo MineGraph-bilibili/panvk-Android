@@ -23,6 +23,7 @@ pass(jay_function *f)
    /* Determine which booleans need to be in ARF. Otherwise, we prefer UGPR. */
    BITSET_WORD *arf = BITSET_CALLOC(f->ssa_alloc);
    jay_def *as_ugpr = calloc(f->ssa_alloc, sizeof(jay_def));
+   BITSET_WORD *read_as_ugpr = BITSET_CALLOC(f->ssa_alloc);
 
    jay_foreach_inst_in_func(f, block, I) {
       /* Conditional modifiers, except CMPs that can write a UGPR */
@@ -92,7 +93,7 @@ pass(jay_function *f)
           * for uniform UGPR outputs, make sure we broadcast the whole ~0.
           */
          if (jay_is_null(I->dst) || BITSET_TEST(arf, jay_index(I->dst))) {
-            I->type = JAY_TYPE_U | f->shader->dispatch_width;
+            I->type = jay_flag_type(f);
          } else {
             I->type = JAY_TYPE_U32;
          }
@@ -106,9 +107,13 @@ pass(jay_function *f)
          fix_file(arf, &I->src[i]);
       }
 
-      /* Source 0 can read ARF, source 1 can't, so commute where we can */
+      /* Source 0 can read ARF, source 1 can't, so commute where we can. If we
+       * already materialized a move for one source, try to reuse it.
+       */
       if ((I->op >= JAY_OPCODE_AND && I->op <= JAY_OPCODE_XOR) &&
-          (!jay_is_flag(I->src[0]) && jay_is_flag(I->src[1]))) {
+          jay_is_flag(I->src[1]) &&
+          (!jay_is_flag(I->src[0]) ||
+           BITSET_TEST(read_as_ugpr, jay_index(I->src[0])))) {
 
          SWAP(I->src[0], I->src[1]);
       }
@@ -117,11 +122,10 @@ pass(jay_function *f)
       jay_foreach_src(I, i) {
          if (jay_is_flag(I->src[i]) &&
              i != 0 &&
-             i != I->num_srcs - I->predication &&
              !(i == 2 && I->op == JAY_OPCODE_SEL) &&
-             !(i == I->num_srcs - I->predication + 1 &&
-               I->predication == JAY_PREDICATED_DEFAULT)) {
+             i < I->num_srcs - I->predication) {
 
+            BITSET_SET(read_as_ugpr, jay_index(I->src[i]));
             jay_replace_src(&I->src[i], as_ugpr[jay_index(I->src[i])]);
          }
       }
@@ -139,9 +143,7 @@ pass(jay_function *f)
             }
 
             jay_def def = jay_alloc_def(&b, UGPR, 1);
-            jay_MOV(&b, def, dst)->type =
-               JAY_TYPE_U | f->shader->dispatch_width;
-
+            jay_MOV(&b, def, dst)->type = jay_flag_type(f);
             as_ugpr[jay_index(dst)] = def;
          }
       }
@@ -172,6 +174,7 @@ pass(jay_function *f)
 
             I->cond_flag = jay_null();
             I->conditional_mod = GEN_CONDITION_NONE;
+            I->zero_inactive = false;
             cmp->cond_flag.file = FLAG;
          }
       }
@@ -190,16 +193,16 @@ pass(jay_function *f)
             if (b.shader->dispatch_width == 32) {
                jay_AND(&b, JAY_TYPE_U32, I->dst, I->src[0], cond);
             } else {
-               /* The flag is 0...UINT16_MAX, make sure we sign-extend out.
+               /* The flag is 0...UINTN_MAX, make sure we sign-extend out.
                 *
                 * TODO: We should really add extends to the IR properly.
                 */
-               jay_AND_S32_SN(&b, I->dst, I->src[0], cond,
+               jay_AND_SN_S32(&b, I->dst, cond, I->src[0],
                               b.shader->dispatch_width);
             }
          } else {
-            jay_inst *csel = jay_CSEL(&b, JAY_TYPE_U | b.shader->dispatch_width,
-                                      I->dst, I->src[0], I->src[1], cond);
+            jay_inst *csel = jay_CSEL(&b, jay_flag_type(f), I->dst, I->src[0],
+                                      I->src[1], cond);
             csel->conditional_mod =
                cond.negate ? GEN_CONDITION_EQ : GEN_CONDITION_NE;
          }
@@ -210,6 +213,7 @@ pass(jay_function *f)
 
    free(arf);
    free(as_ugpr);
+   free(read_as_ugpr);
 }
 
 JAY_DEFINE_FUNCTION_PASS(jay_lower_flags, pass)

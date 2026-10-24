@@ -758,7 +758,7 @@ elk_nir_optimize(nir_shader *nir, bool is_scalar,
          OPT(nir_opt_loop_unroll);
       }
       OPT(nir_opt_remove_phis);
-      OPT(nir_opt_gcm, false, true);
+      OPT(nir_opt_gcm, false);
       OPT(nir_opt_undef);
       OPT(nir_lower_pack);
    } while (progress);

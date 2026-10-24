@@ -131,12 +131,28 @@ lp_blit(struct pipe_context *pipe,
       return; /* done */
    }
 
+   /* block single-aspected blits from the copy path */
+   bool all_components = true;
+   const struct util_format_description *src_desc = util_format_description(blit_info->src.resource->format);
+   if (util_format_has_depth(src_desc) && !(blit_info->mask & PIPE_MASK_Z))
+      all_components = false;
+   if (util_format_has_stencil(src_desc) && !(blit_info->mask & PIPE_MASK_S))
+      all_components = false;
+   if (!util_format_is_depth_or_stencil(src_desc->format)) {
+      if (src_desc->layout == UTIL_FORMAT_LAYOUT_PLAIN) {
+         if (!(blit_info->mask & BITFIELD_MASK(src_desc->nr_channels)))
+            all_components = false;
+      } else {
+         all_components = false;
+      }
+   }
    if (blit_info->src.resource->format == blit_info->src.format &&
        blit_info->dst.resource->format == blit_info->dst.format &&
        blit_info->src.format == blit_info->dst.format &&
        blit_info->src.resource->nr_samples > 1 &&
        blit_info->dst.resource->nr_samples < 2 &&
-       blit_info->sample0_only) {
+       blit_info->sample0_only &&
+       all_components) {
       util_resource_copy_region(pipe, blit_info->dst.resource,
                                 blit_info->dst.level, blit_info->dst.box.x,
                                 blit_info->dst.box.y, blit_info->dst.box.z,

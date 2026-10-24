@@ -122,6 +122,26 @@ blorp_build_copy_mem_indirect_shader(struct blorp_batch *batch,
    return b.shader;
 }
 
+static bool
+update_image_store_64bit(nir_builder *b,
+                         nir_intrinsic_instr *intrin,
+                         void *data)
+{
+   if (intrin->intrinsic != nir_intrinsic_image_store)
+      return false;
+
+   intrin->intrinsic = nir_intrinsic_bindless_image_store;
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   nir_src_rewrite(
+      nir_get_io_index_src(intrin),
+      nir_load_inline_data_intel(b, 2, 32, nir_imm_int(b, 0),
+                                 .base = BLORP_INLINE_PARAM_SURFACES_LDW, .range = 8));
+
+   return true;
+}
+
 static nir_shader *
 blorp_build_copy_mem2img_indirect_shader(struct blorp_batch *batch,
                                          void *mem_ctx,
@@ -186,6 +206,11 @@ blorp_build_copy_mem2img_indirect_shader(struct blorp_batch *batch,
                                               format_Bpb,
                                               format_block_size,
                                               is_block_compressed);
+
+   if (blorp->config.use_efficient_64bit) {
+      nir_shader_intrinsics_pass(b.shader, update_image_store_64bit,
+                                 nir_metadata_control_flow, NULL);
+   }
 
    return b.shader;
 }
@@ -260,7 +285,7 @@ blorp_copy_memory_indirect(struct blorp_batch *batch,
                            uint64_t stride)
 {
    struct blorp_params params;
-   blorp_params_init(&params);
+   blorp_params_init(&params, batch->blorp);
 
    params.op = BLORP_OP_COPY_INDIRECT;
    params.shader_type = BLORP_SHADER_TYPE_COPY_INDIRECT;
@@ -300,7 +325,8 @@ blorp_copy_memory_to_image_indirect(struct blorp_batch *batch,
    int dimensions = img_blorp_surf->surf->dim + 1;
 
    struct blorp_indirect_copy_mem2img_key key;
-   BLORP_KEY_INIT(key, BLORP_SHADER_TYPE_COPY_INDIRECT,
+   BLORP_KEY_INIT(key, batch->blorp,
+                  BLORP_SHADER_TYPE_COPY_INDIRECT,
                   BLORP_SHADER_PIPELINE_COMPUTE);
    key.dimensions = dimensions;
    key.forced_layer_or_z = forced_layer_or_z;
@@ -310,7 +336,7 @@ blorp_copy_memory_to_image_indirect(struct blorp_batch *batch,
    key.format_bd = fmtl->bd;
 
    struct blorp_params params;
-   blorp_params_init(&params);
+   blorp_params_init(&params, batch->blorp);
 
    params.op = BLORP_OP_COPY_IMAGE_INDIRECT;
    params.shader_type = BLORP_SHADER_TYPE_COPY_INDIRECT;

@@ -65,6 +65,7 @@ pub trait Builder {
         self.push_op(OpLoad {
             dst,
             dst_type,
+            is_tls: true,
             access: MemAccess::Force,
             addr: tls_ptr.into(),
             offset: offset.try_into().unwrap(),
@@ -76,6 +77,8 @@ pub trait Builder {
         let tls_ptr = self.model().fau().special(tls_ptr).unwrap();
         self.push_op(OpStore {
             src_type,
+            is_tls: true,
+            is_psiz: false,
             access: MemAccess::Force,
             data: src,
             addr: tls_ptr.into(),
@@ -105,6 +108,12 @@ pub trait SSABuilder: Builder + AllocSSA {
     fn copy_i32(&mut self, src: Src) -> SSAValue {
         let def = self.alloc_ssa(32);
         self.copy_i32_to(def.into(), src);
+        def
+    }
+
+    fn copy_i64(&mut self, src: Src) -> SSARef {
+        let def = self.alloc_ref(64);
+        self.copy_i64_to(def.clone().into(), src);
         def
     }
 
@@ -242,15 +251,15 @@ pub trait SSABuilder: Builder + AllocSSA {
         let bits = dst_type.bits();
         let comps = dst_type.comps();
         debug_assert!(bits == 16 || bits == 32);
-        debug_assert!(bits * comps <= 32);
+        debug_assert!(comps == 1);
 
         let lane = match axis {
             DerivativeAxis::X => 1_u8,
             DerivativeAxis::Y => 2_u8,
         };
 
-        let left = self.alloc_ssa(dst_type.total_bits());
-        let right = self.alloc_ssa(dst_type.total_bits());
+        let left = self.alloc_ssa(32);
+        let right = self.alloc_ssa(32);
         if coarse {
             self.push_op(OpClper {
                 dst: left.into(),
@@ -280,13 +289,23 @@ pub trait SSABuilder: Builder + AllocSSA {
             });
         }
 
-        let diff = self.alloc_ssa(32);
+        // CLPER works in 32-bits, but we actually only need 16 bits
+        let swiz = if bits == 16 {
+            Swizzle::replicate_half(0)
+        } else {
+            Swizzle::NONE
+        };
+
+        let diff = self.alloc_ssa(dst_type.total_bits());
         self.push_op(OpFAdd {
             dst: diff.into(),
             dst_type,
             round: FRound::NearestEven,
             clamp: FClamp::None,
-            srcs: [Src::from(right), Src::from(left).fneg()],
+            srcs: [
+                Src::from(right).swizzle(swiz),
+                Src::from(left).swizzle(swiz).fneg(),
+            ],
         });
 
         if coarse || sign_is_ignored {
@@ -313,10 +332,11 @@ pub trait SSABuilder: Builder + AllocSSA {
         // We skip it on the X-axis, because the lshift-by-31 will get us a
         // clean mask.
         if matches!(axis, DerivativeAxis::Y) {
-            lane = self.and(DataType::u(bits), 2_u8.into(), lane).into();
+            let mask = Src::from(2_u32).swizzle(swiz);
+            lane = self.and(DataType::u(bits), mask, lane).into();
         }
 
-        let dst = self.alloc_ssa(32);
+        let dst = self.alloc_ssa(dst_type.total_bits());
         self.push_op(OpShiftLop {
             dst: dst.into(),
             dst_type: DataType::get(comps, NumericType::UnsignedInteger, bits),

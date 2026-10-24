@@ -1473,6 +1473,7 @@
 #	define R300_TX_MAX_ANISO_MASK            (7 << 21)
 #       define R300_TX_WRAP_S(x)                 ((x) << 0)
 #       define R300_TX_WRAP_T(x)                 ((x) << 3)
+#       define R300_TX_WRAP_R(x)                 ((x) << 6)
 #       define R300_TX_MAX_MIP_LEVEL(x)          ((x) << 17)
 
 #define R300_TX_FILTER1_0                      0x4440

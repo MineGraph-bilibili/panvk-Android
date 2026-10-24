@@ -614,15 +614,18 @@ emit_ps_null_export(nir_builder *b, lower_ps_state *s)
                      b->shader->info.fs.sample_interlock_unordered ||
                      b->shader->info.fs.pixel_interlock_ordered ||
                      b->shader->info.fs.pixel_interlock_unordered;
+   const bool fbfetch = b->shader->info.fs.uses_fbfetch_output;
 
    /* Gfx10+ doesn't need to export anything if we don't need to export the EXEC mask
     * for discard.
     * In Primitive Ordered Pixel Shading, however, GFX11+ explicitly uses the `done` export to exit
     * the ordered section, and before GFX11, shaders with POPS also need an export.
+    * fbfetch also needs an export to enable late-Z because Z_ORDER has no
+    * effect otherwise.
     * GFX11 DCC decompression also needs an export.
     * An export also seems necessary when dual source blending is used unless CB_TARGET_MASK=0.
     */
-   if (s->options->gfx_level >= GFX10 && !pops &&
+   if (s->options->gfx_level >= GFX10 && !pops && !fbfetch &&
        !s->options->uses_discard &&
        !s->options->dcc_decompress_gfx11 &&
        !s->has_dual_src_blending)

@@ -41,6 +41,7 @@
 #include "v3dv_cmd_buffer.h"
 #include "v3dv_image.h"
 #include "v3dv_entrypoints.h"
+#include "v3dv_utrace.h"
 #include "v3dv_version_dispatch.h"
 
 #include "vk_android.h"
@@ -1803,8 +1804,8 @@ v3dv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
    vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p) {
       p->queueFamilyProperties = v3dv_queue_family_properties;
 
-      vk_foreach_struct(s, p->pNext) {
-         vk_debug_ignored_stype(s->sType);
+      vk_foreach_struct(sType, s, p->pNext) {
+         vk_debug_ignored_stype(sType);
       }
    }
 }
@@ -1826,8 +1827,8 @@ v3dv_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
    v3dv_GetPhysicalDeviceMemoryProperties(physicalDevice,
                                           &pMemoryProperties->memoryProperties);
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
          VkPhysicalDeviceMemoryBudgetPropertiesEXT *p =
             (VkPhysicalDeviceMemoryBudgetPropertiesEXT *) ext;
@@ -1844,7 +1845,7 @@ v3dv_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -2028,6 +2029,7 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
 
    mtx_init(&device->queue_mutex, mtx_plain);
    mtx_init(&device->query_mutex, mtx_plain);
+   mtx_init(&device->events.lock, mtx_plain);
    cnd_init(&device->query_ended);
 
    device->vk.command_buffer_ops = &v3dv_cmd_buffer_ops;
@@ -2078,8 +2080,14 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    v3dv_bo_cache_init(device);
    v3dv_pipeline_cache_init(&device->default_pipeline_cache, device, 0,
                             device->instance->default_pipeline_cache_enabled);
-   device->default_attribute_float =
-      v3d_X((&device->devinfo), create_default_attribute_values)(device, NULL);
+   if (v3d_device_needs_default_attribute_values(&device->devinfo)) {
+      device->default_attribute_float =
+         v3d_X((&device->devinfo), create_default_attribute_values)(device, NULL);
+      if (!device->default_attribute_float) {
+         result = vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         goto fail;
+      }
+   }
 
    if (device->vk.enabled_features.nullDescriptor) {
       device->null_bo =
@@ -2096,10 +2104,13 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    device->device_address_mem_ctx = ralloc_context(NULL);
+   if (!device->device_address_mem_ctx) {
+      result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      goto fail;
+   }
    util_dynarray_init(&device->device_address_bo_list,
                       device->device_address_mem_ctx);
 
-   mtx_init(&device->events.lock, mtx_plain);
    result = v3dv_event_allocate_resources(device);
    if (result != VK_SUCCESS)
       goto fail;
@@ -2114,6 +2125,10 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail;
 
    *pDevice = v3dv_device_to_handle(device);
+   v3dv_utrace_context_init(device);
+#ifdef HAVE_PERFETTO
+   v3dv_utrace_perfetto_init(device, V3DV_UTRACE_PERFETTO_QUEUE_COUNT);
+#endif
 
    return VK_SUCCESS;
 
@@ -2122,13 +2137,20 @@ fail:
    v3dv_pipeline_cache_finish(&device->default_pipeline_cache);
    v3dv_event_free_resources(device);
    v3dv_query_free_resources(device);
+   v3dv_bo_free(device, device->default_attribute_float, 0);
    v3dv_bo_free(device, device->null_bo, 0);
+   ralloc_free(device->device_address_mem_ctx);
+   /* The BO cache has to go last, since the frees above return their private
+    * BOs to it.
+    */
+   v3dv_bo_cache_destroy(device);
 fail_queues_init:
    for (uint32_t i = 0; i < device->queue_count; i++)
       queue_finish(&device->queues[i]);
    vk_free2(&device->vk.alloc, pAllocator, device->queues);
 fail_queues_alloc:
    cnd_destroy(&device->query_ended);
+   mtx_destroy(&device->events.lock);
    mtx_destroy(&device->query_mutex);
    mtx_destroy(&device->queue_mutex);
    vk_device_finish(&device->vk);
@@ -2143,6 +2165,7 @@ v3dv_DestroyDevice(VkDevice _device,
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
 
+   v3dv_utrace_context_fini(device);
    device->vk.dispatch_table.DeviceWaitIdle(_device);
    for (uint32_t i = 0; i < device->queue_count; i++)
       queue_finish(&device->queues[i]);
@@ -2457,16 +2480,16 @@ v3dv_AllocateMemory(VkDevice _device,
    const struct wsi_memory_allocate_info *wsi_info = NULL;
    const VkImportMemoryFdInfoKHR *fd_info = NULL;
    const VkMemoryAllocateFlagsInfo *flags_info = NULL;
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
-      switch ((unsigned)ext->sType) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA:
-         wsi_info = (void *)ext;
+         wsi_info = ext;
          break;
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
-         fd_info = (void *)ext;
+         fd_info = ext;
          break;
       case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:
-         flags_info = (void *)ext;
+         flags_info = ext;
          break;
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
          /* We don't have particular optimizations associated with memory
@@ -2483,7 +2506,7 @@ v3dv_AllocateMemory(VkDevice _device,
          /* This case is handled in the common code */
          break;
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -2634,8 +2657,8 @@ get_image_memory_requirements(struct v3dv_image *image,
       mem_reqs->size = image->planes[plane].size + V3D_TFU_READAHEAD_SIZE;
    }
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -2644,7 +2667,7 @@ get_image_memory_requirements(struct v3dv_image *image,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -2658,8 +2681,8 @@ v3dv_GetImageMemoryRequirements2(VkDevice device,
    V3DV_FROM_HANDLE(v3dv_image, image, pInfo->image);
 
    VkImageAspectFlagBits planeAspect = VK_IMAGE_ASPECT_NONE;
-   vk_foreach_struct_const(ext, pInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO: {
          VkImagePlaneMemoryRequirementsInfo *req =
             (VkImagePlaneMemoryRequirementsInfo *) ext;
@@ -2667,7 +2690,7 @@ v3dv_GetImageMemoryRequirements2(VkDevice device,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -2878,8 +2901,8 @@ get_buffer_memory_requirements(struct v3dv_buffer *buffer,
       .size = align64(buffer->size + V3D_TFU_READAHEAD_SIZE, buffer->alignment),
    };
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -2888,7 +2911,7 @@ get_buffer_memory_requirements(struct v3dv_buffer *buffer,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

@@ -8,6 +8,7 @@
 #include "nvk_private.h"
 
 #include "nvk_debug.h"
+#include "nvk_instance.h"
 #include "nv_device_info.h"
 
 #include "vk_physical_device.h"
@@ -79,6 +80,17 @@ static inline const struct nvk_instance *
 nvk_physical_device_instance(const struct nvk_physical_device *pdev)
 {
    return (struct nvk_instance *)pdev->vk.instance;
+}
+
+/* Whether H.264 video decode is enabled: the hardware has NVDEC, the codec
+ * is built in, and the user opted in via NVK_EXPERIMENTAL=video.
+ */
+static inline bool
+nvk_video_enabled(const struct nvk_instance *instance,
+                  const struct nv_device_info *info)
+{
+   return (instance->experimental_flags & NVK_EXPERIMENTAL_VIDEO) &&
+          info->has_video && VIDEO_CODEC_H264DEC;
 }
 
 VkResult nvk_create_drm_physical_device(struct vk_instance *vk_instance,

@@ -239,6 +239,10 @@ struct wsi_swapchain {
    VkSemaphore present_id_timeline;
    bool present_wait_enabled;
 
+   /* sw (CPU-presented) images: the platform's present thread waits for
+    * the per-image fence itself, so vkQueuePresentKHR need not block. */
+   bool sw_fence_wait_in_present_thread;
+
    int signal_dma_buf_from_semaphore;
    /**
     * Optional semaphore for implicit-sync swapchains.  It will be signaled by
@@ -545,6 +549,11 @@ VkResult wsi_x11_init_wsi(struct wsi_device *wsi_device,
                           const struct driOptionCache *dri_options);
 void wsi_x11_finish_wsi(struct wsi_device *wsi_device,
                         const VkAllocationCallbacks *alloc);
+#ifdef WSI_X11_DLOPEN
+bool wsi_x11_dlopen(void);
+#else
+static inline bool wsi_x11_dlopen(void) { return true; }
+#endif
 VkResult wsi_wl_init_wsi(struct wsi_device *wsi_device,
                          const VkAllocationCallbacks *alloc,
                          VkPhysicalDevice physical_device);

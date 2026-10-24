@@ -27,6 +27,7 @@
 #include "util/perf/u_trace.h"
 
 #include "util/simple_mtx.h"
+#include "util/u_dynarray.h"
 #include "util/u_call_once.h"
 #include "util/u_printf.h"
 #include "util/vma.h"
@@ -71,8 +72,13 @@ struct panvk_device {
    } kmod;
 
    struct panvk_priv_bo *tiler_heap;
+   /* v9: second heap for the odd passes of PANVK_OVERLAP (v67b), so each
+    * heap grows from its own base (kbase commits up to the faulting page). */
+   struct panvk_priv_bo *tiler_heap2;
    struct panvk_priv_bo *indirect_varying_buffer;
    struct panvk_priv_bo *sample_positions;
+   /* BC4/BC5 -> EAC transcode table, created on first use. */
+   struct panvk_priv_bo *bc_eac_lut;
 
    struct {
       struct panvk_priv_bo *handlers_bo;
@@ -80,6 +86,9 @@ struct panvk_device {
    } tiler_oom;
 
    struct vk_meta_device meta;
+
+   /* Bound in place of a missing FS so the depth bounds test still runs. */
+   struct panvk_shader *depth_bounds_fs;
 
    struct {
       struct panvk_pool rw;
@@ -112,6 +121,18 @@ struct panvk_device {
    } utrace;
 
    struct panvk_device_draw_context* draw_ctx;
+   struct panvk_priv_mem gpu_prerast_arena;
+   struct panvk_priv_mem gpu_prerast_tess_arena;
+   /* struct panvk_gpu_prerast_syncs */
+   struct panvk_priv_bo *gpu_prerast_syncs;
+
+   /* Device-wide thread local storage shared by all command buffers. The
+    * last BO is the current one; outgrown ones stay alive for command
+    * buffers that still point at them. */
+   struct {
+      simple_mtx_t lock;
+      struct util_dynarray bos;
+   } tls;
 
    struct {
       struct pandecode_context *decode_ctx;
@@ -261,12 +282,6 @@ panvk_as_free(struct panvk_device *device, struct util_vma_heap *heap,
    util_vma_heap_free(heap, address, size);
    simple_mtx_unlock(&device->as.lock);
 }
-
-struct nir_shader;
-
-bool panvk_nir_lower_tile_image(struct nir_shader *nir,
-                                uint32_t *color_read_out, bool *z_read_out,
-                                bool *s_read_out);
 
 struct vk_queue;
 struct vk_queue_submit;

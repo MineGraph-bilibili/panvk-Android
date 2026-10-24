@@ -8,15 +8,6 @@ glx@glx_arb_sync_control@waitformsc,Fail
 shaders@glsl-max-varyings >max_varying_components,Fail
 shaders@glsl-uniform-interstage-limits@subdivide 5,Fail
 shaders@glsl-uniform-interstage-limits@subdivide 5- statechanges,Fail
-shaders@point-vertex-id divisor,Fail
-shaders@point-vertex-id gl_instanceid,Fail
-shaders@point-vertex-id gl_instanceid divisor,Fail
-shaders@point-vertex-id gl_vertexid,Fail
-shaders@point-vertex-id gl_vertexid divisor,Fail
-shaders@point-vertex-id gl_vertexid gl_instanceid,Fail
-shaders@point-vertex-id gl_vertexid gl_instanceid divisor,Fail
-spec@!opengl 1.0@gl-1.0-edgeflag,Fail
-spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
 spec@!opengl 1.0@rasterpos,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_gs_linked,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_tes_linked,Fail
@@ -635,13 +626,11 @@ spec@arb_texture_view@rendering-layers-image@layers rendering of image2DArray,Fa
 spec@arb_texture_view@rendering-layers-image@layers rendering of imageCubeArray,Fail
 spec@arb_uniform_buffer_object@maxblocks,Fail
 spec@arb_viewport_array@render-depthrange,Fail
-spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_ext_device_base@conformance,Fail
 spec@egl_ext_device_base@conformance@configless_tests,Fail
 spec@egl_ext_device_base@conformance@pbuffer_tests,Fail
 spec@egl_ext_device_base@conformance@surfaceless_tests,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 spec@ext_clear_texture@ext_clear_texture-stencil,Fail
 spec@ext_framebuffer_blit@fbo-sys-sub-blit,Fail
@@ -855,7 +844,6 @@ spec@glsl-1.50@execution@geometry@tri-strip-ordering-with-prim-restart gl_triang
 spec@glsl-1.50@execution@geometry@tri-strip-ordering-with-prim-restart gl_triangle_strip_adjacency other,Fail
 spec@glsl-1.50@execution@primitive-id-no-gs-quad-strip,Fail
 spec@glsl-1.50@execution@primitive-id-no-gs-quads,Fail
-spec@glsl-1.50@execution@variable-indexing@gs-output-array-vec4-index-wr,Fail
 spec@glsl-1.50@gs-max-output,Fail
 spec@glsl-1.50@gs-max-output-components,Fail
 spec@glsl-es-3.10@execution@cs-image-atomic-if-else,Fail
@@ -1013,7 +1001,6 @@ spec@nv_copy_image@nv_copy_image-formats --samples=8@Source: GL_RGB32UI/Destinat
 # uprev Piglit in Mesa
 spec@!opengl 1.1@large-tex,Fail
 spec@!opengl 1.1@large-tex@test_clear_and_read_pixels,Fail
-spec@!opengl 3.0@gl_vertexid used with glmultidrawarrays,Fail
 spec@arb_copy_image@arb_copy_image-formats --samples=2@Source: GL_RGB32F/Destination: GL_RGB32I,Fail
 spec@arb_copy_image@arb_copy_image-formats --samples=2@Source: GL_RGB32F/Destination: GL_RGB32UI,Fail
 spec@arb_copy_image@arb_copy_image-formats --samples=2@Source: GL_RGB32I/Destination: GL_RGB32I,Fail
@@ -1041,55 +1028,18 @@ spec@arb_sample_shading@samplemask 2@0.500000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 4@0.250000 fix,Fail
 spec@arb_sample_shading@samplemask 4@0.250000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 4@0.250000 partition,Fail
-spec@arb_sample_shading@samplemask 4@0.500000 fix,Fail
 spec@arb_sample_shading@samplemask 4@0.500000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 4@0.500000 partition,Fail
-spec@arb_sample_shading@samplemask 4@1.000000 fix,Fail
 spec@arb_sample_shading@samplemask 4@1.000000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 4@1.000000 partition,Fail
-spec@arb_sample_shading@samplemask 4@noms fix,Fail
 spec@arb_sample_shading@samplemask 4@noms mask_in_one,Fail
-spec@arb_sample_shading@samplemask 4@sample fix,Fail
 spec@arb_sample_shading@samplemask 4@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 4@sample partition,Fail
-spec@arb_sample_shading@samplemask 6 all@0.125000 fix,Fail
-spec@arb_sample_shading@samplemask 6 all@0.125000 partition,Fail
-spec@arb_sample_shading@samplemask 6 all@0.250000 fix,Fail
-spec@arb_sample_shading@samplemask 6 all@0.250000 partition,Fail
-spec@arb_sample_shading@samplemask 6 all@0.500000 fix,Fail
-spec@arb_sample_shading@samplemask 6 all@0.500000 partition,Fail
-spec@arb_sample_shading@samplemask 6 all@1.000000 fix,Fail
-spec@arb_sample_shading@samplemask 6 all@1.000000 partition,Fail
-spec@arb_sample_shading@samplemask 6 all@noms fix,Fail
-spec@arb_sample_shading@samplemask 6 all@sample fix,Fail
-spec@arb_sample_shading@samplemask 6 all@sample partition,Fail
-spec@arb_sample_shading@samplemask 8 all@0.125000 fix,Fail
 spec@arb_sample_shading@samplemask 8 all@0.125000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 8 all@0.125000 partition,Fail
-spec@arb_sample_shading@samplemask 8 all@0.250000 fix,Fail
 spec@arb_sample_shading@samplemask 8 all@0.250000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 8 all@0.250000 partition,Fail
-spec@arb_sample_shading@samplemask 8 all@0.500000 fix,Fail
 spec@arb_sample_shading@samplemask 8 all@0.500000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 8 all@0.500000 partition,Fail
-spec@arb_sample_shading@samplemask 8 all@1.000000 fix,Fail
 spec@arb_sample_shading@samplemask 8 all@1.000000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 8 all@1.000000 partition,Fail
-spec@arb_sample_shading@samplemask 8 all@noms fix,Fail
 spec@arb_sample_shading@samplemask 8 all@noms mask_in_one,Fail
-spec@arb_sample_shading@samplemask 8 all@sample fix,Fail
 spec@arb_sample_shading@samplemask 8 all@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 8 all@sample partition,Fail
-spec@arb_shader_storage_buffer_object@layout-std140-write-shader,Fail
-spec@arb_tessellation_shader@execution@nop,Fail
-spec@arb_tessellation_shader@execution@tcs-input@tcs-input-float,Fail
-spec@arb_tessellation_shader@execution@tcs-input@tcs-input-ivec4,Fail
-spec@arb_tessellation_shader@execution@tcs-input@tcs-input-uvec2,Fail
-spec@arb_tessellation_shader@execution@tcs-input@tcs-input-vec4,Fail
-spec@arb_tessellation_shader@execution@tcs-input@tcs-input-vec4_2,Fail
+spec@arb_texture_buffer_range@ranges-2 compat,Fail
 spec@arb_texture_cube_map@copyteximage cube samples=2,Fail
 spec@arb_texture_cube_map@copyteximage cube samples=4,Fail
 spec@arb_texture_cube_map@copyteximage cube samples=6,Fail
@@ -1112,14 +1062,6 @@ spec@ext_texture_array@copyteximage 2d_array samples=4,Fail
 spec@ext_texture_array@copyteximage 2d_array samples=6,Fail
 spec@ext_texture_array@copyteximage 2d_array samples=8,Fail
 spec@ext_texture_integer@fbo-integer-attachments,Fail
-spec@glsl-1.10@execution@variable-indexing@vs-temp-array-mat4-col-wr,Fail
-spec@glsl-1.10@execution@variable-indexing@vs-varying-array-mat4-col-wr,Fail
-spec@glsl-1.20@execution@variable-indexing@vs-temp-array-mat4-col-wr,Fail
-spec@glsl-1.20@execution@variable-indexing@vs-varying-array-mat4-col-wr,Fail
-spec@glsl-1.30@execution@glsl-packed-back-color,Fail
+spec@ext_transform_feedback2@draw-auto offset,Fail
 spec@glsl-1.30@execution@glsl-packed-colors-clamping,Fail
-spec@glsl-1.50@execution@geometry@primitive-types gl_line_strip_adjacency,Fail
-spec@glsl-1.50@execution@interface-vs-named-to-gs-array,Fail
-spec@glsl-1.50@execution@primitive-id-no-gs-line,Fail
-vulkan@shaders@cmat-uniform-ctor,Fail
 

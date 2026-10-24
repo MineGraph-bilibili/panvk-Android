@@ -55,6 +55,8 @@
 
 extern simple_mtx_t etna_device_lock;
 
+#define READ_ONCE(x) (*(volatile __typeof__(x) *)&(x))
+
 struct etna_bo_bucket {
 	uint32_t size;
 	struct list_head list;
@@ -112,6 +114,7 @@ struct etna_bo {
 	uint32_t        flags;
 	uint32_t        name;           /* flink global handle (DRI2 name) */
 	uint32_t        va;             /* GPU virtual address */
+	uint32_t        idx;            /* cached submit bo table index, see bo2idx(..) */
 	int		refcnt;
 
 	int reuse;

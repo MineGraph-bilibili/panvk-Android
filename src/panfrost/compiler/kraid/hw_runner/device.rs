@@ -385,6 +385,25 @@ impl MemoryBuffer {
     fn kbo(&self) -> *mut pan_kmod_bo {
         self.handle.as_ptr()
     }
+
+    pub fn data_view(&self) -> &[u8] {
+        let addr = self.host_addr() as *mut u8;
+        assert!(!addr.is_null());
+        unsafe {
+            std::slice::from_raw_parts(addr, self.size().try_into().unwrap())
+        }
+    }
+
+    pub fn data_view_mut(&mut self) -> &mut [u8] {
+        let addr = self.host_addr() as *mut u8;
+        assert!(!addr.is_null());
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                addr,
+                self.size().try_into().unwrap(),
+            )
+        }
+    }
 }
 
 impl Drop for MemoryBuffer {

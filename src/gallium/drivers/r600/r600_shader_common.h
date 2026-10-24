@@ -27,15 +27,21 @@ extern "C" {
  * With both:        LS | HS  | ES  | GS | VS | PS
  */
 
+enum r600_interp_location {
+	R600_INTERP_LOC_SAMPLE = 0,
+	R600_INTERP_LOC_CENTER = 1,
+	R600_INTERP_LOC_CENTROID = 2,
+};
+
 struct r600_shader_io {
 	gl_varying_slot		varying_slot;
 	gl_system_value		system_value; /* Input only */
 	gl_frag_result		frag_result;
 	unsigned		gpr;
 	int			spi_sid;
-	unsigned		interpolate;
+	enum glsl_interp_mode	interpolate;
 	unsigned		ij_index;
-	unsigned		interpolate_location; //  TGSI_INTERPOLATE_LOC_CENTER, CENTROID, SAMPLE
+	enum r600_interp_location	interpolate_location;
 	unsigned		lds_pos; /* for evergreen */
 	unsigned		write_mask;
 	int			export_param; /* Output only */
@@ -52,6 +58,13 @@ struct r600_shader_atomic {
 
 #define R600_SHADER_MAX_INPUTS (32 /* generic */ + 32 /* patch */ + 16 /* others */)
 #define R600_SHADER_MAX_OUTPUTS (32 /* generic */ + 32 /* patch */ + 16 /* others */)
+
+struct dynamic_offset {
+	uint8_t                 rat_base;
+	uint8_t                 image_offset;
+	uint8_t                 ssbo_offset;
+	uint8_t			uniform_offset;
+};
 
 struct r600_shader {
 	unsigned		processor_type;
@@ -91,11 +104,13 @@ struct r600_shader {
 	bool                 gs_tri_strip_adj_fix;
 	uint8_t			ps_conservative_z;
 
+	uint8_t			num_images;
+	uint8_t			num_ssbos;
+
 	/* Size in bytes of a data item in the ring(s) (single vertex data).
 	   Stages with only one ring items 123 will be set to 0. */
 	unsigned		ring_item_sizes[4];
 
-	unsigned		indirect_files;
 	unsigned		max_arrays;
 	unsigned		num_arrays;
 	unsigned		vs_as_es;
@@ -112,8 +127,7 @@ struct r600_shader {
 	bool			uses_images;
 	bool			uses_helper_invocation;
 	bool			uses_interpolate_at_sample;
-	uint8_t			rat_base;
-	uint8_t                 image_size_const_offset;
+	struct dynamic_offset	dynamic;
         bool			disable_sb;
 	bool                    vs_draw_parameters_enabled;
 };
@@ -121,7 +135,9 @@ struct r600_shader {
 union r600_shader_key {
 	struct {
 		unsigned	nr_cbufs:4;
-		unsigned        image_size_const_offset:5;
+		unsigned        dynamic_image_offset:4;
+		unsigned        dynamic_ssbo_offset:4;
+		unsigned        dynamic_uniform_offset:5;
 		unsigned	color_two_side:1;
 		unsigned	alpha_to_one:1;
 		unsigned	alpha_to_one_and_coverage:1;
@@ -129,17 +145,25 @@ union r600_shader_key {
 		unsigned        dual_source_blend:1;
 	} ps;
 	struct {
+		unsigned	nr_cbufs:4;
+		unsigned        dynamic_ssbo_offset:4;
 		unsigned	as_es:1; /* export shader */
 		unsigned	as_ls:1; /* local shader */
 		unsigned	as_gs_a:1;
 	} vs;
 	struct {
+		unsigned	nr_cbufs:4;
+		unsigned        dynamic_ssbo_offset:4;
 		unsigned	as_es:1;
 	} tes;
 	struct {
+		unsigned	nr_cbufs:4;
+		unsigned        dynamic_ssbo_offset:4;
 		unsigned	prim_mode:3;
 	} tcs;
 	struct {
+		unsigned	nr_cbufs:4;
+		unsigned        dynamic_ssbo_offset:4;
 		unsigned        tri_strip_adj_fix:1;
 	} gs;
 };

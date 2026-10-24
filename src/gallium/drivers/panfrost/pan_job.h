@@ -17,6 +17,18 @@
 #include "pan_resource.h"
 #include "util/perf/u_trace.h"
 
+/* BO is being read/written by the GPU */
+#define PAN_BO_ACCESS_READ  BITFIELD_BIT(0)
+#define PAN_BO_ACCESS_WRITE BITFIELD_BIT(1)
+#define PAN_BO_ACCESS_RW    (PAN_BO_ACCESS_READ | PAN_BO_ACCESS_WRITE)
+
+/* Set when the BO access needs to be recorded to the
+ * panfrost_context::bo_access array at submission time.
+ */
+#define PAN_BO_ACCESS_PER_CTX_TRACKING BITFIELD_BIT(2)
+
+typedef uint8_t pan_bo_access;
+
 /* A panfrost_batch corresponds to a bound FBO we're rendering to,
  * collecting over multiple draws. */
 
@@ -192,20 +204,16 @@ struct panfrost_batch *
 panfrost_get_fresh_batch_for_fbo(struct panfrost_context *ctx,
                                  const char *reason);
 
-void panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo,
-                           mesa_shader_stage stage);
+void panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo);
 
 void panfrost_batch_write_bo(struct panfrost_batch *batch,
-                             struct panfrost_bo *bo,
-                             mesa_shader_stage stage);
+                             struct panfrost_bo *bo);
 
 void panfrost_batch_read_rsrc(struct panfrost_batch *batch,
-                              struct panfrost_resource *rsrc,
-                              mesa_shader_stage stage);
+                              struct panfrost_resource *rsrc);
 
 void panfrost_batch_write_rsrc(struct panfrost_batch *batch,
-                               struct panfrost_resource *rsrc,
-                               mesa_shader_stage stage);
+                               struct panfrost_resource *rsrc);
 
 bool panfrost_any_batch_reads_rsrc(struct panfrost_context *ctx,
                                    struct panfrost_resource *rsrc);

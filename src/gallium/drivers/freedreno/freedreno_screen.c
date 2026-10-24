@@ -125,7 +125,7 @@ fd_screen_get_timestamp(struct pipe_screen *pscreen)
    if (screen->has_timestamp) {
       uint64_t n;
       fd_pipe_get_param(screen->pipe, FD_TIMESTAMP, &n);
-      return ticks_to_ns(n);
+      return fd_ticks_to_ns(n);
    } else {
       int64_t cpu_time = os_time_get_nano();
       return cpu_time + screen->cpu_gpu_time_delta;
@@ -135,7 +135,7 @@ fd_screen_get_timestamp(struct pipe_screen *pscreen)
 static uint64_t
 fd_screen_convert_timestamp(struct pipe_screen *pscreen, uint64_t raw_timestamp)
 {
-   return ticks_to_ns(raw_timestamp);
+   return fd_ticks_to_ns(raw_timestamp);
 }
 
 static void
@@ -351,11 +351,11 @@ fd_init_compute_caps(struct fd_screen *screen)
    caps->max_grid_size[1] = options->max_workgroup_count[1];
    caps->max_grid_size[2] = options->max_workgroup_count[2];
 
-   caps->max_block_size[0] = 1024;
-   caps->max_block_size[1] = 1024;
-   caps->max_block_size[2] = 64;
-
    caps->max_threads_per_block = options->max_workgroup_invocations;
+
+   caps->max_block_size[0] =
+   caps->max_block_size[1] =
+   caps->max_block_size[2] = MIN2(1024, caps->max_threads_per_block);
 
    caps->max_global_size = os_get_gpu_heap_size(1.0f, NULL);
 
@@ -413,6 +413,8 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->has_const_bw = true;
 
    caps->copy_between_compressed_and_plain_formats =
+      is_a5xx(screen) || is_a6xx(screen);
+
    caps->multi_draw_indirect =
    caps->draw_parameters =
    caps->multi_draw_indirect_params =
@@ -457,6 +459,9 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->clip_halfz =
       is_a3xx(screen) || is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen);
 
+   /* a2xx has no depth export from the pixel shader */
+   caps->fragment_shader_depth = !is_a2xx(screen);
+
    caps->texture_multisample =
    caps->image_store_formatted =
    caps->image_load_formatted = is_a5xx(screen) || is_a6xx(screen);
@@ -465,7 +470,7 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    caps->surface_sample_count = is_a6xx(screen);
 
-   caps->depth_clip_disable = is_a3xx(screen) || is_a4xx(screen) || is_a6xx(screen);
+   caps->depth_clip_disable = !is_a2xx(screen);
 
    caps->post_depth_coverage =
    caps->depth_clip_disable_separate =
@@ -622,9 +627,7 @@ fd_init_screen_caps(struct fd_screen *screen)
       (is_a5xx(screen) ? 0 : 1);
 
    /* Stream output. */
-   caps->max_vertex_streams =
-      (is_a6xx(screen) && !screen->info->props.is_a702) ?  /* has SO + GS */
-         PIPE_MAX_SO_BUFFERS : 0;
+   caps->max_vertex_streams = screen->info->props.num_xfb_streams;
    caps->max_stream_output_buffers = is_ir3(screen) ? PIPE_MAX_SO_BUFFERS : 0;
    caps->stream_output_pause_resume =
    caps->stream_output_interleave_buffers =
@@ -654,7 +657,8 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    /* Render targets. */
    caps->max_render_targets = screen->max_rts;
-   caps->max_dual_source_render_targets = (is_a3xx(screen) || is_a6xx(screen)) ? 1 : 0;
+   caps->max_dual_source_render_targets =
+      (is_a3xx(screen) || is_a5xx(screen) || is_a6xx(screen)) ? 1 : 0;
 
    /* Queries. */
    caps->occlusion_query =
@@ -663,7 +667,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->query_time_elapsed =
       /* only a4xx, requires new enough kernel so we know max_freq: */
       (screen->max_freq > 0) && (is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen));
-   caps->timer_resolution = ticks_to_ns(1);
+   caps->timer_resolution = fd_ticks_to_ns(1);
    caps->query_buffer_object =
    caps->query_so_overflow =
    caps->query_pipeline_statistics_single = is_a6xx(screen);
@@ -731,6 +735,21 @@ fd_init_screen_caps(struct fd_screen *screen)
 
       /* Up to 16 bytes are accelerated */
       caps->hw_clear_buffer_sizes = 1 | 2 | 4 | 8 | 16;
+   }
+
+   /* All of the varying outputs go into the VPC, which counts towards our
+    * max_outputs cap.  We do skip this on 5xx, where the HW actually supports
+    * 128 (https://vulkan.gpuinfo.org/displayreport.php?id=2037#properties) but
+    * we only claim 64.
+    *
+    * MESA_SHADER_TESS_CTRL is left as default, because that mask is the
+    * per-patch built-ins rather than fixed-function outputs.
+    */
+   if (!is_a5xx(screen)) {
+      caps->ignored_output_varyings[MESA_SHADER_VERTEX] =
+         caps->ignored_output_varyings[MESA_SHADER_TESS_EVAL] =
+            caps->ignored_output_varyings[MESA_SHADER_GEOMETRY] =
+               caps->ignored_output_varyings[MESA_SHADER_MESH] = 0;
    }
 }
 

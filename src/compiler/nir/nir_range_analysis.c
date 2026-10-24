@@ -1519,6 +1519,9 @@ struct scalar_query {
    nir_scalar scalar;
 };
 
+static bool
+unsigned_upper_bound_alu_supported(nir_scalar scalar);
+
 static void
 push_scalar_query(struct analysis_state *state, nir_scalar scalar)
 {
@@ -1535,6 +1538,18 @@ get_scalar_key(struct analysis_query *q)
    return nir_scalar_is_const(scalar)
              ? UINT32_MAX
              : ((scalar.def->index + 1) << shift_amount) | scalar.comp;
+}
+
+static uint32_t
+get_uub_scalar_key(struct analysis_query *q)
+{
+   nir_scalar scalar = ((struct scalar_query *)q)->scalar;
+
+   if (nir_scalar_is_alu(scalar) &&
+       !unsigned_upper_bound_alu_supported(scalar))
+      return UINT32_MAX;
+
+   return get_scalar_key(q);
 }
 
 static bool
@@ -1812,12 +1827,11 @@ get_intrinsic_uub(struct analysis_state *state, struct scalar_query q, uint32_t 
    }
 }
 
-static void
-get_alu_uub(struct analysis_state *state, struct scalar_query q, uint32_t *result, const uint32_t *src)
+static bool
+unsigned_upper_bound_alu_supported(nir_scalar scalar)
 {
-   nir_op op = nir_scalar_alu_op(q.scalar);
+   nir_op op = nir_scalar_alu_op(scalar);
 
-   /* Early exit for unsupported ALU opcodes. */
    switch (op) {
    case nir_op_umin:
    case nir_op_imin:
@@ -1847,34 +1861,37 @@ get_alu_uub(struct analysis_state *state, struct scalar_query q, uint32_t *resul
    case nir_op_b2i8:
    case nir_op_b2i16:
    case nir_op_b2i32:
-      break;
+   case nir_op_bit_count:
+      return true;
    case nir_op_u2u1:
    case nir_op_u2u8:
    case nir_op_u2u16:
    case nir_op_u2u32:
-      if (nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size > 32) {
-         /* If src is >32 bits, return max */
-         return;
-      }
-      break;
+      return nir_scalar_chase_alu_src(scalar, 0).def->bit_size <= 32;
    case nir_op_fsat:
    case nir_op_fmul:
    case nir_op_fmul_rtz:
    case nir_op_fmulz:
    case nir_op_f2u32:
    case nir_op_f2i32:
-      if (nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size != 32) {
-         /* Only 32bit floats support for now, return max */
-         return;
-      }
-      break;
-   case nir_op_bit_count:
-      if (nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size > 32) {
-         *result = nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size;
-         return;
-      }
-      break;
+      return nir_scalar_chase_alu_src(scalar, 0).def->bit_size == 32;
    default:
+      return false;
+   }
+}
+
+static void
+get_alu_uub(struct analysis_state *state, struct scalar_query q, uint32_t *result, const uint32_t *src)
+{
+   nir_op op = nir_scalar_alu_op(q.scalar);
+
+   /* Early exit for unsupported ALU opcodes. */
+   if (!unsigned_upper_bound_alu_supported(q.scalar))
+      return;
+
+   if (op == nir_op_bit_count &&
+       nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size > 32) {
+      *result = nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size;
       return;
    }
 
@@ -2169,7 +2186,7 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
    util_dynarray_init_from_stack(&state.query_stack, query_alloc, sizeof(query_alloc));
    util_dynarray_init_from_stack(&state.result_stack, result_alloc, sizeof(result_alloc));
    state.query_size = sizeof(struct scalar_query);
-   state.get_key = &get_scalar_key;
+   state.get_key = &get_uub_scalar_key;
    state.lookup = &scalar_lookup,
    state.insert = &scalar_insert,
    state.process_query = &process_uub_query;
@@ -2185,6 +2202,55 @@ nir_addition_might_overflow(nir_shader *shader, struct hash_table *range_ht,
 {
    uint32_t ub = nir_unsigned_upper_bound(shader, range_ht, ssa);
    return const_val + ub < const_val;
+}
+
+bool
+nir_is_op_nuw(nir_shader *shader, struct hash_table *range_ht, nir_op op, nir_scalar src0, nir_scalar src1)
+{
+   assert(src0.def->bit_size <= 32);
+   assert(src0.def->bit_size == src1.def->bit_size);
+
+   uint32_t ub0 = nir_unsigned_upper_bound(shader, range_ht, src0);
+   uint32_t ub1 = nir_unsigned_upper_bound(shader, range_ht, src1);
+
+   uint32_t max = u_uintN_max(src0.def->bit_size);
+   switch (op) {
+   case nir_op_iadd:
+      return max - ub0 >= ub1;
+      break;
+   case nir_op_ishl:
+      return ub1 <= src0.def->bit_size - util_last_bit(ub0);
+      break;
+   case nir_op_imul:
+      return ub0 == 0 || ub1 <= (max / ub0);
+   default:
+      UNREACHABLE("");
+   }
+}
+
+bool
+nir_is_scalar_nuw(nir_shader *shader, struct hash_table *range_ht, nir_scalar scalar)
+{
+   if (!nir_scalar_is_alu(scalar))
+      return false;
+
+   nir_alu_instr *alu = nir_def_as_alu(scalar.def);
+   switch (alu->op) {
+   case nir_op_iadd:
+   case nir_op_ishl:
+   case nir_op_imul:
+      break;
+   default:
+      return false;
+   }
+
+   if (!alu->no_unsigned_wrap && alu->def.bit_size <= 32) {
+      nir_scalar src0 = nir_scalar_chase_alu_src(scalar, 0);
+      nir_scalar src1 = nir_scalar_chase_alu_src(scalar, 1);
+      return nir_is_op_nuw(shader, range_ht, alu->op, src0, src1);
+   }
+
+   return alu->no_unsigned_wrap;
 }
 
 static uint64_t

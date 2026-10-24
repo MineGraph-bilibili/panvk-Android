@@ -276,22 +276,31 @@ translate_ts_format(enum pipe_format fmt)
 
 /* formats directly supported in the RS engine */
 static inline uint32_t
-translate_rs_format(enum pipe_format fmt)
+translate_rs_format(enum pipe_format fmt, bool halti5)
 {
+   fmt = util_format_linear(fmt);
    fmt = translate_emulated_format_z32f(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
    case PIPE_FORMAT_Z16_UNORM:
+      if (!halti5)
+         return ETNA_NO_MATCH;
       return RS_FORMAT_D16;
    case PIPE_FORMAT_X8Z24_UNORM:
    case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+      if (!halti5)
+         return ETNA_NO_MATCH;
       return RS_FORMAT_D32;
    case PIPE_FORMAT_S8_UINT:
       return RS_FORMAT_S8;
    case PIPE_FORMAT_B4G4R4X4_UNORM:
       return RS_FORMAT_X4R4G4B4;
    case PIPE_FORMAT_B4G4R4A4_UNORM:
+   case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R8G8_UINT:
+   case PIPE_FORMAT_R16_SINT:
+   case PIPE_FORMAT_R16_UINT:
       return RS_FORMAT_A4R4G4B4;
    case PIPE_FORMAT_B5G5R5X1_UNORM:
       return RS_FORMAT_X1R5G5B5;
@@ -300,13 +309,20 @@ translate_rs_format(enum pipe_format fmt)
    case PIPE_FORMAT_B5G6R5_UNORM:
       return RS_FORMAT_R5G6B5;
    case PIPE_FORMAT_B8G8R8X8_UNORM:
-   case PIPE_FORMAT_B8G8R8X8_SRGB:
    case PIPE_FORMAT_R8G8B8X8_UNORM:
       return RS_FORMAT_X8R8G8B8;
    case PIPE_FORMAT_B8G8R8A8_UNORM:
-   case PIPE_FORMAT_B8G8R8A8_SRGB:
    case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_R16G16_SINT:
+   case PIPE_FORMAT_R16G16_UINT:
+   case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R32_UINT:
       return RS_FORMAT_A8R8G8B8;
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
+   case PIPE_FORMAT_R10G10B10X2_UNORM:
+      return RS_FORMAT_A2R10G10B10;
    default:
       return ETNA_NO_MATCH;
    }
@@ -316,6 +332,7 @@ translate_rs_format(enum pipe_format fmt)
 static inline uint32_t
 translate_blt_format(enum pipe_format fmt)
 {
+   fmt = util_format_linear(fmt);
    fmt = translate_emulated_format_z32f(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
@@ -331,21 +348,33 @@ translate_blt_format(enum pipe_format fmt)
    case PIPE_FORMAT_B5G6R5_UNORM:
       return BLT_FORMAT_R5G6B5;
    case PIPE_FORMAT_B8G8R8X8_UNORM:
-   case PIPE_FORMAT_B8G8R8X8_SRGB:
    case PIPE_FORMAT_R8G8B8X8_UNORM:
       return BLT_FORMAT_X8R8G8B8;
    case PIPE_FORMAT_B8G8R8A8_UNORM:
-   case PIPE_FORMAT_B8G8R8A8_SRGB:
    case PIPE_FORMAT_R8G8B8A8_UNORM:
-   case PIPE_FORMAT_R8G8B8A8_SRGB:
       return BLT_FORMAT_A8R8G8B8;
    case PIPE_FORMAT_R10G10B10A2_UNORM:
    case PIPE_FORMAT_R10G10B10X2_UNORM:
+   case PIPE_FORMAT_R10G10B10A2_UINT:
       return BLT_FORMAT_A2R10G10B10;
    case PIPE_FORMAT_R8_UNORM:
+   case PIPE_FORMAT_R8_SINT:
+   case PIPE_FORMAT_R8_UINT:
       return BLT_FORMAT_R8;
+   case PIPE_FORMAT_R16_SINT:
+   case PIPE_FORMAT_R16_UINT:
+      return BLT_FORMAT_A4R4G4B4;
    case PIPE_FORMAT_R8G8_UNORM:
+   case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R8G8_UINT:
       return BLT_FORMAT_R8G8;
+   case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_R16G16_SINT:
+   case PIPE_FORMAT_R16G16_UINT:
+   case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R32_UINT:
+      return BLT_FORMAT_A8R8G8B8;
    case PIPE_FORMAT_A8_UNORM:
    case PIPE_FORMAT_S8_UINT:
       return BLT_FORMAT_A8;

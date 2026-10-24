@@ -160,6 +160,8 @@
                              texel_buffer_capabilities,                        \
                              .is_native = 1}
 
+/* TODO_KOSMICKRISP: This is based on the Apple 7 GPU family, dynamically add
+ * newly supported capabilities on newer gens. */
 static const struct kk_va_format kk_vf_formats[] = {
    // 8-bit formats
    MTL_FMT_NATIVE(R8_UNORM, MTL_FMT_ALL_NO_ATOMIC(8), MTL_FMT_TB_ALL),
@@ -402,10 +404,10 @@ kk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
       .bufferFeatures = vk_format_features2_to_features(buffer2),
    };
 
-   vk_foreach_struct(ext, pFormatProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pFormatProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3: {
-         VkFormatProperties3 *p = (void *)ext;
+         VkFormatProperties3 *p = ext;
          p->linearTilingFeatures = linear2;
          p->optimalTilingFeatures = optimal2;
          p->bufferFeatures = buffer2;
@@ -413,7 +415,7 @@ kk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
       }
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

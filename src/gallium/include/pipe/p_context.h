@@ -450,6 +450,18 @@ struct pipe_context {
    void (*set_min_samples)(struct pipe_context *,
                            unsigned min_samples);
 
+   /**
+    * Sample coverage as the API states it, for hardware that takes a
+    * coverage fraction rather than a per sample bitmask.
+    *
+    * Optional. When a driver leaves this unset the frontend folds the
+    * coverage into set_sample_mask() instead, which quantizes it to the
+    * sample count. A driver implementing this gets the unquantized value
+    * and receives only the explicit sample mask through set_sample_mask().
+    */
+   void (*set_sample_coverage)(struct pipe_context *,
+                               float value, bool invert);
+
    /* Called to set user clip plane state.  Unused on GL drivers with
     * !caps->clip_planes.
     */

@@ -34,6 +34,9 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
    vk_ir_box_node src = DEREF(src_node);
    bool is_root_node = node_index == DEREF(args.header).ir_internal_node_count - 1;
 
+   uint32_t root_child = RADV_BVH_INVALID_NODE;
+   uint32_t root_second_child = RADV_BVH_INVALID_NODE;
+
    for (;;) {
       /* Make changes to the current node's BVH offset value visible. */
       memoryBarrier(gl_ScopeDevice, gl_StorageSemanticsBuffer,
@@ -65,6 +68,11 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
          uint32_t valid_children = radv_ballot(cluster, child != RADV_BVH_INVALID_NODE);
          if ((valid_children & 0x80) != 0 || valid_children == 0)
             break;
+
+         if (bitCount(valid_children) <= 4) {
+            root_child = child;
+            root_second_child = second_child;
+         }
 
          float surface_area = -1.0;
          bool is_valid_internal = child != RADV_BVH_INVALID_NODE && ir_id_to_type(child) == vk_ir_node_internal;
@@ -180,11 +188,8 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
          child_index += child_internal_node_count;
       }
 
-      vec3 origin = src.base.aabb.min;
-      vec3 extent = src.base.aabb.max - src.base.aabb.min;
-
-      extent = uintBitsToFloat((floatBitsToUint(extent) + uvec3(0x7fffff)) & 0x7f800000);
-      uvec3 extent_exponents = floatBitsToUint(extent) >> 23;
+      radv_gfx12_box_node_encoder box_encoder;
+      radv_gfx12_box_node_encoder_init(box_encoder, src.base.aabb);
 
       uint32_t valid_child_count = child_internal_node_count;
 
@@ -202,9 +207,9 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
          DEREF(dst).primitive_base_id = pack_node_id(dst_leaf_offset, 0);
          if (is_root_node)
             DEREF(dst).parent_id = RADV_BVH_INVALID_NODE;
-         DEREF(dst).origin = origin;
-         DEREF(dst).child_count_exponents = extent_exponents.x | (extent_exponents.y << 8) |
-                                            (extent_exponents.z << 16) | ((output_valid_child_count - 1) << 28);
+         DEREF(dst).origin = src.base.aabb.min;
+         DEREF(dst).child_count_exponents =
+            radv_gfx12_box_node_encoder_get_exponents_count(box_encoder, output_valid_child_count - 1);
          DEREF(dst).obb_matrix_index = 0x7f;
       }
 
@@ -221,7 +226,9 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
          if (type == vk_ir_node_internal) {
             encoded_type = 5;
             REF(vk_ir_box_node) child_node = REF(vk_ir_box_node) OFFSET(args.intermediate_bvh, offset);
-            cull_flags = DEREF(child_node).flags & 0x3;
+            uint32_t inv_cull_mask_and_flags = DEREF(child_node).flags;
+            cull_flags = inv_cull_mask_and_flags & 0x3;
+            cull_mask = ~(inv_cull_mask_and_flags >> VK_BVH_BOX_FLAGS_INV_CULL_MASK_SHIFT);
 
             REF(radv_gfx12_box_node) child_box = REF(radv_gfx12_box_node)(dst_child_addr);
             DEREF(child_box).parent_id = node_id;
@@ -326,21 +333,8 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
             child_aabb.max = max(child_aabb.max, second_child_aabb.max);
          }
 
-         radv_gfx12_box_child box_child;
-         box_child.dword0 =
-            min(uint32_t(floor((child_aabb.min.x - origin.x) / extent.x * float(0x1000))), 0xfff) |
-            (min(uint32_t(floor((child_aabb.min.y - origin.y) / extent.y * float(0x1000))), 0xfff) << 12) |
-            cull_flags << 24;
-         /* TODO: subtree mask culling */
-         box_child.dword1 =
-            min(uint32_t(floor((child_aabb.min.z - origin.z) / extent.z * float(0x1000))), 0xfff) |
-            (min(uint32_t(ceil((child_aabb.max.x - origin.x) / extent.x * float(0x1000))) - 1, 0xfff) << 12) |
-            (cull_mask << 24);
-         box_child.dword2 =
-            min(uint32_t(ceil((child_aabb.max.y - origin.y) / extent.y * float(0x1000))) - 1, 0xfff) |
-            (min(uint32_t(ceil((child_aabb.max.z - origin.z) / extent.z * float(0x1000))) - 1, 0xfff) << 12) |
-            (encoded_type << 24) | (child_node_size_128b << 28);
-         DEREF(dst).children[child_index] = box_child;
+         DEREF(dst).children[child_index] = radv_gfx12_box_node_encoder_get_child(
+            box_encoder, child_aabb, encoded_type, child_node_size_128b, cull_flags, cull_mask);
       } else {
          child_index =
             bitCount(radv_ballot(cluster, true) & ((1u << cluster.invocation_index) - 1)) + valid_child_count;
@@ -357,15 +351,49 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
       break;
    }
 
-   if (is_root_node && cluster.invocation_index == 0) {
-      vk_aabb aabb = src.base.aabb;
-      if (DEREF(args.header).active_leaf_count == 0)
-         aabb = vk_aabb(vec3(NAN), vec3(NAN));
+   if (is_root_node) {
+      REF(radv_accel_struct_header_gfx12) header = REF(radv_accel_struct_header_gfx12)(args.output_base);
 
-      REF(radv_accel_struct_header) header = REF(radv_accel_struct_header)(args.output_base);
-      DEREF(header).aabb = aabb;
-      DEREF(header).bvh_offset = args.output_bvh_offset;
-      DEREF(header).root_flags = src.flags;
+      radv_gfx12_box_node_encoder box_encoder;
+      radv_gfx12_box_node_encoder_init(box_encoder, src.base.aabb);
+
+      bool is_valid = root_child != RADV_BVH_INVALID_NODE;
+      uint32_t valid_mask = radv_ballot(cluster, is_valid);
+      uint32_t child_index = bitCount(valid_mask & ((1u << cluster.invocation_index) - 1));
+      if (!is_valid)
+         child_index = bitCount(valid_mask) + bitCount((~valid_mask) & ((1u << cluster.invocation_index) - 1));
+
+      if (is_valid) {
+         uint32_t offset = ir_id_to_offset(root_child);
+         vk_aabb child_aabb = DEREF(REF(vk_ir_node) OFFSET(args.intermediate_bvh, offset)).aabb;
+         if (root_second_child != RADV_BVH_INVALID_NODE) {
+            vk_aabb second_child_aabb =
+               DEREF(REF(vk_ir_node) OFFSET(args.intermediate_bvh, ir_id_to_offset(root_second_child))).aabb;
+            child_aabb.min = min(child_aabb.min, second_child_aabb.min);
+            child_aabb.max = max(child_aabb.max, second_child_aabb.max);
+         }
+         DEREF(header).instance_children[child_index] =
+            radv_gfx12_box_node_encoder_get_child(box_encoder, child_aabb, 5, 0, 0, 0xff);
+      } else if (child_index < 4) {
+         radv_gfx12_box_child null_child;
+         null_child.dword0 = 0xffffffff;
+         null_child.dword1 = 0xfff;
+         null_child.dword2 = 0;
+         DEREF(header).instance_children[child_index] = null_child;
+      }
+
+      if (cluster.invocation_index == 0) {
+         vk_aabb aabb = src.base.aabb;
+         if (DEREF(args.header).active_leaf_count == 0)
+            aabb = vk_aabb(vec3(NAN), vec3(NAN));
+
+         DEREF(header).base.aabb = aabb;
+         DEREF(header).base.bvh_offset = args.output_bvh_offset;
+         DEREF(header).base.root_flags = src.flags;
+
+         DEREF(header).instance_child_count_exponents =
+            radv_gfx12_box_node_encoder_get_exponents_count(box_encoder, bitCount(valid_mask) - 1);
+      }
    }
 }
 

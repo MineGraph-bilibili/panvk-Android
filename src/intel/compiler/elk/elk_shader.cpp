@@ -24,6 +24,7 @@ elk_type_for_base_type(const struct glsl_type *type)
    case GLSL_TYPE_INT:
    case GLSL_TYPE_BOOL:
    case GLSL_TYPE_SUBROUTINE:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       return ELK_REGISTER_TYPE_D;
    case GLSL_TYPE_INT16:
       return ELK_REGISTER_TYPE_W;

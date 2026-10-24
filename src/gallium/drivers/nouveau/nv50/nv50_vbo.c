@@ -540,7 +540,7 @@ nv50_draw_elements_inline_u16(struct nouveau_pushbuf *push, const uint16_t *map,
 
       BEGIN_NI04(push, NV50_3D(VB_ELEMENT_U16), nr);
       for (i = 0; i < nr; ++i) {
-         PUSH_DATA(push, (map[1] << 16) | map[0]);
+         PUSH_DATA(push, ((uint32_t)(map[1]) << 16) | map[0]);
          map += 2;
       }
       count -= nr * 2;

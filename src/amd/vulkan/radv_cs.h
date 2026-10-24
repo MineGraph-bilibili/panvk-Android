@@ -220,7 +220,8 @@ void radv_cs_emit_write_event_eop(struct radv_cmd_stream *cs, enum amd_gfx_level
 
 void radv_cs_emit_cache_flush(struct radeon_winsys *ws, struct radv_cmd_stream *cs, enum amd_gfx_level gfx_level,
                               uint32_t *flush_cnt, uint64_t flush_va, enum radv_cmd_flush_bits flush_bits,
-                              enum rgp_flush_bits *sqtt_flush_bits, uint64_t gfx9_eop_bug_va);
+                              enum ac_rgp_flush_bits *rgp_flush_bits, enum radv_pws_acquire_point pws_acquire_point,
+                              uint64_t gfx9_eop_bug_va);
 
 VkResult radv_create_cmd_stream(const struct radv_device *device, const enum amd_ip_type ip_type,
                                 const bool is_secondary, struct radv_cmd_stream **cs_out);

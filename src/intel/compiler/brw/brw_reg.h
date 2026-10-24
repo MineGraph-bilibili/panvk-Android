@@ -936,6 +936,12 @@ brw_null_reg(void)
    return brw_vec8_reg(ARF, BRW_ARF_NULL, 0);
 }
 
+static inline bool
+brw_reg_is_null(struct brw_reg reg)
+{
+   return reg.file == ARF && reg.nr == BRW_ARF_NULL;
+}
+
 static inline struct brw_reg
 brw_null_vec(unsigned width)
 {

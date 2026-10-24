@@ -53,16 +53,16 @@ get_texture_swiz(enum pipe_format fmt, unsigned swizzle_r,
                  unsigned swizzle_g, unsigned swizzle_b, unsigned swizzle_a);
 
 uint32_t
-translate_pe_format(enum pipe_format fmt);
+translate_pe_format(enum pipe_format fmt, const struct etna_screen *screen);
 
 int
-translate_pe_format_rb_swap(enum pipe_format fmt);
+translate_pe_format_rb_swap(enum pipe_format fmt, const struct etna_screen *screen);
 
 uint32_t
 remap_texture_format_rb_swap(uint32_t format);
 
 enum pipe_format
-translate_pe_internal_format(enum pipe_format fmt);
+translate_pe_internal_format(enum pipe_format fmt, const struct etna_screen *screen);
 
 uint32_t
 translate_vertex_format_type(enum pipe_format fmt);
@@ -80,6 +80,12 @@ translate_format_128bit_to_64bit(enum pipe_format fmt)
     default:
         return fmt;
     }
+}
+
+static inline bool
+resolve_copies_one_sample(enum pipe_format format)
+{
+   return util_format_is_pure_integer(format);
 }
 
 static inline bool

@@ -36,7 +36,7 @@ typedef struct {
 
 typedef struct {
    nir_variable_mode modes;
-   bool lower_indirect_vertex_index;
+   nir_lower_io_indirect_loads_options options;
 
    /* If arrays are loaded only once at the beginning, these are the local
     * variables.
@@ -140,7 +140,16 @@ gather_indirect_inputs(struct nir_builder *b, nir_intrinsic_instr *intr,
       var->first_comp = MIN2(var->first_comp, first_comp);
       var->last_comp = MAX2(var->last_comp, last_comp);
    }
-   return false;
+
+   /* Return whether the index is indirect. */
+   nir_def *array_index = nir_get_io_offset_src(intr)->ssa;
+   bool indirect = !nir_scalar_is_const(nir_scalar_resolved(array_index, 0));
+
+   if (intr->intrinsic == nir_intrinsic_load_input_vertex &&
+       state->options & nir_io_indirect_loads_lower_vertex_index)
+      indirect |= !nir_scalar_is_const(nir_scalar_resolved(intr->src[0].ssa, 0));
+
+   return indirect;
 }
 
 static bool
@@ -161,10 +170,15 @@ lower_load(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
     * it for each slot and set the offset/location.
     */
    if (state->modes & (is_output ? nir_var_shader_out : nir_var_shader_in)) {
-      nir_scalar array_index =
-         nir_scalar_resolved(nir_get_io_offset_src(intr)->ssa, 0);
+      nir_src *array_index_src = nir_get_io_offset_src(intr);
+      nir_scalar array_index = nir_scalar_resolved(array_index_src->ssa, 0);
+      bool lower_array_index =
+         !nir_scalar_is_const(array_index) &&
+         (!(state->options & nir_io_indirect_loads_lower_divergent_offset_only) ||
+          nir_src_is_divergent(array_index_src));
+
       nir_src *vertex_index_src =
-         state->lower_indirect_vertex_index &&
+         state->options & nir_io_indirect_loads_lower_vertex_index &&
          intr->intrinsic != nir_intrinsic_load_interpolated_input ?
                                nir_get_io_index_src(intr) : NULL;
       nir_scalar vertex_index = {0};
@@ -172,7 +186,7 @@ lower_load(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
       if (vertex_index_src)
          vertex_index = nir_scalar_resolved(vertex_index_src->ssa, 0);
 
-      if (!nir_scalar_is_const(array_index) ||
+      if (lower_array_index ||
           (vertex_index_src && !nir_scalar_is_const(vertex_index))) {
          nir_variable *temp = NULL;
          nir_variable **array =
@@ -363,16 +377,25 @@ lower_load(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
 static bool
 lower_indirect_loads(nir_function_impl *impl, nir_variable_mode modes,
-                     bool lower_indirect_vertex_index)
+                     nir_lower_io_indirect_loads_options options)
 {
    lower_io_indir_loads_state *state = calloc(1, sizeof(*state));
    state->modes = modes;
-   state->lower_indirect_vertex_index = lower_indirect_vertex_index;
+   state->options = options;
 
    if (modes & nir_var_shader_in) {
-      nir_function_intrinsics_pass(impl, gather_indirect_inputs,
-                                   nir_metadata_all, state);
+      bool has_indirect_inputs =
+         nir_function_intrinsics_pass(impl, gather_indirect_inputs,
+                                      nir_metadata_all, state);
+
+      if (modes == nir_var_shader_in && !has_indirect_inputs) {
+         free(state);
+         return false;
+      }
    }
+
+   if (options & nir_io_indirect_loads_lower_divergent_offset_only)
+      nir_metadata_require(impl, nir_metadata_divergence);
 
    bool progress = nir_function_intrinsics_pass(impl, lower_load,
                                                 nir_metadata_control_flow, state);
@@ -382,7 +405,7 @@ lower_indirect_loads(nir_function_impl *impl, nir_variable_mode modes,
 
 bool
 nir_lower_io_indirect_loads(nir_shader *nir, nir_variable_mode modes,
-                            bool lower_indirect_vertex_index)
+                            nir_lower_io_indirect_loads_options options)
 {
    assert(modes & (nir_var_shader_in | nir_var_shader_out));
    assert(!(modes & ~(nir_var_shader_in | nir_var_shader_out)));
@@ -393,8 +416,7 @@ nir_lower_io_indirect_loads(nir_shader *nir, nir_variable_mode modes,
 
    bool progress = false;
    nir_foreach_function_impl(impl, nir) {
-      progress |= lower_indirect_loads(impl, modes,
-                                       lower_indirect_vertex_index);
+      progress |= lower_indirect_loads(impl, modes, options);
    }
 
    return progress;

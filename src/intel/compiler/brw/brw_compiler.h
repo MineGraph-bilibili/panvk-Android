@@ -18,7 +18,9 @@
 #include "util/shader_stats.h"
 #include "util/u_math.h"
 #include "brw_isa_info.h"
+#include "compiler/intel_nir.h"
 #include "compiler/intel_shader_enums.h"
+#include "compiler/intel_nir.h"
 #include "nir_shader_compiler_options.h"
 
 #ifdef __cplusplus
@@ -138,13 +140,6 @@ struct brw_compiler {
     */
    uint32_t num_lowered_storage_formats;
    uint32_t *lowered_storage_formats;
-
-   /**
-    * Debug flag for forcing minimum number of threads per EU for shader.
-    * Can optionally only apply to shaders matching source hash.
-    */
-   uint32_t threads_per_eu_min;
-   uint64_t threads_per_eu_srchash;
 };
 
 #define brw_shader_debug_log(compiler, data, fmt, ... ) do {    \
@@ -234,13 +229,21 @@ struct brw_base_prog_key {
     */
    uint32_t view_mask;
 
+   /** Use efficient 64bit bit mode
+    *
+    * Gfx35+ only.
+    */
+   bool use_efficient_64bit : 1;
+
    enum brw_robustness_flags robust_flags:3;
 
    enum intel_vue_layout vue_layout:2;
 
    enum brw_divergent_atomics_flags divergent_atomics_flags:2;
 
-   uint32_t padding:25;
+   enum intel_atomic_branch_cases atomic_branch_flags:3;
+
+   uint32_t padding:21;
 };
 
 /**
@@ -514,13 +517,6 @@ struct brw_stage_prog_data {
    uint64_t source_hash;
 };
 
-/**
- * Convert a number of GRF registers used (grf_used in prog_data) into a
- * number of GRF register blocks supported by the hardware.
- */
-unsigned brw_register_blocks(const struct intel_device_info *devinfo,
-                             unsigned grf_used);
-
 enum brw_pixel_shader_computed_depth_mode {
    BRW_PSCDEPTH_OFF   = 0, /* PS does not compute depth */
    BRW_PSCDEPTH_ON    = 1, /* PS computes depth; no guarantee about value */
@@ -608,6 +604,18 @@ struct brw_fs_prog_data {
    /** Whether this shader uses the FS config push data value */
    bool uses_fs_config;
 
+   /** Whether this shader uses the FS color offset push data value
+    *
+    * Efficient 64bit mode only
+    */
+   bool uses_fs_color_offset;
+
+   /** Whether this shader uses the FS color map push data value
+    *
+    * Efficient 64bit mode only
+    */
+   bool uses_fs_color_map;
+
    /** Should this shader be dispatched per-sample */
    bool persample_dispatch;
 
@@ -615,6 +623,11 @@ struct brw_fs_prog_data {
     * Shader is ran at the coarse pixel shading dispatch rate (3DSTATE_CPS).
     */
    bool coarse_pixel_dispatch;
+
+   /**
+    * Whether the shader was compiled with a preference for SIMD32.
+    */
+   bool prefer_simd32;
 
    /**
     * Shader writes the SampleMask and this is AND-ed with the API's
@@ -629,23 +642,10 @@ struct brw_fs_prog_data {
    enum intel_sometimes provoking_vertex_last;
 
    /**
-    * If the fragment shader reads FullyCovered, it needs to know what the
-    * state of conservative rasterization is.
-    */
-   enum intel_sometimes conservative_raster;
-
-   /**
     * Push constant location of intel_fs_config (dynamic configuration of the
     * pixel shader) in bytes.
     */
    unsigned fs_config_param;
-
-   /**
-    * Push constant location of the remapping offset in the instruction heap
-    * for Wa_18019110168 in bytes (the value read by the compiler is a
-    * uint16_t).
-    */
-   unsigned per_primitive_remap_param;
 
    /**
     * Mask of which interpolation modes are required by the fragment shader.
@@ -828,6 +828,9 @@ struct brw_cs_prog_data {
 
    /* True if shader has any sample operation */
    bool uses_sampler;
+
+   /* True if the shader was compiled with SIMD32 forced */
+   bool force_simd32;
 
    struct {
       struct brw_push_const_block cross_thread;
@@ -1276,8 +1279,6 @@ struct brw_compile_params {
 
    uint64_t debug_flag;
 
-   uint64_t source_hash;
-
    debug_archiver *archiver;
 };
 
@@ -1361,6 +1362,9 @@ struct brw_compile_fs_params {
     */
    void *wa_18019110168_data;
    nir_def *(*wa_18019110168_load_per_primitive_remap_table_offset)(nir_builder *b, void *data);
+
+   void *rt_write_data;
+   intel_nir_rt_write_cb rt_write_cb;
 };
 
 /**
@@ -1445,7 +1449,7 @@ brw_stage_has_packed_dispatch(ASSERTED const struct intel_device_info *devinfo,
     * enabled by setting the macro below to true.
     */
    #define ENABLE_TEST_DISPATCH_PACKING false
-   assert(devinfo->ver <= 30);
+   assert(devinfo->ver <= 35);
 
    switch (stage) {
    case MESA_SHADER_FRAGMENT: {
@@ -1544,6 +1548,35 @@ enum brw_topology_id
    /* A value composed of EU ID, thread ID & SIMD lane ID. */
    BRW_TOPOLOGY_ID_EU_THREAD_SIMD,
 };
+
+static inline unsigned
+intel_vrt_register_file_size(const struct intel_device_info *devinfo,
+                             uint64_t source_hash,
+                             unsigned size)
+{
+   if (devinfo->ver < 30)
+      return 128;
+
+   unsigned vrt_size = MIN2(align(size, size > 192 ? 64 : 32), 256);
+
+   if (unlikely(intel_threads_per_eu_min != (uint32_t)-1)) {
+      if (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
+          intel_threads_per_eu_srchash == source_hash) {
+         fprintf(stderr,
+                 "INTEL_THREADS_PER_EU: min=%u for src_hash=0x%" PRIx64 "\n",
+                 intel_threads_per_eu_min, source_hash);
+         vrt_size = MIN2(vrt_size, ROUND_DOWN_TO(1024 / intel_threads_per_eu_min, 32));
+      }
+   }
+
+   return vrt_size;
+}
+
+static inline unsigned
+intel_max_vrt_threads(const struct intel_device_info *devinfo, unsigned grfs)
+{
+   return devinfo->ver >= 30 ? MIN2(1024 / grfs, 10) : UINT32_MAX;
+}
 
 #ifdef __cplusplus
 } /* extern "C" */

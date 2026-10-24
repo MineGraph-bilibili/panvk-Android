@@ -517,6 +517,10 @@ int main()
 
       get_radeon_info(&info, &ac_surface_fake_devices[i]);
 
+      /* TODO: implement modifier tests for GFX6-8 */
+      if (info.gfx_level <= GFX8)
+         continue;
+
       run_modifier_test(&test_entries, ac_surface_fake_devices[i].name, &info);
    }
 

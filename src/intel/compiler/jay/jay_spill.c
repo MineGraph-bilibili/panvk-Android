@@ -240,7 +240,7 @@ insert_reload(struct spill_ctx *ctx,
       jay_inst *I = jay_MOV(&b, new_def, jay_def_spilled(ctx, node));
 
       if (ctx->file == FLAG) {
-         I->type = JAY_TYPE_U | ctx->func->shader->dispatch_width;
+         I->type = jay_flag_type(ctx->func);
       }
    }
 
@@ -529,7 +529,7 @@ min_algorithm(struct spill_ctx *ctx,
 
       if (jay_debug & JAY_DBG_PRINTDEMAND) {
          printf("(SP) %u: ", ctx->nW);
-         jay_print_inst(stdout, block, I, NULL);
+         jay_print_inst(stdout, ctx->func, I);
       }
    }
 
@@ -554,7 +554,7 @@ compute_w_entry_loop_header(struct spill_ctx *ctx, jay_block *block)
 
    jay_foreach_phi_dst_in_block(block, I) {
       if (I->dst.file == ctx->file) {
-         ctx->candidates[j++] = (struct next_use) {
+         ctx->candidates[j++] = (struct next_use){
             .index = jay_index(I->dst),
             .dist = ctx->next_uses[jay_index(I->dst)],
          };
@@ -606,7 +606,7 @@ compute_w_entry(struct spill_ctx *ctx, jay_block *block)
 
    jay_foreach_phi_dst_in_block(block, I) {
       if (I->dst.file == ctx->file) {
-         ctx->candidates[j++] = (struct next_use) {
+         ctx->candidates[j++] = (struct next_use){
             .index = jay_index(I->dst),
             .dist = ctx->next_uses[jay_index(I->dst)],
          };
@@ -894,7 +894,8 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
       min_algorithm(&ctx, block, sb, next_ips, nu_cursor);
 
       /* Handle loop back edges */
-      struct jay_block *loop_head = block->logical_succs[0];
+      struct jay_block *loop_head =
+         *util_dynarray_element(jay_successors(block, GPR), jay_block *, 0);
 
       if ((loop_head && loop_head->loop_header) &&
           loop_head->index < block->index) {
@@ -910,7 +911,7 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
          jay_foreach_block_from(func, loop_head, inside) {
             bool is_break_block = true;
             jay_foreach_successor(inside, succ, file) {
-               is_break_block &= succ->index > block->index;
+               is_break_block &= (*succ)->index > block->index;
             }
 
             /* Remap to use our phis inside the loop */

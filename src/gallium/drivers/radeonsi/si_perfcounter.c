@@ -45,6 +45,7 @@ struct si_query_pc {
 static void si_pc_wait_idle(struct si_context *sctx)
 {
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
+   enum ac_rgp_flush_bits flush_bits = 0;
    uint32_t coher_cntl_stall_all = 0;
 
    if (sctx->gfx_level != GFX9)
@@ -63,7 +64,9 @@ static void si_pc_wait_idle(struct si_context *sctx)
    radeon_emit(EVENT_TYPE(V_028A90_CS_PARTIAL_FLUSH | EVENT_INDEX(4)));
    radeon_end();
 
-   si_cp_acquire_mem(sctx, cs, coher_cntl_stall_all, V_581A_PREFETCH_PARSER);
+   si_cp_acquire_mem(&cs->current, sctx->gfx_level, AMD_IP_GFX,
+                     coher_cntl_stall_all, V_581A_PREFETCH_PARSER,
+                     &sctx->context_roll, &flush_bits);
 }
 
 static void si_pc_emit_instance(struct si_context *sctx, int se, int instance)
@@ -152,7 +155,7 @@ static void si_pc_emit_stop(struct si_context *sctx, struct si_resource *buffer,
 
    si_cp_release_mem(sctx, cs, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM, EOP_INT_SEL_NONE,
                      EOP_DATA_SEL_VALUE_32BIT, buffer, va, 0, SI_NOT_QUERY);
-   si_cp_wait_mem(sctx, cs, va, 0, 0xffffffff, WAIT_REG_MEM_EQUAL);
+   ac_emit_cp_wait_mem(&cs->current, va, 0, 0xffffffff, WAIT_REG_MEM_EQUAL);
 
    radeon_begin(cs);
    radeon_event_write(V_028A90_PERFCOUNTER_SAMPLE);

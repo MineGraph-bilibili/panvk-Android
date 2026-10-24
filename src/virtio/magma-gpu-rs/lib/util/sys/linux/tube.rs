@@ -99,7 +99,7 @@ impl Tube {
     pub fn send(
         &self,
         opaque_data: &[u8],
-        descriptors: &[OwnedDescriptor],
+        descriptors: Vec<OwnedDescriptor>,
     ) -> MagmaGpuResult<usize> {
         let mut space = [MaybeUninit::<u8>::uninit(); cmsg_space!(ScmRights(MAX_IDENTIFIERS))];
         let mut cmsg_buffer = SendAncillaryBuffer::new(&mut space);
@@ -113,7 +113,7 @@ impl Tube {
             &self.socket,
             &[IoSlice::new(opaque_data)],
             &mut cmsg_buffer,
-            SendFlags::empty(),
+            SendFlags::NOSIGNAL,
         )?;
 
         Ok(bytes_sent)

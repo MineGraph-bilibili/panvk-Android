@@ -2315,8 +2315,8 @@ void ResourceTracker::on_vkGetPhysicalDeviceProperties2(void* context,
     };
 
     // Overwrite all of the properties with gfxstream driver info.
-    vk_foreach_struct(ext, pProperties) {
-        switch (ext->sType) {
+    vk_foreach_struct(sType, ext, pProperties) {
+        switch (sType) {
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
                 overwrite_id_props(reinterpret_cast<VkPhysicalDeviceVulkan11Properties*>(ext));
                 break;
@@ -3451,6 +3451,7 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
     {                                                                                          \
         auto it = info_VkDevice.find(device);                                                  \
         if (it == info_VkDevice.end()) return result;                                          \
+        mesa_logw("%s:%d: Allocation failure %d", __func__, __LINE__, result);                 \
         emitDeviceMemoryReport(it->second,                                                     \
                                VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT, 0,    \
                                pAllocateInfo->allocationSize, VK_OBJECT_TYPE_DEVICE_MEMORY, 0, \
@@ -4336,10 +4337,16 @@ VkResult ResourceTracker::on_vkMapMemory(void* context, VkResult host_result, Vk
         createBlob.size = deviceMemoryInfo.coherentMemorySize;
 
         auto blob = VirtGpuDevice::getInstance()->createBlob(createBlob);
-        if (!blob) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        if (!blob) {
+            mesa_loge("%s: createBlob failed", __func__);
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
 
         VirtGpuResourceMappingPtr mapping = blob->createMapping();
-        if (!mapping) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        if (!mapping) {
+            mesa_loge("%s: createMapping failed", __func__);
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
 
         auto coherentMemory =
             std::make_shared<CoherentMemory>(mapping, createBlob.size, device, memory);
@@ -4375,6 +4382,19 @@ VkResult ResourceTracker::on_vkMapMemory(void* context, VkResult host_result, Vk
 
 void ResourceTracker::on_vkUnmapMemory(void*, VkDevice, VkDeviceMemory) {
     // no-op
+}
+
+VkResult ResourceTracker::on_vkMapMemory2(void* context, VkResult host_result, VkDevice device,
+                                          const VkMemoryMapInfo* pMemoryMapInfo, void** ppData) {
+    return on_vkMapMemory(context, host_result, device, pMemoryMapInfo->memory,
+                          pMemoryMapInfo->offset, pMemoryMapInfo->size, pMemoryMapInfo->flags,
+                          ppData);
+}
+
+VkResult ResourceTracker::on_vkUnmapMemory2(void* context, VkResult host_result, VkDevice device,
+                                            const VkMemoryUnmapInfo* pMemoryUnmapInfo) {
+    on_vkUnmapMemory(context, device, pMemoryUnmapInfo->memory);
+    return host_result;
 }
 
 void ResourceTracker::transformImageMemoryRequirements2ForGuest(VkImage image,

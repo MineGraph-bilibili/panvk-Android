@@ -37,7 +37,13 @@
 #include "common/v3d_device_info.h"
 #include "wsi_common.h"
 #include "util/sparse_array.h"
+#include "util/perf/u_trace.h"
 #include "v3dv_drirc.h"
+#include "util/perf/u_trace.h"
+
+#ifdef HAVE_PERFETTO
+#include "v3dv_utrace_perfetto.h"
+#endif
 
 struct v3dv_event;
 struct v3dv_format;
@@ -326,7 +332,7 @@ struct v3dv_device {
       /* Vulkan resources to access the event BO from shaders. We have a
        * pipeline that sets the state of an event and another that waits on
        * a single event. Both pipelines require access to the event state BO,
-       * for which we need to allocate a single descripot set.
+       * for which we need to allocate a single descriptor set.
        */
       VkBuffer buffer;
       VkDeviceMemory mem;
@@ -383,6 +389,18 @@ struct v3dv_device {
 
    void *device_address_mem_ctx;
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */
+
+   uint32_t job_id_counter;
+
+   struct {
+      struct u_trace_context utrace_ctx;
+#ifdef HAVE_PERFETTO
+      struct v3dv_utrace_perfetto utp;
+#endif
+      /* Intended to protect concurrent access to u_trace_context during queue
+       * submission when multiple queues are used */
+      mtx_t process_mutex;
+   } utrace;
 };
 
 struct v3dv_device_memory {

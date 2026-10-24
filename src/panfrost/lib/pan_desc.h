@@ -163,6 +163,9 @@ struct pan_fb_info {
 
    /* indicates whether pixel local storage is enabled */
    bool pls_enabled;
+
+   /* indicates whether 2x mipmap downscaling is enabled */
+   bool downscale_rts;
 };
 
 struct pan_crc {
@@ -363,6 +366,31 @@ pan_effective_tile_block_size(unsigned tile_size)
    return (struct pan_image_block_size){w, h};
 }
 
+#if PAN_ARCH >= 7
+static inline uint64_t
+pan_crc_clear_color_hash_rt(unsigned rt, const uint32_t clear[4])
+{
+   /* The prime number 16381 is carefully selected so that the 32 bits
+    * of each clear color channel take at most 46 bits after the mul (the next
+    * prime number 16411 takes at most 47 bits). The resulting hash value is
+    * guaranteed not to overflow and can safely be packed. */
+   static const uint64_t primes[4] = {16381ULL, 16369ULL, 16363ULL, 16361ULL};
+   uint64_t hash = 0;
+
+   for (unsigned c = 0; c < 4; c++)
+      hash ^= primes[c] * clear[c] * (rt + 1);
+
+   return hash;
+}
+
+static inline uint64_t
+pan_crc_clear_color_pack(uint64_t hash)
+{
+   const uint64_t nonzero_base = 1ull << 46;
+   return (nonzero_base | hash) << 16;
+}
+#endif
+
 #if PAN_ARCH >= 6
 /* All GPUs starting from Bifrost are affected by issue TSIX-2033:
  *
@@ -394,6 +422,9 @@ struct pan_clean_tile
 
 void GENX(pan_emit_tls)(const struct pan_tls_info *info,
                         struct mali_local_storage_packed *out);
+
+bool GENX(pan_image_view_can_crc)(const struct pan_image_view *view,
+                                  unsigned tile_size_px);
 
 int GENX(pan_select_crc_rt)(const struct pan_fb_info *fb, unsigned tile_size);
 

@@ -66,10 +66,29 @@ util_bitpack_uint(uint64_t v, uint32_t start, UNUSED uint32_t end)
 }
 
 ALWAYS_INLINE static uint64_t
+util_bitpack_uint_unpack(uint64_t packed, uint32_t start, uint32_t end)
+{
+   util_bitpack_validate_value(packed);
+
+   const int bits = end - start + 1;
+   const uint64_t mask = BITFIELD64_MASK(bits);
+
+   return (packed >> start) & mask;
+}
+
+ALWAYS_INLINE static uint64_t
 util_bitpack_uint_nonzero(uint64_t v, uint32_t start, uint32_t end)
 {
-   assert(v != 0ull);
+   assert(v != UINT64_C(0));
    return util_bitpack_uint(v, start, end);
+}
+
+ALWAYS_INLINE static uint64_t
+util_bitpack_uint_unpack_nonzero(uint64_t packed, uint32_t start, uint32_t end)
+{
+   uint64_t unpacked = util_bitpack_uint_unpack(packed, start, end);
+   assert(unpacked != UINT64_C(0));
+   return unpacked;
 }
 
 ALWAYS_INLINE static uint64_t
@@ -97,6 +116,16 @@ util_bitpack_sint_nonzero(int64_t v, uint32_t start, uint32_t end)
 {
    assert(v != 0ll);
    return util_bitpack_sint(v, start, end);
+}
+
+ALWAYS_INLINE static int64_t
+util_bitpack_sint_unpack(uint64_t packed, uint32_t start, uint32_t end)
+{
+   util_bitpack_validate_value(packed);
+
+   const int bits = end - start + 1;
+
+   return (packed << (64 - start - bits)) >> (64 - bits);
 }
 
 ALWAYS_INLINE static uint32_t

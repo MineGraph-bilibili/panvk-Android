@@ -52,6 +52,9 @@ restrict_mixed_strides(jay_inst *I, unsigned s)
           (I->op == JAY_OPCODE_MUL_32X16 || I->op == JAY_OPCODE_MUL_32) ||
           (jay_is_send_like(I) || I->op == JAY_OPCODE_DPAS) ||
           jay_is_shuffle_like(I) ||
+          (I->op == JAY_OPCODE_CVT &&
+           jay_cvt_src_type(I) == JAY_TYPE_F16 &&
+           !jay_type_is_any_float(I->type)) ||
           s == 2;
 }
 

@@ -389,6 +389,13 @@ vir_compute_start_end(struct v3d_compile *c, int num_vars)
 {
         vir_for_each_block(block, c) {
                 for (int i = 0; i < num_vars; i++) {
+                        /* We should've computed valid ranges for any temps used by
+                         * the program by the time we get here. If a temp doesn't
+                         *  have a valid range it means  it is not used at all.
+                         */
+                        if (c->temp_end[i] == -1)
+                                continue;
+
                         if (BITSET_TEST(block->live_in, i) &&
                             BITSET_TEST(block->defin, i)) {
                                 c->temp_start[i] = MIN2(c->temp_start[i],
@@ -406,6 +413,139 @@ vir_compute_start_end(struct v3d_compile *c, int num_vars)
                         }
                 }
         }
+}
+
+/* spill_base is defined once at program entry and never redefined, so
+ * we conservatively set its interval start to zero. Direct uses establish its
+ * lifetime within their blocks, but the value may also need to remain live
+ * across block boundaries, for example through a loop back edge.
+ *
+ * Find blocks that use spill_base and walk their predecessors, extending
+ * the interval across every reachable path back to the entry block.
+ */
+static void
+vir_extend_spill_base_live_interval(struct v3d_compile *c, uint32_t sb_temp)
+{
+        bool *live_in = rzalloc_array(c, bool, c->next_block_index);
+        struct qblock **worklist =
+                ralloc_array(c, struct qblock *, c->next_block_index);
+        unsigned count = 0;
+        struct qblock *entry = vir_entry_block(c);
+
+        c->temp_start[sb_temp] = 0;
+
+        vir_for_each_block(block, c) {
+                if (block == entry)
+                        continue;
+
+                vir_for_each_inst(inst, block) {
+                        for (int s = 0; s < vir_get_nsrc(inst); s++) {
+                                if (inst->src[s].file == QFILE_TEMP &&
+                                    inst->src[s].index == sb_temp) {
+                                        live_in[block->index] = true;
+                                        break;
+                                }
+                        }
+
+                        if (live_in[block->index]) {
+                                worklist[count++] = block;
+                                break;
+                        }
+                }
+        }
+
+        while (count) {
+                struct qblock *block = worklist[--count];
+                set_foreach(block->predecessors, pred_entry) {
+                        struct qblock *pred = (struct qblock *)pred_entry->key;
+                        c->temp_end[sb_temp] =
+                                MAX2(c->temp_end[sb_temp], pred->end_ip);
+
+                        if (pred != entry && !live_in[pred->index]) {
+                                live_in[pred->index] = true;
+                                worklist[count++] = pred;
+                        }
+                }
+        }
+
+        ralloc_free(worklist);
+        ralloc_free(live_in);
+}
+
+/* This updates liveness information after RA decided to spill any registers
+ * instead of computing it entirely from scratch, which can be expensive.
+ *
+ * When we spill, most of the liveness information we had computed for temps
+ * that existed before the spill (num_temps_before_spills) is still valid.
+ * Particularly, livein, defin, liveout and defout are still valid since these
+ * track liveness across blocks and spilling doesn't move any temps to different
+ * blocks.
+ *
+ * We still need to recompute program ips since new instructions have been
+ * added and then recompute the new start and end ranges for each temp
+ * accordingly, including new, unspillable temps that still need registers.
+ * New spill/fill temps are local to their blocks, except for spill_base, whose
+ * interval is extended separately by vir_extend_spill_base_live_interval.
+ */
+void
+vir_update_live_intervals_after_spill(struct v3d_compile *c,
+                                      uint32_t num_temps_before_spills)
+{
+        c->temp_start = reralloc(c, c->temp_start, int, c->num_temps);
+        c->temp_end = reralloc(c, c->temp_end, int, c->num_temps);
+
+        for (uint32_t i = 0; i < c->num_temps; i++) {
+                c->temp_start[i] = MAX_INSTRUCTION;
+                c->temp_end[i] = -1;
+        }
+
+        /* Compute new IP ranges for all temps */
+        int32_t ip = 0;
+        vir_for_each_block(block, c) {
+                block->start_ip = ip;
+
+                vir_for_each_inst(inst, block) {
+                        inst->ip = ip;
+                        for (int s = 0; s < vir_get_nsrc(inst); s++) {
+                                if (inst->src[s].file != QFILE_TEMP)
+                                        continue;
+
+                                uint32_t t = inst->src[s].index;
+                                c->temp_start[t] = MIN2(c->temp_start[t], ip);
+                                c->temp_end[t] = MAX2(c->temp_end[t], ip);
+                        }
+                        if (inst->qpu.type == V3D_QPU_INSTR_TYPE_ALU &&
+                            inst->dst.file == QFILE_TEMP) {
+                                uint32_t t = inst->dst.index;
+                                c->temp_start[t] = MIN2(c->temp_start[t], ip);
+                                c->temp_end[t] = MAX2(c->temp_end[t], ip);
+                        }
+
+                        if (inst->src[0].file == QFILE_REG) {
+                                uint32_t min_payload_r = c->devinfo->ver >= 71 ? 1 : 0;
+                                uint32_t max_payload_r = c->devinfo->ver >= 71 ? 3 : 2;
+                                if (inst->src[0].index >= min_payload_r &&
+                                    inst->src[0].index <= max_payload_r) {
+                                        c->temp_start[inst->dst.index] = 0;
+                                }
+                        }
+
+                        ip++;
+                }
+
+                block->end_ip = ip;
+        }
+
+        /* Now expand live ranges based on control flow info */
+        vir_compute_start_end(c, num_temps_before_spills);
+
+        /* Rebuilding the intervals above also resets spill_base's extent
+         * even when this batch did not add any new TMU spills.
+         */
+        if (c->spill_base.file == QFILE_TEMP)
+                vir_extend_spill_base_live_interval(c, c->spill_base.index);
+
+        c->live_intervals_valid = true;
 }
 
 void

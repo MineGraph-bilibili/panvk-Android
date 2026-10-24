@@ -15,14 +15,34 @@ build_surface_handle(nir_builder *b, nir_def *heap_offset,
 {
    if (plane != 0)
       heap_offset = nir_iadd_imm(b, heap_offset, plane * ANV_SURFACE_STATE_SIZE);
-   nir_def *surface_handle =
-      intel_has_extended_bindless(&pdevice->info) ?
-      nir_iadd(b,
-               anv_load_driver_uniform(b, 1, desc_surface_offsets[0]),
-               heap_offset) :
-      nir_ishl_imm(b, heap_offset, 6);
+
+   if (pdevice->uses_efficient_64bit) {
+      return nir_resource_intel(
+         b, 2, 32,
+         nir_imm_int(b, 0xdeaddead),
+         nir_vec2(b,
+                  nir_iadd(b,
+                           anv_load_driver_uniform(b, 1, heap.surfaces_offset),
+                           heap_offset),
+                  nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH)),
+         nir_imm_int(b, 0xdeaddead),
+         nir_imm_int(b, 0) /* bindless_base_offset */,
+         .desc_set = -1,
+         .binding = -1,
+         .resource_block_intel = UINT32_MAX,
+         .resource_access_intel = (
+            nir_resource_intel_bindless |
+            (non_uniform ? nir_resource_intel_non_uniform : 0)));
+   }
+
+   nir_def *surface_handle = nir_iadd(
+      b, anv_load_driver_uniform(b, 1, heap.surfaces_offset),
+      heap_offset);
+   if (!intel_has_extended_bindless(&pdevice->info))
+      surface_handle = nir_ishl_imm(b, surface_handle, 6);
+
    return nir_resource_intel(
-      b,
+      b, 1, 32,
       nir_imm_int(b, 0xdeaddead),
       surface_handle,
       nir_imm_int(b, 0xdeaddead),
@@ -39,17 +59,28 @@ static nir_def *
 build_deref_surface_handle(nir_builder *b, nir_deref_instr *deref,
                            const struct anv_physical_device *pdevice)
 {
+   nir_def *base_address;
+   if (pdevice->uses_efficient_64bit) {
+      base_address = nir_vec2(b,
+                              anv_load_driver_uniform(b, 1, heap.surfaces_offset),
+                              nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH));
+   } else if (intel_has_extended_bindless(&pdevice->info)) {
+      base_address = anv_load_driver_uniform(b, 1, heap.surfaces_offset);
+   } else {
+      base_address = nir_imm_int(b, 0);
+   }
+
    nir_def *surface_handle = nir_explicit_io_address_from_deref(
-      b, deref,
-      intel_has_extended_bindless(&pdevice->info) ?
-      anv_load_driver_uniform(b, 1, desc_surface_offsets[0]) :
-      nir_imm_int(b, 0),
+      b, deref, base_address,
+      pdevice->uses_efficient_64bit ?
+      nir_address_format_vec2_index_32bit_offset :
       nir_address_format_32bit_offset);
+
    if (!intel_has_extended_bindless(&pdevice->info))
       surface_handle = nir_ishl_imm(b, surface_handle, 6);
 
    return nir_resource_intel(
-      b,
+      b, pdevice->uses_efficient_64bit ? 2 : 1, 32,
       nir_imm_int(b, 0xdeaddead),
       surface_handle,
       nir_imm_int(b, 0xdeaddead),
@@ -70,17 +101,27 @@ build_sampler_handle(nir_builder *b, nir_def *heap_offset,
     * config and so the same relocated offset.
     */
    nir_def *sampler_handle;
-   if (embedded) {
-      sampler_handle = heap_offset;
-   } else {
-      sampler_handle = nir_iadd(
+   if (pdevice->uses_efficient_64bit) {
+      sampler_handle = nir_vec2(
          b,
-         anv_load_driver_uniform(b, 1, desc_surface_offsets[1]),
-         plane == 0 ? heap_offset :
-         nir_iadd_imm(b, heap_offset, plane * ANV_SAMPLER_STATE_SIZE));
+         embedded ? heap_offset :
+         nir_iadd(b, anv_load_driver_uniform(b, 1, heap.samplers_offset), heap_offset),
+         embedded ?
+         nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_INTERNAL_HIGH) :
+         nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH));
+   } else {
+      if (embedded) {
+         sampler_handle = heap_offset;
+      } else {
+         sampler_handle = nir_iadd(
+            b,
+            anv_load_driver_uniform(b, 1, heap.samplers_offset),
+            plane == 0 ? heap_offset :
+            nir_iadd_imm(b, heap_offset, plane * ANV_SAMPLER_STATE_SIZE));
+      }
    }
    return nir_resource_intel(
-      b,
+      b, pdevice->uses_efficient_64bit ? 2 : 1, 32,
       nir_imm_int(b, 0xdeaddead),
       sampler_handle,
       nir_imm_int(b, 0xdeaddead),
@@ -99,14 +140,19 @@ static nir_def *
 build_descriptor_addr(nir_builder *b, nir_def *heap_offset,
                       const struct anv_physical_device *pdevice)
 {
-   return nir_pack_64_2x32_split(
+   nir_def *offset = nir_iadd(
       b,
-      nir_iadd(
-         b,
-         anv_load_driver_uniform(b, 1, desc_surface_offsets[0]),
-         heap_offset),
+      anv_load_driver_uniform(b, 1, heap.surfaces_offset),
+      heap_offset);
+   if (!intel_has_extended_bindless(&pdevice->info))
+      offset = nir_iadd(b, offset, anv_load_driver_uniform(b, 1, heap.surfaces_base_offset));
+   return nir_pack_64_2x32_split(
+      b, offset,
       nir_load_reloc_const_intel(
-         b, BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH));
+         b,
+         pdevice->uses_efficient_64bit ?
+         BRW_SHADER_RELOC_DESCRIPTORS_APP_HIGH :
+         BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH));
 }
 
 static nir_def *
@@ -186,7 +232,10 @@ lower_accel_struct_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
    b->cursor = nir_after_instr(&intrin->instr);
 
    nir_def *accel_addr = build_load_descriptor_mem(
-      b, 1, 64, intrin->src[0].ssa, 0, pdevice);
+      b,
+      intrin->def.num_components,
+      intrin->def.bit_size,
+      intrin->src[0].ssa, 0, pdevice);
    nir_def_replace(&intrin->def, accel_addr);
 
    return true;
@@ -494,26 +543,36 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, void *data)
 }
 
 static nir_def *
-build_buffer_addr_for_deref(nir_builder *b, nir_deref_instr *deref,
-                            const struct anv_physical_device *pdevice)
+build_direct_buffer_addr_for_deref(nir_builder *b, nir_deref_instr *deref,
+                                   const struct anv_physical_device *pdevice)
 {
    if (deref->deref_type != nir_deref_type_cast) {
       nir_deref_instr *parent = nir_deref_instr_parent(deref);
       nir_def *addr =
-         build_buffer_addr_for_deref(b, parent, pdevice);
+         build_direct_buffer_addr_for_deref(b, parent, pdevice);
 
       b->cursor = nir_before_instr(&deref->instr);
       return nir_explicit_io_address_from_deref(
-         b, deref, addr, nir_address_format_32bit_index_offset);
+         b, deref, addr,
+         pdevice->uses_efficient_64bit ?
+         nir_address_format_vec2_index_32bit_offset :
+         nir_address_format_32bit_index_offset);
    }
 
    nir_intrinsic_instr *intrin = nir_src_as_intrinsic(deref->parent);
    assert(intrin->intrinsic == nir_intrinsic_load_heap_descriptor);
 
    b->cursor = nir_before_instr(&intrin->instr);
-   return nir_vec2(b,
-                   build_surface_handle(b, intrin->src[0].ssa, 0, 0, pdevice),
-                   nir_imm_int(b, 0));
+
+   nir_def *handle = build_surface_handle(b, intrin->src[0].ssa, 0, 0, pdevice);
+   if (pdevice->uses_efficient_64bit) {
+      return nir_vec3(b,
+                      nir_channel(b, handle, 0),
+                      nir_channel(b, handle, 1),
+                      nir_imm_int(b, 0));
+   } else {
+      return nir_vec2(b, handle, nir_imm_int(b, 0));
+   }
 }
 
 static bool
@@ -556,8 +615,10 @@ try_lower_direct_buffer_intrinsic(nir_builder *b,
 
    b->cursor = nir_before_instr(&intrin->instr);
 
-   nir_def *addr = build_buffer_addr_for_deref(b, deref, pdevice);
+   nir_def *addr = build_direct_buffer_addr_for_deref(b, deref, pdevice);
    nir_lower_explicit_io_instr(b, intrin, addr,
+                               pdevice->uses_efficient_64bit ?
+                               nir_address_format_vec2_index_32bit_offset :
                                nir_address_format_32bit_index_offset);
 
    return true;

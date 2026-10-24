@@ -20,7 +20,7 @@
 static void
 kk_flush_compute_state(struct kk_cmd_buffer *cmd)
 {
-   mtl_compute_encoder *encoder = cs_get_compute(cmd, true);
+   mtl_compute_encoder *encoder = cs_get_compute(cmd);
 
    // Fill Metal argument buffer with descriptor set addresses
    struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
@@ -80,7 +80,7 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
    struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
    struct mtl_size local_size = cs->info.cs.local_size;
 
-   mtl_compute_encoder *encoder = cs_get_compute(cmd, true);
+   mtl_compute_encoder *encoder = cs_get_compute(cmd);
    if (cmd->state.cond_render.enabled) {
       /* Convert to indirect for predication */
       VkDispatchIndirectCommand indirect = {
@@ -129,7 +129,7 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
    struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
    struct mtl_size local_size = cs->info.cs.local_size;
 
-   mtl_compute_encoder *encoder = cs_get_compute(cmd, true);
+   mtl_compute_encoder *encoder = cs_get_compute(cmd);
    if (cmd->state.cond_render.enabled) {
       struct kk_ptr patched =
          kk_pool_alloc(cmd, sizeof(VkDispatchIndirectCommand), 4u);

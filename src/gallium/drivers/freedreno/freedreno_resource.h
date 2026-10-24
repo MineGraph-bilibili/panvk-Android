@@ -13,6 +13,7 @@
 #include "util/simple_mtx.h"
 #include "util/u_dump.h"
 #include "util/u_range.h"
+#include "util/u_resource.h"
 #include "util/u_transfer_helper.h"
 
 #include "freedreno/fdl/freedreno_layout.h"
@@ -39,8 +40,6 @@ enum fd_lrz_direction {
    /* Depth func greater/greater-than: */
    FD_LRZ_GREATER,
 };
-
-#define FD_BIND_GLOBAL_BUFFER         (1 << 31)
 
 /**
  * State related to batch/resource tracking.
@@ -167,6 +166,40 @@ static inline struct fd_memory_object *
 fd_memory_object(struct pipe_memory_object *pmemobj)
 {
    return (struct fd_memory_object *)pmemobj;
+}
+
+/* Multi-planar YUV (NV12 & friends) is always one pipe_resource per plane,
+ * chained via pipe_resource::next -- fd_resource_create() checks for this
+ * after allocating and fails rather than returning a partial chain.  Packed
+ * YUV (YUYV & friends) is a single plane and never chains.
+ */
+
+/* True for two-plane 4:2:0 YUV (NV12/NV21), the only multi-planar shape this
+ * driver renders/resolves as one MRT (and pipe_resource) per plane.
+ */
+static inline bool
+fd_format_is_planar_yuv(enum pipe_format format)
+{
+   return util_format_is_yuv(format) &&
+          util_format_get_num_planes(format) == 2;
+}
+
+/**
+ * Return the resource backing the given plane of a multi-planar resource,
+ * or NULL (with an error logged) if that plane is missing.
+ */
+static inline struct fd_resource *
+fd_resource_plane(struct pipe_resource *prsc, unsigned plane)
+{
+   struct pipe_resource *plane_prsc = util_resource_at_index(prsc, plane);
+
+   if (!plane_prsc) {
+      mesa_loge("missing plane %u of %s", plane,
+                util_format_short_name(prsc->format));
+      return NULL;
+   }
+
+   return fd_resource(plane_prsc);
 }
 
 static inline bool

@@ -871,6 +871,11 @@ public:
       unsigned pixel_local_storage:2;
 
       /**
+       * Non-zero if the fragment shader output produce YUV color output
+       */
+      unsigned yuv:1;
+
+      /**
        * Emit a warning if this variable is accessed.
        */
    private:

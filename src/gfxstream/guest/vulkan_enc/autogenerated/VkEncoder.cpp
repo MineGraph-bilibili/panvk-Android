@@ -16635,146 +16635,18 @@ void VkEncoder::vkCmdSetPrimitiveRestartEnable(VkCommandBuffer commandBuffer,
 VkResult VkEncoder::vkMapMemory2(VkDevice device, const VkMemoryMapInfo* pMemoryMapInfo,
                                  void** ppData, uint32_t doLock) {
     (void)doLock;
-    bool queueSubmitWithCommandsEnabled =
-        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
-    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
-    auto stream = mImpl->stream();
-    auto pool = mImpl->pool();
-    VkDevice local_device;
-    VkMemoryMapInfo* local_pMemoryMapInfo;
-    local_device = device;
-    local_pMemoryMapInfo = nullptr;
-    if (pMemoryMapInfo) {
-        local_pMemoryMapInfo = (VkMemoryMapInfo*)pool->alloc(sizeof(const VkMemoryMapInfo));
-        deepcopy_VkMemoryMapInfo(pool, VK_STRUCTURE_TYPE_MAX_ENUM, pMemoryMapInfo,
-                                 (VkMemoryMapInfo*)(local_pMemoryMapInfo));
-    }
-    if (local_pMemoryMapInfo) {
-        transform_tohost_VkMemoryMapInfo(sResourceTracker,
-                                         (VkMemoryMapInfo*)(local_pMemoryMapInfo));
-    }
-    size_t count = 0;
-    size_t* countPtr = &count;
-    {
-        uint64_t cgen_var_0;
-        (void)cgen_var_0;
-        *countPtr += 1 * 8;
-        count_VkMemoryMapInfo(sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
-                              (VkMemoryMapInfo*)(local_pMemoryMapInfo), countPtr);
-        // WARNING PTR CHECK
-        *countPtr += 8;
-        if (ppData) {
-            *countPtr += sizeof(void*);
-        }
-    }
-    uint32_t packetSize_vkMapMemory2 = 4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
-    uint8_t* streamPtr = stream->reserve(packetSize_vkMapMemory2);
-    uint8_t** streamPtrPtr = &streamPtr;
-    uint32_t opcode_vkMapMemory2 = OP_vkMapMemory2;
-    uint32_t seqno;
-    if (queueSubmitWithCommandsEnabled) seqno = ResourceTracker::nextSeqno();
-    memcpy(streamPtr, &opcode_vkMapMemory2, sizeof(uint32_t));
-    streamPtr += sizeof(uint32_t);
-    memcpy(streamPtr, &packetSize_vkMapMemory2, sizeof(uint32_t));
-    streamPtr += sizeof(uint32_t);
-    if (queueSubmitWithCommandsEnabled) {
-        memcpy(streamPtr, &seqno, sizeof(uint32_t));
-        streamPtr += sizeof(uint32_t);
-    }
-    uint64_t cgen_var_0;
-    *&cgen_var_0 = get_host_u64_VkDevice((*&local_device));
-    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
-    *streamPtrPtr += 1 * 8;
-    reservedmarshal_VkMemoryMapInfo(stream, VK_STRUCTURE_TYPE_MAX_ENUM,
-                                    (VkMemoryMapInfo*)(local_pMemoryMapInfo), streamPtrPtr);
-    // WARNING PTR CHECK
-    uint64_t cgen_var_1 = (uint64_t)(uintptr_t)ppData;
-    memcpy((*streamPtrPtr), &cgen_var_1, 8);
-    gfxstream::aemu::Stream::toBe64((uint8_t*)(*streamPtrPtr));
-    *streamPtrPtr += 8;
-    if (ppData) {
-        memcpy(*streamPtrPtr, (void**)ppData, sizeof(void*));
-        *streamPtrPtr += sizeof(void*);
-    }
-    // WARNING PTR CHECK
-    void** check_ppData;
-    (void)check_ppData;
-    check_ppData = (void**)(uintptr_t)stream->getBe64();
-    if (ppData) {
-        if (!(check_ppData)) {
-            fprintf(stderr, "fatal: ppData inconsistent between guest and host\n");
-        }
-        stream->read((void**)ppData, sizeof(void*));
-    }
     VkResult vkMapMemory2_VkResult_return = (VkResult)0;
-    stream->read(&vkMapMemory2_VkResult_return, sizeof(VkResult));
-    ++encodeCount;
-    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
-        pool->freeAll();
-        stream->clearPool();
-    }
-    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+    vkMapMemory2_VkResult_return =
+        sResourceTracker->on_vkMapMemory2(this, VK_SUCCESS, device, pMemoryMapInfo, ppData);
     return vkMapMemory2_VkResult_return;
 }
 
 VkResult VkEncoder::vkUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo,
                                    uint32_t doLock) {
     (void)doLock;
-    bool queueSubmitWithCommandsEnabled =
-        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
-    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
-    auto stream = mImpl->stream();
-    auto pool = mImpl->pool();
-    VkDevice local_device;
-    VkMemoryUnmapInfo* local_pMemoryUnmapInfo;
-    local_device = device;
-    local_pMemoryUnmapInfo = nullptr;
-    if (pMemoryUnmapInfo) {
-        local_pMemoryUnmapInfo = (VkMemoryUnmapInfo*)pool->alloc(sizeof(const VkMemoryUnmapInfo));
-        deepcopy_VkMemoryUnmapInfo(pool, VK_STRUCTURE_TYPE_MAX_ENUM, pMemoryUnmapInfo,
-                                   (VkMemoryUnmapInfo*)(local_pMemoryUnmapInfo));
-    }
-    if (local_pMemoryUnmapInfo) {
-        transform_tohost_VkMemoryUnmapInfo(sResourceTracker,
-                                           (VkMemoryUnmapInfo*)(local_pMemoryUnmapInfo));
-    }
-    size_t count = 0;
-    size_t* countPtr = &count;
-    {
-        uint64_t cgen_var_0;
-        (void)cgen_var_0;
-        *countPtr += 1 * 8;
-        count_VkMemoryUnmapInfo(sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
-                                (VkMemoryUnmapInfo*)(local_pMemoryUnmapInfo), countPtr);
-    }
-    uint32_t packetSize_vkUnmapMemory2 = 4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
-    uint8_t* streamPtr = stream->reserve(packetSize_vkUnmapMemory2);
-    uint8_t** streamPtrPtr = &streamPtr;
-    uint32_t opcode_vkUnmapMemory2 = OP_vkUnmapMemory2;
-    uint32_t seqno;
-    if (queueSubmitWithCommandsEnabled) seqno = ResourceTracker::nextSeqno();
-    memcpy(streamPtr, &opcode_vkUnmapMemory2, sizeof(uint32_t));
-    streamPtr += sizeof(uint32_t);
-    memcpy(streamPtr, &packetSize_vkUnmapMemory2, sizeof(uint32_t));
-    streamPtr += sizeof(uint32_t);
-    if (queueSubmitWithCommandsEnabled) {
-        memcpy(streamPtr, &seqno, sizeof(uint32_t));
-        streamPtr += sizeof(uint32_t);
-    }
-    uint64_t cgen_var_0;
-    *&cgen_var_0 = get_host_u64_VkDevice((*&local_device));
-    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
-    *streamPtrPtr += 1 * 8;
-    reservedmarshal_VkMemoryUnmapInfo(stream, VK_STRUCTURE_TYPE_MAX_ENUM,
-                                      (VkMemoryUnmapInfo*)(local_pMemoryUnmapInfo), streamPtrPtr);
     VkResult vkUnmapMemory2_VkResult_return = (VkResult)0;
-    stream->read(&vkUnmapMemory2_VkResult_return, sizeof(VkResult));
-    ++encodeCount;
-    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
-        pool->freeAll();
-        stream->clearPool();
-    }
-    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+    vkUnmapMemory2_VkResult_return =
+        sResourceTracker->on_vkUnmapMemory2(this, VK_SUCCESS, device, pMemoryUnmapInfo);
     return vkUnmapMemory2_VkResult_return;
 }
 
@@ -25115,10 +24987,12 @@ VkResult VkEncoder::vkCreatePrivateDataSlotEXT(VkDevice device,
     memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_2, 8);
     *streamPtrPtr += 8;
     /* is handle, possibly out */;
+    stream->setHandleMapping(sResourceTracker->createMapping());
     uint64_t cgen_var_3;
     stream->read((uint64_t*)&cgen_var_3, 8);
     stream->handleMapping()->mapHandles_u64_VkPrivateDataSlot(
         &cgen_var_3, (VkPrivateDataSlot*)pPrivateDataSlot, 1);
+    stream->unsetHandleMapping();
     VkResult vkCreatePrivateDataSlotEXT_VkResult_return = (VkResult)0;
     stream->read(&vkCreatePrivateDataSlotEXT_VkResult_return, sizeof(VkResult));
     ++encodeCount;
@@ -25199,6 +25073,8 @@ void VkEncoder::vkDestroyPrivateDataSlotEXT(VkDevice device, VkPrivateDataSlot p
                                               (VkAllocationCallbacks*)(local_pAllocator),
                                               streamPtrPtr);
     }
+    sResourceTracker->destroyMapping()->mapHandles_VkPrivateDataSlot(
+        (VkPrivateDataSlot*)&privateDataSlot);
     stream->flush();
     ++encodeCount;
     if (0 == encodeCount % POOL_CLEAR_INTERVAL) {

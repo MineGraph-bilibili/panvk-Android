@@ -6,7 +6,7 @@
 #version 460
 
 #include "anv_bvh_defines.h"
-#define VK_USED_BUILD_FLAGS (0)
+#define VK_USED_BUILD_FLAGS (VK_BUILD_FLAG_HAS_QUADS)
 #include "anv_bvh_helpers.h"
 #include "encode.h"
 
@@ -29,30 +29,24 @@
  * 5) When we hit root node, we compute the final root AABB and update the
  *    header.
  */
-layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform CONSTS {
    update_args args;
 };
 
-void
-anv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom_data, uint32_t global_id)
+shared mat4 update_transform;
+
+vk_ir_triangle_node
+anv_load_triangle_node(vk_bvh_geometry_data geom_data, uint32_t local_id, out vk_aabb bounds)
 {
-   triangle_indices indices = load_indices(geom_data.indices, geom_data.index_format, global_id);
+   triangle_indices indices = load_indices(geom_data.indices, geom_data.index_format, local_id);
 
    triangle_vertices vertices = load_vertices(geom_data.data, indices, geom_data.vertex_format, geom_data.stride);
 
-   if (geom_data.transform != NULL) {
-      mat4 transform = mat4(1.0);
-
-      for (uint32_t col = 0; col < 4; col++) {
-         for (uint32_t row = 0; row < 3; row++) {
-            transform[col][row] = DEREF(INDEX(float, geom_data.transform, col + row * 4));
-         }
-      }
-
+   if (args.geom_data.transform != NULL) {
       for (uint32_t i = 0; i < 3; i++) {
-         vertices.vertex[i] = transform * vertices.vertex[i];
+         vertices.vertex[i] = update_transform * vertices.vertex[i];
       }
    }
 
@@ -69,10 +63,76 @@ anv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data 
       }
    }
 
-   node.triangle_id = global_id;
+   node.triangle_id = local_id;
    node.geometry_id_and_flags = geom_data.geometry_id;
 
+   return node;
+}
+
+void
+anv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom_data, uint32_t global_id)
+{
+   vk_ir_triangle_node node = anv_load_triangle_node(geom_data, global_id, bounds);
+
    anv_encode_triangle(dst_ptr, node);
+}
+
+void
+anv_decode_quad_shared_edges(uint32_t prim_index1_delta, uint32_t own_local_id, uint32_t merge_id,
+                             out uint32_t tri0_edge, out uint32_t tri1_edge)
+{
+   uint32_t j[3] = {(prim_index1_delta >> 16) & 0x3, (prim_index1_delta >> 18) & 0x3,
+                     (prim_index1_delta >> 20) & 0x3};
+
+   uint32_t idx3 = (j[0] == 3) ? 0 : ((j[1] == 3) ? 1 : 2);
+   uint32_t tri1_swapped_edge = (idx3 + 1u) % 3u;
+   uint32_t tri0_swapped_edge = (j[tri1_swapped_edge] + 2u) % 3u;
+
+   bool swapped = merge_id < own_local_id;
+   tri0_edge = swapped ? tri1_swapped_edge : tri0_swapped_edge;
+   tri1_edge = swapped ? tri0_swapped_edge : tri1_swapped_edge;
+}
+
+vec3
+anv_load_single_vertex(vk_bvh_geometry_data geom_data, uint32_t local_id, uint32_t vertex_in_tri)
+{
+   triangle_indices indices = load_indices(geom_data.indices, geom_data.index_format, local_id);
+   vec4 vertex = load_vertices(geom_data.data, indices,
+                               geom_data.vertex_format,
+                               geom_data.stride).vertex[vertex_in_tri];
+
+   if (args.geom_data.transform != NULL)
+      vertex = update_transform * vertex;
+
+   return vertex.xyz;
+}
+
+vk_aabb
+anv_build_quad(VOID_REF dst_ptr, vk_bvh_geometry_data geom_data,
+               uint32_t own_local_id, uint32_t merge_id,
+               uint32_t prim_index1_delta)
+{
+   vk_aabb bounds;
+   vk_ir_triangle_node own_node = anv_load_triangle_node(geom_data, own_local_id, bounds);
+
+   uint32_t tri0_edge, tri1_edge;
+   anv_decode_quad_shared_edges(prim_index1_delta, own_local_id, merge_id, tri0_edge, tri1_edge);
+
+   uint32_t v3_index = (tri1_edge + 2u) % 3u;
+   vec3 v3 = anv_load_single_vertex(geom_data, merge_id, v3_index);
+
+   bounds.min = min(bounds.min, v3);
+   bounds.max = max(bounds.max, v3);
+
+   vk_ir_triangle_node_quad quad;
+   quad.coords[0] = v3.x;
+   quad.coords[1] = v3.y;
+   quad.coords[2] = v3.z;
+   quad.triangle_id = merge_id | (((tri1_edge << 2) | tri0_edge) << 28);
+
+   anv_encode_quad(dst_ptr, own_node, quad);
+
+   return bounds;
 }
 
 void
@@ -104,9 +164,27 @@ build_and_encode_leaf(uint32_t leaf_local_idx, BLOCK leaf_block)
    vk_aabb bounds = vk_aabb(vec3(0.0f), vec3(0.0f));
 
    switch (args.geom_data.geometry_type) {
-   case VK_GEOMETRY_TYPE_TRIANGLES_KHR:
+   case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
+      if (VK_TEST_BUILD_FLAG_HAS_QUADS) {
+         REF(anv_quad_leaf_node) quad_leaf = REF(anv_quad_leaf_node)(dst);
+         uint32_t prim_index0 = DEREF(quad_leaf).prim_index0;
+         uint32_t prim_index1_delta = DEREF(quad_leaf).prim_index1_delta;
+         uint32_t delta16 = prim_index1_delta & 0xffff;
+
+         if (delta16 != 0) {
+            uint32_t triangle_id0 = prim_index0;
+            uint32_t triangle_id1 = prim_index0 + delta16;
+            uint32_t merge_idx = (leaf_local_idx == triangle_id0) ? triangle_id1 : triangle_id0;
+
+            bounds = anv_build_quad(dst, args.geom_data, leaf_local_idx, merge_idx,
+                                    prim_index1_delta);
+            break;
+         }
+      }
+
       anv_build_triangle(bounds, dst, args.geom_data, leaf_local_idx);
       break;
+   }
    case VK_GEOMETRY_TYPE_AABBS_KHR: {
       VOID_REF src_aabb_ptr = OFFSET(args.geom_data.data,
                                      leaf_local_idx * args.geom_data.stride);
@@ -168,20 +246,43 @@ recompute_parent(BLOCK parent_block, uint32_t updated_idx,
    vec3 base = conservative_child_aabb.min;
    vec3 scale = ldexp(vec3(1.0), exp_i8 - 8);
 
-   for (uint32_t i = 0; i < child_count; ++i) {
-      vk_aabb child_bounds = cache_aabb[i];
+   /* This corresponds to the following fields of struct anv_internal_node:
+    *
+    * uint8_t lower_x[6];
+    * uint8_t upper_x[6];
+    * uint8_t lower_y[6];
+    * uint8_t upper_y[6];
+    * uint8_t lower_z[6];
+    * uint8_t upper_z[6];
+    * 
+    * We use a uint32_t[9] instead of a uint8_t[36] or uint8_t[6][6]
+    * as that makes it easier for the compiler to vectorize the memory
+    * writes these will eventually be used in.
+    */
+   uint32_t quantized_child_bounds[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
+   for (uint32_t i_child = 0; i_child < child_count; i_child++) {
+      vk_aabb child_bounds = cache_aabb[i_child];
       vec3 lower = (child_bounds.min - base) / scale;
       vec3 upper = (child_bounds.max - base) / scale;
       lower = clamp(floor(lower), vec3(0.0), vec3(255.0));
       upper = clamp(ceil(upper), vec3(0.0), vec3(255.0));
 
-      DEREF(parent).lower_x[i] = uint8_t(lower.x);
-      DEREF(parent).lower_y[i] = uint8_t(lower.y);
-      DEREF(parent).lower_z[i] = uint8_t(lower.z);
-      DEREF(parent).upper_x[i] = uint8_t(upper.x);
-      DEREF(parent).upper_y[i] = uint8_t(upper.y);
-      DEREF(parent).upper_z[i] = uint8_t(upper.z);
+      for (uint32_t i_dim = 0; i_dim < 6; i_dim++) {
+         uint32_t idx = i_dim * 6 + i_child;
+         uint32_t i_u32 = idx / 4;
+         uint32_t shift = (idx % 4) * 8;
+         uint32_t val = i_dim % 2 == 1
+            ? uint32_t(upper[i_dim / 2])
+            : uint32_t(lower[i_dim / 2]);
+         quantized_child_bounds[i_u32] |= val << shift;
+      }
+   }
+
+   /* offsetof(struct anv_internal_node, lower_x) == 28 */ 
+   REF(uint32_t) qwords = REF(uint32_t)(OFFSET(parent, 28));
+   for (uint32_t i = 0; i < 9; i++) {
+      DEREF(INDEX(uint32_t, qwords, i)) = quantized_child_bounds[i];
    }
 
    return box;
@@ -201,6 +302,17 @@ get_child_index(uint32_t parent_raw)
 
 void main()
 {
+   if (args.geom_data.transform != NULL) {
+      uint32_t col = gl_LocalInvocationIndex % 4;
+      uint32_t row = gl_LocalInvocationIndex / 4;
+
+      update_transform[col][row] =
+         (row < 3) ?
+         DEREF(INDEX(float, args.geom_data.transform, col + row * 4)) :
+         (col < 3 ? 0.0 : 1.0);
+   }
+   barrier();
+
    uint32_t leaf_local = gl_GlobalInvocationID.x;
    if (leaf_local >= args.leaf_node_count || leaf_local >= args.primitive_count)
       return;
@@ -213,11 +325,6 @@ void main()
 
    vk_aabb leaf_bounds = build_and_encode_leaf(leaf_local, leaf_block);
    DEREF(INDEX(vk_aabb, args.aabb_scratch, leaf_block)) = leaf_bounds;
-
-   /* Ensure scratch update and leaf encoding is visible before atomic in
-    * following loop.
-    */
-   memoryBarrierBuffer();
 
    BLOCK current_block = leaf_block;
    vk_aabb current_bounds = leaf_bounds;
@@ -248,42 +355,13 @@ void main()
       /* Store parent bounds for next level */
       DEREF(INDEX(vk_aabb, args.aabb_scratch, parent)) = parent_bounds;
 
-      /* Ensure scratch write and parent encoding is visible in the next
-       * iteration of this loop.
-       */
-      memoryBarrierBuffer();
-
       /* Check whether this parent is the root internal node */
       uint32_t grandparent_raw = DEREF(INDEX(uint32_t, args.parent_child_map, parent));
 
       if (grandparent_raw == VK_NULL_BVH_OFFSET) {
-         REF(anv_internal_node) root = REF(anv_internal_node)(BLOCK_OFFSET(parent));
-
-         vec3 base = vec3(DEREF(root).lower[0], DEREF(root).lower[1], DEREF(root).lower[2]);
-         ivec3 exp = ivec3( int(DEREF(root).exp_x), int(DEREF(root).exp_y), int(DEREF(root).exp_z));
-         vec3 scale = ldexp(vec3(1.0), exp - 8);
-
-         vk_aabb root_bounds = vk_aabb(vec3(INFINITY), vec3(-INFINITY));
-
-         for (uint32_t i = 0; i < valid_child_count; ++i) {
-            vec3 lower = vec3(DEREF(root).lower_x[i],
-                              DEREF(root).lower_y[i],
-                              DEREF(root).lower_z[i]);
-
-            vec3 upper = vec3(DEREF(root).upper_x[i],
-                              DEREF(root).upper_y[i],
-                              DEREF(root).upper_z[i]);
-
-            vk_aabb child;
-            child.min = base + lower * scale;
-            child.max = base + upper * scale;
-
-            aabb_extend(root_bounds, child);
-         }
-
          REF(anv_accel_struct_header) hdr =
             REF(anv_accel_struct_header)(args.output_bvh - args.output_bvh_offset);
-         DEREF(hdr).aabb = root_bounds;
+         DEREF(hdr).aabb = parent_bounds;
          break;
       }
 

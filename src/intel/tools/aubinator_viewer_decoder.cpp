@@ -867,10 +867,15 @@ struct custom_decoder {
    { "3DSTATE_SAMPLER_STATE_POINTERS", decode_3dstate_sampler_state_pointers_gfx6 },
 
    { "3DSTATE_VIEWPORT_STATE_POINTERS_CC", decode_3dstate_viewport_state_pointers_cc },
+   { "3DSTATE_VIEWPORT_STATE_POINTERS_CC_2", decode_3dstate_viewport_state_pointers_cc },
    { "3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP", decode_3dstate_viewport_state_pointers_sf_clip },
+   { "3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP_2", decode_3dstate_viewport_state_pointers_sf_clip },
    { "3DSTATE_BLEND_STATE_POINTERS", decode_3dstate_blend_state_pointers },
+   { "3DSTATE_BLEND_STATE_POINTERS_2", decode_3dstate_blend_state_pointers },
    { "3DSTATE_CC_STATE_POINTERS", decode_3dstate_cc_state_pointers },
+   { "3DSTATE_CC_STATE_POINTERS_2", decode_3dstate_cc_state_pointers },
    { "3DSTATE_SCISSOR_STATE_POINTERS", decode_3dstate_scissor_state_pointers },
+   { "3DSTATE_SCISSOR_STATE_POINTERS_2", decode_3dstate_scissor_state_pointers },
    { "MI_LOAD_REGISTER_IMM", decode_load_register_imm },
    { "3DPRIMITIVE", decode_3dprimitive },
 };

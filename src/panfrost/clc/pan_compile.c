@@ -61,7 +61,8 @@ optimize(nir_shader *nir)
       progress = false;
 
       NIR_PASS(progress, nir, nir_split_var_copies);
-      NIR_PASS(progress, nir, nir_split_struct_vars, nir_var_function_temp);
+      if (nir->info.stage == MESA_SHADER_KERNEL)
+         NIR_PASS(progress, nir, nir_split_struct_vars, nir_var_function_temp);
       NIR_PASS(progress, nir, nir_lower_var_copies);
       NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
 
@@ -359,8 +360,6 @@ main(int argc, const char **argv)
          nir_shader *s = nir_precompiled_build_variant(
             libfunc, MESA_SHADER_COMPUTE, v, get_compiler_options(target_arch),
             &opt, load_kernel_input);
-
-         s->info.cs.ptr_size = nir->info.cs.ptr_size;
 
          blake3_hasher blake3_ctx;
          _mesa_blake3_init(&blake3_ctx);

@@ -28,7 +28,7 @@ nir_builder PRINTFLIKE(2, 3) radv_meta_nir_init_shader(mesa_shader_stage stage, 
 
 /* vertex shader that generates vertices */
 nir_shader *
-radv_meta_nir_build_vs_generate_vertices()
+radv_meta_nir_build_vs_generate_vertices(bool layered)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
 
@@ -42,6 +42,14 @@ radv_meta_nir_build_vs_generate_vertices()
    v_position->data.location = VARYING_SLOT_POS;
 
    nir_store_var(&b, v_position, outvec, 0xf);
+
+   if (layered) {
+      nir_variable *v_layer = nir_variable_create(b.shader, nir_var_shader_out, glsl_int_type(), "v_layer");
+      v_layer->data.location = VARYING_SLOT_LAYER;
+      v_layer->data.interpolation = INTERP_MODE_FLAT;
+
+      nir_store_var(&b, v_layer, nir_load_instance_id(&b), 0x1);
+   }
 
    return b.shader;
 }
@@ -761,32 +769,17 @@ radv_meta_nir_build_clear_color_shaders(struct nir_shader **out_vs, struct nir_s
    *out_fs = fs_b.shader;
 }
 
-void
-radv_meta_nir_build_clear_depthstencil_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs,
-                                               bool unrestricted)
+nir_shader *
+radv_meta_nir_build_clear_depthstencil_vertex_shader()
 {
-   nir_builder vs_b = radv_meta_nir_init_shader(
-      MESA_SHADER_VERTEX, unrestricted ? "meta_clear_depthstencil_unrestricted_vs" : "meta_clear_depthstencil_vs");
-   nir_builder fs_b = radv_meta_nir_init_shader(
-      MESA_SHADER_FRAGMENT, unrestricted ? "meta_clear_depthstencil_unrestricted_fs" : "meta_clear_depthstencil_fs");
+   nir_builder vs_b = radv_meta_nir_init_shader(MESA_SHADER_VERTEX, "meta_clear_depthstencil_vs");
 
    const struct glsl_type *position_out_type = glsl_vec4_type();
 
    nir_variable *vs_out_pos = nir_variable_create(vs_b.shader, nir_var_shader_out, position_out_type, "gl_Position");
    vs_out_pos->data.location = VARYING_SLOT_POS;
 
-   nir_def *z;
-   if (unrestricted) {
-      nir_def *in_color_load = nir_load_push_constant(&fs_b, 1, 32, nir_imm_int(&fs_b, 0), .range = 4);
-
-      nir_variable *fs_out_depth = nir_variable_create(fs_b.shader, nir_var_shader_out, glsl_int_type(), "f_depth");
-      fs_out_depth->data.location = FRAG_RESULT_DEPTH;
-      nir_store_var(&fs_b, fs_out_depth, in_color_load, 0x1);
-
-      z = nir_imm_float(&vs_b, 0.0);
-   } else {
-      z = nir_load_push_constant(&vs_b, 1, 32, nir_imm_int(&vs_b, 0), .range = 4);
-   }
+   nir_def *z = nir_load_push_constant(&vs_b, 1, 32, nir_imm_int(&vs_b, 0), .range = 4);
 
    nir_def *outvec = nir_gen_rect_vertices(&vs_b, z, NULL);
    nir_store_var(&vs_b, vs_out_pos, outvec, 0xf);
@@ -801,8 +794,7 @@ radv_meta_nir_build_clear_depthstencil_shaders(struct nir_shader **out_vs, struc
    nir_def *layer_id = nir_iadd(&vs_b, inst_id, base_instance);
    nir_store_var(&vs_b, vs_out_layer, layer_id, 0x1);
 
-   *out_vs = vs_b.shader;
-   *out_fs = fs_b.shader;
+   return vs_b.shader;
 }
 
 nir_shader *
@@ -895,16 +887,18 @@ radv_meta_nir_build_copy_vrs_htile_shader(enum amd_gfx_level gfx_level, uint32_t
    nir_def *coord = nir_iadd(&b, nir_imul_imm(&b, global_id, 8), offset);
 
    /* Load constants. */
-   nir_def *constants = nir_load_push_constant(&b, 3, 32, nir_imm_int(&b, 16), .range = 28);
+   nir_def *constants = nir_load_push_constant(&b, 4, 32, nir_imm_int(&b, 16), .range = 32);
    nir_def *htile_pitch = nir_channel(&b, constants, 0);
    nir_def *htile_slice_size = nir_channel(&b, constants, 1);
    nir_def *read_htile_value = nir_channel(&b, constants, 2);
+   nir_def *layer = nir_channel(&b, constants, 3);
 
    /* Get the HTILE addr from coordinates. */
    nir_def *zero = nir_imm_int(&b, 0);
    nir_def *htile_offset =
       ac_nir_htile_addr_from_coord(&b, gfx_level, gb_addr_config, &surf->u.gfx9.zs.htile_equation, htile_pitch,
-                                   htile_slice_size, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), zero, zero);
+                                   htile_slice_size, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), layer,
+                                   zero);
 
    /* Set up the input VRS image descriptor. */
    const struct glsl_type *vrs_sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT);
@@ -1305,7 +1299,7 @@ radv_meta_nir_build_resolve_fs(bool use_fmask, uint32_t samples, bool is_integer
       (aspects == VK_IMAGE_ASPECT_COLOR_BIT && is_integer) || aspects == VK_IMAGE_ASPECT_STENCIL_BIT ? GLSL_TYPE_UINT
                                                                                                      : GLSL_TYPE_FLOAT;
    const struct glsl_type *vec4 = glsl_vec4_type();
-   const struct glsl_type *sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, false, img_base_type);
+   const struct glsl_type *sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, true, img_base_type);
 
    nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_FRAGMENT, "meta_resolve_fs");
 
@@ -1339,7 +1333,9 @@ radv_meta_nir_build_resolve_fs(bool use_fmask, uint32_t samples, bool is_integer
 
    nir_def *pos_int = nir_f2i32(&b, pos_in);
 
-   nir_def *img_coord = nir_trim_vector(&b, nir_iadd(&b, pos_int, src_offset), 2);
+   nir_def *xy = nir_iadd(&b, pos_int, src_offset);
+   nir_def *layer = nir_load_layer_id(&b);
+   nir_def *img_coord = nir_vec3(&b, nir_channel(&b, xy, 0), nir_channel(&b, xy, 1), layer);
 
    nir_variable *output_var = nir_local_variable_create(b.impl, glsl_vec4_type(), "output_var");
    radv_meta_nir_build_resolve_shader_core(&b, use_fmask, samples, aspects, resolve_mode, input_img, output_var,

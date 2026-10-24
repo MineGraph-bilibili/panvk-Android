@@ -2513,7 +2513,6 @@ print_cs_binary(struct pandecode_context *ctx, uint64_t bin,
       }
 
       pandecode_make_indent(ctx);
-      fprintf(ctx->dump_stream, "[%lx] ", bin + i * sizeof(uint64_t));
       print_cs_instr(ctx->dump_stream, &cfg->instrs[i]);
       cs_unpack(&cfg->instrs[i], CS_BASE, base);
       switch (base.opcode) {

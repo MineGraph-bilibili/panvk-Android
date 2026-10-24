@@ -165,6 +165,7 @@ struct ir3_ubo_range {
    struct ir3_ubo_info ubo;
    uint32_t offset;     /* start offset to push in the const register file */
    uint32_t start, end; /* range of block that's actually used */
+   bool can_speculate;
 };
 
 struct ir3_ubo_analysis_state {
@@ -809,7 +810,17 @@ struct ir3_shader_variant {
       bool rasterflat : 1; /* special handling for emit->rasterflat */
       bool half       : 1;
       bool flat       : 1;
-   } inputs[32 + 2]; /* +POSITION +FACE */
+      /* inputs[] array is sized for 32 FS input varyings plus sysvals.  Vulkan
+       * says that the built-ins (face, coord, etc.) count against the input
+       * components limit, so we shouldn't need to have space for them, but GL
+       * lacks that clarity.  Regardless, the IJs shouldn't count against the
+       * input components limit, which is fine since sysvals don't take up
+       * total_in slots.
+       *
+       * FS sysval list: FRAG_COORD, FACE, SAMPLE_ID, SAMPLE_MASK_IN,
+       * FRAG_SHADING_RATE
+       */
+   } inputs[32 + IJ_COUNT + 5];
    bool reads_primid;
    bool reads_shading_rate;
    bool reads_smask;
@@ -958,6 +969,7 @@ struct ir3_shader_variant {
          bool color_is_dual_source : 1;
          bool uses_fbfetch_output  : 1;
          bool fbfetch_coherent     : 1;
+         bool yuv_color            : 1;
          enum gl_frag_depth_layout depth_layout;
       } fs;
       struct {

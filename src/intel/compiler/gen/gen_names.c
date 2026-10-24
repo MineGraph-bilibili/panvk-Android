@@ -189,7 +189,6 @@ static const char *const gen_math_function_names[] = {
    [GEN_MATH_RSQ]               = "rsq",
    [GEN_MATH_SIN]               = "sin",
    [GEN_MATH_COS]               = "cos",
-   [GEN_MATH_FDIV]              = "fdiv",
    [GEN_MATH_POW]               = "pow",
    [GEN_MATH_INT_DIV_BOTH]      = "intdiv_qr",
    [GEN_MATH_INT_DIV_QUOTIENT]  = "intdiv_q",
@@ -198,9 +197,36 @@ static const char *const gen_math_function_names[] = {
    [GEN_MATH_RSQRTM]            = "rsqrtm",
 };
 
-DEFINE_TO_STRING(gen_math_function_to_string, gen_math, gen_math_function_names)
-DEFINE_FROM_STRING(gen_math_function_from_string, gen_math, gen_math_function_names)
+const char *
+gen_math_function_to_string(const struct intel_device_info *devinfo, gen_math value)
+{
+   if (value == GEN_MATH_FDIV) {
+      if (devinfo->verx10 >= 350)
+         return "tanh";
+      return "fdiv";
+   }
 
+   return gen_math_function_names[value];
+}
+
+gen_math
+gen_math_function_from_string(const struct intel_device_info *devinfo, const char *str, int size, bool *valid)
+{
+   assert(valid);
+
+   if (string_matches("fdiv", str, size)) {
+      *valid = true;
+      return GEN_MATH_FDIV;
+   }
+   if (string_matches("tanh", str, size)) {
+      *valid = devinfo->verx10 >= 350;
+      return GEN_MATH_TANH;
+   }
+
+   const int v = LOOKUP_BY_NAME(gen_math_function_names, str, size);
+   *valid = v >= 0;
+   return *valid ? (gen_math)v : (gen_math)0;
+}
 
 static const char *const gen_sync_function_names[] = {
    [GEN_SYNC_NOP] = "nop",
@@ -473,6 +499,39 @@ gen_lsc_cache_ctrl_from_string(const struct intel_device_info *devinfo,
    return *valid ? (unsigned)ctrl : 0;
 }
 
+static const char * const lsc_addr_type_size[] = {
+   [LSC_ADDR_TYPE_SIZE_FLAT_A64_UA32_INDEX] = "flat_a64_+_ua32_index",
+   [LSC_ADDR_TYPE_SIZE_FLAT_A64_IA32_INDEX] = "flat_a64_+_ia32_index",
+   [LSC_ADDR_TYPE_SIZE_FLAT_A64_A64_INDEX] = "flat_a64_+_a64_index",
+   [LSC_ADDR_TYPE_SIZE_STATEFUL_A32_INDEX] = "stateful_a32",
+};
+
+DEFINE_TO_STRING(gen_lsc_addr_type_size_to_string, enum lsc_addr_type_size, lsc_addr_type_size)
+DEFINE_FROM_STRING(gen_lsc_addr_type_size_from_string, enum lsc_addr_type_size, lsc_addr_type_size)
+
+static const char * const lsc_urb_addr_type_size[] = {
+   [LSC_URB_ADDR_TYPE_SIZE_A32_A32_INDEX] = "base_a32_+_a32_index",
+   [LSC_URB_ADDR_TYPE_SIZE_A64] = "a64",
+};
+
+DEFINE_TO_STRING(gen_lsc_urb_addr_type_size_to_string, enum lsc_urb_addr_type_size, lsc_urb_addr_type_size)
+DEFINE_FROM_STRING(gen_lsc_urb_addr_type_size_from_string, enum lsc_urb_addr_type_size, lsc_urb_addr_type_size)
+
+static const char * const gen_gateway_64bit_opcode_names[] = {
+   [GEN_MESSAGE_GATEWAY_64BIT_SFID_SIGNAL_EOT] = "eot",
+};
+
+DEFINE_TO_STRING(gen_gateway_64bit_opcode_to_string, enum gen_gateway_64bit_opcode, gen_gateway_64bit_opcode_names)
+DEFINE_FROM_STRING(gen_gateway_64bit_opcode_from_string, enum gen_gateway_64bit_opcode, gen_gateway_64bit_opcode_names)
+
+static const char * const gen_rt_64bit_opcode_names[] = {
+   [GFX35_RENDER_TARGET_WRITE] = "write",
+   [GFX35_RENDER_TARGET_READ] = "read",
+   [GFX35_RENDER_TARGET_DUAL_SOURCE_WRITE] = "dual_source_write",
+};
+
+DEFINE_TO_STRING(gen_rt_64bit_opcode_to_string, uint8_t, gen_rt_64bit_opcode_names)
+DEFINE_FROM_STRING(gen_rt_64bit_opcode_from_string, uint8_t, gen_rt_64bit_opcode_names)
 
 struct gen_sampler_msg_type_name {
    const char *name;

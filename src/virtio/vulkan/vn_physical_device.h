@@ -101,8 +101,10 @@ struct vn_physical_device {
    VkImageLayout copy_src_layouts[64];
    VkImageLayout copy_dst_layouts[64];
 
-   VkQueueFamilyProperties2 *queue_family_properties;
-   VkQueueFamilyGlobalPriorityProperties *global_priority_properties;
+   VkQueueFamilyProperties2 *qfp;
+   VkQueueFamilyGlobalPriorityProperties *qfgpp;
+   VkQueueFamilyOwnershipTransferPropertiesKHR *qfotp;
+   VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *qfoitgp;
    uint32_t queue_family_count;
    bool sparse_binding_disabled;
    /* Track the queue family index to emulate a second queue. -1 means no
@@ -150,7 +152,7 @@ vn_queue_family_can_feedback(struct vn_physical_device *physical_dev,
     */
    assert(queue_family_index < physical_dev->queue_family_count);
    const struct VkQueueFamilyProperties2 *props =
-      &physical_dev->queue_family_properties[queue_family_index];
+      &physical_dev->qfp[queue_family_index];
    const VkQueueFlags transfer_flags =
       VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
    return props->queueFamilyProperties.queueFlags & transfer_flags;

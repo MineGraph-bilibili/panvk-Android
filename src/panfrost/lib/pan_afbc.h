@@ -472,6 +472,8 @@ pan_afbc_unswizzled_format(unsigned arch, enum pipe_format format)
       return PIPE_FORMAT_R5G6B5_UNORM;
 
    case PIPE_FORMAT_B5G5R5A1_UNORM:
+   case PIPE_FORMAT_B5G5R5X1_UNORM:
+   case PIPE_FORMAT_R5G5B5X1_UNORM:
       return PIPE_FORMAT_R5G5B5A1_UNORM;
 
    case PIPE_FORMAT_R10G10B10X2_UNORM:
@@ -480,10 +482,15 @@ pan_afbc_unswizzled_format(unsigned arch, enum pipe_format format)
       return PIPE_FORMAT_R10G10B10A2_UNORM;
 
    case PIPE_FORMAT_B4G4R4A4_UNORM:
+   case PIPE_FORMAT_B4G4R4X4_UNORM:
+   case PIPE_FORMAT_R4G4B4X4_UNORM:
       return PIPE_FORMAT_R4G4B4A4_UNORM;
    case PIPE_FORMAT_A4B4G4R4_UNORM:
       /* v7 can only support AFBC for RGB and BGR */
       return arch == 7 ? format : PIPE_FORMAT_R4G4B4A4_UNORM;
+
+   case PIPE_FORMAT_R16G16B16X16_UNORM:
+      return PIPE_FORMAT_R16G16B16A16_UNORM;
 
    default:
       return format;
@@ -558,6 +565,7 @@ pan_afbc_format(unsigned arch, enum pipe_format format, unsigned plane_idx)
    case PIPE_FORMAT_R16G16_UNORM:
    case PIPE_FORMAT_R16G16B16_UNORM:
    case PIPE_FORMAT_R16G16B16A16_UNORM:
+   case PIPE_FORMAT_R16G16B16X16_UNORM:
       if (arch < 10)
          return PAN_AFBC_MODE_INVALID;
       else

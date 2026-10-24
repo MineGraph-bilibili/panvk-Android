@@ -1283,7 +1283,21 @@ GENX(pan_sampled_texture_emit)(const struct pan_image_view *iview,
 
    if (desc->layout == UTIL_FORMAT_LAYOUT_ASTC && iview->astc.narrow &&
        desc->colorspace != UTIL_FORMAT_COLORSPACE_SRGB) {
+#if PAN_ARCH == 7
+      /* Bifrost (v7) has no ASTC plane descriptor with a decode-width field.
+       * Narrow (8-bit) decode is instead selected through the texture
+       * descriptor's texel format itself: ASTC_2D_NARROW / ASTC_3D_NARROW.
+       * (The ASTC block size is carried separately in the surface address
+       * tag, so overriding the format here is safe.) */
+      mali_format = (desc->block.depth > 1)
+                       ? MALI_PACK_FMT(ASTC_3D_NARROW, RGBA, L)
+                       : MALI_PACK_FMT(ASTC_2D_NARROW, RGBA, L);
+#else
+      /* Valhall+ (v9+) uses ASTC plane descriptors whose decode_wide field
+       * selects narrow decode; the texture format carries the decoded output
+       * format (RGBA8). */
       mali_format = MALI_PACK_FMT(RGBA8_UNORM, RGBA, L);
+#endif
    }
 
    if (iview->yuv.override_cr_siting)

@@ -49,11 +49,10 @@ void *r600_create_vertex_fetch_shader(struct pipe_context *ctx,
 				      unsigned count,
 				      const struct pipe_vertex_element *elements);
 
-/* return the table index 0-5 for TGSI_INTERPOLATE_LINEAR/PERSPECTIVE and
- TGSI_INTERPOLATE_LOC_CENTER/SAMPLE/COUNT. Other input values return -1. */
-int eg_get_interpolator_index(unsigned interpolate, unsigned location);
-
-int r600_get_lds_unique_index(unsigned semantic_name, unsigned index);
+/* return the table index 0-5 for perspective/linear interpolation and
+ * center/sample/centroid locations. Flat interpolation returns -1. */
+int eg_get_interpolator_index(enum glsl_interp_mode interpolate,
+			      enum r600_interp_location location);
 
 int generate_gs_copy_shader(struct r600_context *rctx,
                             struct r600_pipe_shader *gs,

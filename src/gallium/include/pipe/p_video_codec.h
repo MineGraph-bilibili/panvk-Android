@@ -45,6 +45,7 @@ struct pipe_fence_handle;
  */
 struct pipe_video_codec
 {
+   struct pipe_reference reference;
    struct pipe_context *context;
 
    enum pipe_video_profile profile;
@@ -277,6 +278,16 @@ struct pipe_video_buffer
     */
    void *statistics_data;
 };
+
+static inline void
+pipe_video_codec_reference(struct pipe_video_codec **dst, struct pipe_video_codec *src)
+{
+   struct pipe_video_codec *old_dst = *dst;
+
+   if (pipe_reference(old_dst ? &old_dst->reference : NULL, src ? &src->reference : NULL))
+      old_dst->destroy(old_dst);
+   *dst = src;
+}
 
 #ifdef __cplusplus
 }

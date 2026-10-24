@@ -237,12 +237,20 @@ typedef struct gen_inst {
 
          uint8_t ex_desc_subnr;
          gen_sfid sfid;
+         uint8_t src0_len;
          uint8_t src1_len;
 
-         uint32_t desc_imm;
-         uint32_t ex_desc_imm;
+         union {
+            struct {
+               uint32_t desc_imm;
+               uint32_t ex_desc_imm;
+            };
+            uint64_t combined_desc;
+         };
 
          uint32_t ex_desc_imm_extra;  /* Gfx20+ only. */
+
+         gen_operand indirect_desc[2];
       } send;
    };
 

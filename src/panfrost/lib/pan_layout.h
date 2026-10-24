@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2026 NXP
  * Copyright (C) 2008 VMware, Inc.
  * Copyright (C) 2014 Broadcom
  * Copyright (C) 2018-2019 Alyssa Rosenzweig
@@ -20,8 +21,9 @@ extern "C" {
 
 #include "util/format/u_format.h"
 
-#define MAX_MIP_LEVELS   17
-#define MAX_IMAGE_PLANES 3
+#define MAX_MIP_LEVELS        17
+#define MAX_IMAGE_PLANES      3
+#define PAN_CRC_HEADER_SIZE_B 64
 
 struct pan_mod_handler;
 
@@ -81,9 +83,10 @@ struct pan_image_slice_layout {
       struct pan_tiled_or_linear_image_slice_layout tiled_or_linear;
    };
 
-   /* If checksumming is enabled following the slice, what
-    * is its offset/stride? */
+   /* GPU-visible CRC header (64-bytes) followed by the hardware CRC table.
+    * size_B covers only the table, not the header. */
    struct {
+      uint64_t header_offset_B;
       uint64_t offset_B;
       uint32_t stride_B;
       uint32_t size_B;
@@ -134,6 +137,10 @@ struct pan_image_layout_constraints {
 
    /* Row pitch in bytes. Non-zero if layout is explicit. */
    uint32_t wsi_row_pitch_B;
+
+   /* Array stride in bytes for explicit multi-layer imports. When non-zero
+    * and array_size > 1, used as array_stride_B directly. */
+   uint64_t wsi_array_pitch_B;
 
    /* When true, AFBC/AFRC imports are stricter than they were when those
     * modifiers where introduced. */

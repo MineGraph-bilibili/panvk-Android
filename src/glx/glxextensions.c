@@ -36,6 +36,7 @@
 
 #include "util/driconf.h"
 #include "util/macros.h"
+#include "util/u_string.h"
 
 #define SET_BIT(m,b)   (m[ (b) / 8 ] |=  (1U << ((b) % 8)))
 #define CLR_BIT(m,b)   (m[ (b) / 8 ] &= ~(1U << ((b) % 8)))
@@ -415,12 +416,14 @@ __ParseExtensionOverride(struct glx_screen *psc,
    if (override == NULL)
        return;
 
-   /* Copy env_const because strtok() is destructive. */
+   /* Copy env_const because strtok_r() is destructive. */
    env = strdup(override);
    if (env == NULL)
       return;
 
-   for (field = strtok(env, " "); field!= NULL; field = strtok(NULL, " ")) {
+   char *saveptr;
+   for (field = strtok_r(env, " ", &saveptr); field != NULL;
+        field = strtok_r(NULL, " ", &saveptr)) {
       GLboolean enable;
 
       switch (field[0]) {

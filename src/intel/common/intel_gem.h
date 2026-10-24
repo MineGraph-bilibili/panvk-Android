@@ -139,6 +139,7 @@ bool intel_gem_create_context_ext(int fd, enum intel_gem_create_context_flags fl
                                   uint32_t *ctx_id);
 bool intel_gem_supports_protected_context(int fd,
                                           enum intel_kmd_type kmd_type);
+bool intel_gem_supports_huc(int fd, enum intel_kmd_type kmd_type);
 
 /* Definitions used by the execbuf ioctl wrappers in the backends.
  * With the values below, after 80 retries we have slept ~16s, and the warning

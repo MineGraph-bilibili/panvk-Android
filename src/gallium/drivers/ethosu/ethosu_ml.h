@@ -17,7 +17,11 @@
 #define SHRAM_TOTAL_BANKS           SHRAM_BANKS
 #define SHRAM_BANK_SIZE_BYTES       1024
 #define LUT8_SIZE                   256
-#define SHRAM_LUT_BASE(lut)         (46 * SHRAM_BANK_SIZE_BYTES + (lut) * LUT8_SIZE)
+#define LUT_SLOT_SIZE               256
+/* The LUT banks are the reserved banks at the top of SHRAM. */
+#define SHRAM_LUT_BASE(lut)         ((SHRAM_TOTAL_BANKS - SHRAM_RESERVED_END_BANKS) * \
+                                     SHRAM_BANK_SIZE_BYTES + (lut) * LUT8_SIZE)
+#define SOFTMAX_MAX_DEPTH           4095
 #define ACC_BITS                    32 /* Use for now always 32-bit accumulators */
 #define IFM_GRANULE                 8
 #define ACC_GRANULE                 16
@@ -37,6 +41,13 @@ extern struct ethosu_block SUB_KERNEL_MAX;
 #define IO_REGION      1
 #define SCRATCH_REGION 2
 #define LUT_REGION     0x103     // Internal SHRAM
+
+enum ethosu_activation_storage {
+   ETHOSU_ACTIVATION_STORAGE_TILE2X2 = 0,
+   ETHOSU_ACTIVATION_STORAGE_TILE3X1 = 1,
+   ETHOSU_ACTIVATION_STORAGE_CHAINED = 2,
+   ETHOSU_ACTIVATION_STORAGE_NONE = 3,
+};
 
 enum ethosu_operation_type {
    ETHOSU_OPERATION_TYPE_NONE,
@@ -112,7 +123,10 @@ struct ethosu_feature_map {
    struct ethosu_tile_box tiles;
    unsigned zero_point;
    float scale;
-   uint16_t scalar;
+   int32_t scalar;
+   bool has_scalar;
+   enum ethosu_activation_storage activation_storage;
+   uint8_t chain_id;
    uint8_t region;
 };
 
@@ -130,6 +144,7 @@ struct ethosu_kernel {
    /* Per-channel quantization (NULL for per-tensor) */
    float *scales;
    int *zero_points;
+   bool scale_as_float;
 };
 
 struct ethosu_padding {
@@ -180,7 +195,16 @@ enum ethosu_pooling_type {
    ETHOSU_POOLING_TYPE_ARGMAX_Y,
 };
 
-#define ETHOSU_POOLING_ACTIVATION_LUT(n)  (0x10 | (n))
+#define ETHOSU_U65_ACTIVATION_LUT(n)          (0x10 | (n))
+#define ETHOSU_U85_ACTIVATION_LUT(fn, n)      ((fn) | ((n) << 5))
+#define ETHOSU_U85_ACTIVATION_LUT_U8_U8       1
+#define ETHOSU_U85_ACTIVATION_LUT_S8_S8       4
+#define ETHOSU_U85_ACTIVATION_LUT_S8_S16      5
+#define ETHOSU_U85_ACTIVATION_LUT_S8_S32      7
+#define ETHOSU_U85_ACTIVATION_LUT_S16_S16     8
+#define ETHOSU_U85_ACTIVATION_LUT_S16_S32     9
+#define ETHOSU_ACTIVATION_CLIP_FORCE_INT8     (3 << 12)
+#define ETHOSU_U85_ACTIVATION_CLIP_RANGE_NONE (1 << 12)
 
 #define MAX_MEMORY_ACCESSES 5 /* IFM, IFM2, Scales, Weights, LUT*/
 
@@ -194,9 +218,9 @@ struct ethosu_operation {
          struct ethosu_address_range weights;
          struct ethosu_address_range scales;
          bool depthwise;
+         bool weight_sparse;
          unsigned scale;
          unsigned shift;
-         uint16_t activation;
          int activation_min;
          int activation_max;
       } conv;
@@ -204,15 +228,16 @@ struct ethosu_operation {
       struct {
          enum ethosu_pooling_type type;
          bool nop;
-         uint8_t activation;
-         struct ethosu_address_range lut;
       } pooling;
 
       struct {
          enum ethosu_eltwise_type type;
          uint16_t activation_min;
-         unsigned lut_bytes;
+         unsigned scale;
+         unsigned shift;
          bool ifm_reversed;
+         bool identity_scale;
+         bool raw_scale;
       } eltwise;
 
       struct {
@@ -226,11 +251,14 @@ struct ethosu_operation {
    struct ethosu_feature_map ifm;
    struct ethosu_feature_map ifm2;
    struct ethosu_feature_map ofm;
+   struct ethosu_address_range lut;
 
    struct ethosu_kernel kernel;
    struct ethosu_padding pad;
    enum ethosu_upscale_mode upscale;
    enum ethosu_rounding_mode round_mode;
+   bool ofm_scale_per_channel;
+   uint16_t activation;
 
    struct ethosu_address_range read_accesses[MAX_MEMORY_ACCESSES];
    struct ethosu_address_range write_accesses[MAX_MEMORY_ACCESSES];
@@ -240,6 +268,8 @@ struct ethosu_tensor {
    unsigned index;
    unsigned offset;
    unsigned size;
+   unsigned required_size;
+   unsigned batches;
    uint8_t type_size;
    struct ethosu_block shape;
    enum ethosu_layout layout;
@@ -256,6 +286,8 @@ struct ethosu_subgraph {
    struct util_dynarray operations; /* ethosu_operation */
    struct util_dynarray tensors;    /* ethosu_tensor */
 
+   unsigned batches;
+
    unsigned cmdstream_used;
    uint32_t *cmdstream;
    uint32_t *cursor;
@@ -264,10 +296,12 @@ struct ethosu_subgraph {
 
    struct pipe_resource *io_rsrc;
    unsigned io_used;
+   bool failed;
 
    uint8_t *coefs;
    struct pipe_resource *coefs_rsrc;
    unsigned coefs_used;
+   unsigned next_lut_slot;
 
    /* Register state tracking to avoid emitting unchanged values */
    uint16_t *cmd0_state; /* Array of last values for CMD0 registers (16-bit) */
@@ -312,6 +346,11 @@ void ethosu_ml_subgraph_destroy(struct pipe_ml_device *pdevice,
 void ethosu_register_tensor(struct ethosu_subgraph *subgraph, const struct pipe_tensor *ptensor);
 
 struct ethosu_tensor *ethosu_find_tensor(struct ethosu_subgraph *subgraph, unsigned tensor_idx);
+
+unsigned ethosu_lut_region(void);
+
+unsigned ethosu_lut_address(struct ethosu_subgraph *subgraph,
+                            unsigned activation, unsigned size);
 
 void ethosu_dump_buffer(const uint8_t *ptr, char *name, int operation_nr,
                         int suboperation_nr, int offset, unsigned size);

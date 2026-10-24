@@ -102,6 +102,7 @@ class reference_frames_tracker_hevc : public reference_frames_tracker
    // Declare other methods
    reference_frames_tracker_hevc( void *logId,
                                   struct pipe_video_codec *codec,
+                                  eAVEncH265VProfile hevcProfile,
                                   uint32_t textureWidth,
                                   uint32_t textureHeight,
                                   uint32_t gopLength,

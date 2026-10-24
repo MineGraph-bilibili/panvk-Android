@@ -9,6 +9,7 @@
 #include "r600_formats.h"
 #include "r600_shader.h"
 #include "r600d.h"
+#include "r600_image_buffer.h"
 
 #include "util/format/u_format_s3tc.h"
 #include "util/u_draw.h"
@@ -17,12 +18,258 @@
 #include "util/u_memory.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_math.h"
+#include "util/u_prim.h"
 #include "tgsi/tgsi_parse.h"
-#include "tgsi/tgsi_scan.h"
 
 #include "nir.h"
 #include "nir_builder.h"
-#include "nir/nir_to_tgsi_info.h"
+#include "nir/tgsi_to_nir.h"
+#include "sfn/sfn_nir.h"
+
+static void r600_tgsi_to_nir(struct pipe_context *ctx,
+                             struct r600_pipe_shader_selector *sel,
+                             unsigned mesa_shader_stage)
+{
+	const nir_shader_compiler_options *nir_options =
+		ctx->screen->nir_options[mesa_shader_stage];
+
+	sel->nir = tgsi_to_nir(sel->tokens, ctx->screen, true);
+
+	/* Lower int64 ops because we have some r600 built-in shaders that use it. */
+	if (nir_options->lower_int64_options) {
+		NIR_PASS(_, sel->nir, nir_lower_alu_to_scalar,
+			 r600_lower_to_scalar_instr_filter, NULL);
+		NIR_PASS(_, sel->nir, nir_lower_int64);
+	}
+	NIR_PASS(_, sel->nir, nir_lower_flrp, ~0, false);
+}
+
+static unsigned r600_get_ps_nr_cbufs(const struct nir_shader *nir)
+{
+	unsigned nr_cbufs = 0;
+
+	if (nir->info.stage != MESA_SHADER_FRAGMENT)
+		return 0;
+
+	if (nir->info.io_lowered) {
+		uint64_t outputs_written = nir->info.outputs_written;
+
+		while (outputs_written) {
+			unsigned location = u_bit_scan64(&outputs_written);
+
+			if (location == FRAG_RESULT_COLOR)
+				nr_cbufs = MAX2(nr_cbufs, 1);
+			else if (location >= FRAG_RESULT_DATA0)
+				nr_cbufs = MAX2(nr_cbufs, location - FRAG_RESULT_DATA0 + 1);
+		}
+
+		return nr_cbufs;
+	}
+
+	nir_foreach_shader_out_variable(variable, nir) {
+		const struct glsl_type *type = variable->type;
+
+		if (nir_is_arrayed_io(variable, nir->info.stage)) {
+			assert(glsl_type_is_array(type));
+			type = glsl_get_array_element(type);
+		}
+
+		unsigned attrib_count = nir_variable_count_slots(variable, type);
+		for (unsigned i = 0; i < attrib_count; i++) {
+			unsigned location = variable->data.location + i;
+
+			if (location == FRAG_RESULT_COLOR) {
+				nr_cbufs = MAX2(nr_cbufs, 1);
+			} else if (location >= FRAG_RESULT_DATA0) {
+				unsigned semantic_index = location - FRAG_RESULT_DATA0;
+
+				if (variable->data.index > 0)
+					semantic_index++;
+
+				nr_cbufs = MAX2(nr_cbufs, semantic_index + 1);
+			}
+		}
+	}
+
+	return nr_cbufs;
+}
+
+static bool r600_nir_writes_viewport_index(const struct nir_shader *nir)
+{
+	if (nir->info.io_lowered)
+		return nir->info.outputs_written & VARYING_BIT_VIEWPORT;
+
+	nir_foreach_shader_out_variable(variable, nir) {
+		const struct glsl_type *type = variable->type;
+
+		if (nir_is_arrayed_io(variable, nir->info.stage)) {
+			assert(glsl_type_is_array(type));
+			type = glsl_get_array_element(type);
+		}
+
+		unsigned attrib_count = nir_variable_count_slots(variable, type);
+		for (unsigned i = 0; i < attrib_count; i++) {
+			if (variable->data.location + i == VARYING_SLOT_VIEWPORT)
+				return true;
+		}
+	}
+
+	return false;
+}
+
+static int r600_get_lds_varying_index(gl_varying_slot location)
+{
+	switch (location) {
+	case VARYING_SLOT_POS:
+		return 0;
+	case VARYING_SLOT_PSIZ:
+		return 1;
+	case VARYING_SLOT_CLIP_DIST0:
+	case VARYING_SLOT_CLIP_DIST1:
+		return 2 + location - VARYING_SLOT_CLIP_DIST0;
+	case VARYING_SLOT_TEX0:
+	case VARYING_SLOT_TEX1:
+	case VARYING_SLOT_TEX2:
+	case VARYING_SLOT_TEX3:
+	case VARYING_SLOT_TEX4:
+	case VARYING_SLOT_TEX5:
+	case VARYING_SLOT_TEX6:
+	case VARYING_SLOT_TEX7:
+		return 4 + location - VARYING_SLOT_TEX0;
+	case VARYING_SLOT_COL0:
+	case VARYING_SLOT_COL1:
+		return 12 + location - VARYING_SLOT_COL0;
+	case VARYING_SLOT_BFC0:
+	case VARYING_SLOT_BFC1:
+		return 14 + location - VARYING_SLOT_BFC0;
+	case VARYING_SLOT_CLIP_VERTEX:
+		return 16;
+	default:
+		if (location >= VARYING_SLOT_VAR0 && location < VARYING_SLOT_PATCH0) {
+			unsigned index = location - VARYING_SLOT_VAR0;
+
+			if (index <= 63 - 17)
+				return 17 + index;
+			else
+				/* same explanation as in the default return,
+				 * the only user hitting this is st/nine.
+				 */
+				return 0;
+		}
+
+		/* Don't fail here. The result of this function is only used
+		 * for LS, TCS, TES, and GS, where legacy GL semantics can't
+		 * occur, but this function is called for all vertex shaders
+		 * before it's known whether LS will be compiled or not.
+		 */
+		return 0;
+	}
+}
+
+static int r600_get_lds_patch_index(gl_varying_slot location)
+{
+	/* Patch indices are completely separate from per-vertex indices and
+	 * thus start from 0.
+	 */
+	if (location == VARYING_SLOT_TESS_LEVEL_OUTER)
+		return 0;
+	else if (location == VARYING_SLOT_TESS_LEVEL_INNER)
+		return 1;
+	else if (location >= VARYING_SLOT_PATCH0)
+		return 2 + location - VARYING_SLOT_PATCH0;
+
+	return 0;
+}
+
+static void r600_add_lds_output_for_location(struct r600_pipe_shader_selector *sel,
+					     gl_varying_slot location)
+{
+	if (location == VARYING_SLOT_TESS_LEVEL_INNER ||
+	    location == VARYING_SLOT_TESS_LEVEL_OUTER ||
+	    location >= VARYING_SLOT_PATCH0)
+		sel->lds_patch_outputs_written_mask |=
+			1ull << r600_get_lds_patch_index(location);
+	else
+		sel->lds_outputs_written_mask |=
+			1ull << r600_get_lds_varying_index(location);
+}
+
+static void r600_cache_lds_info_from_lowered_nir(struct r600_pipe_shader_selector *sel)
+{
+	uint64_t outputs_written = sel->nir->info.outputs_written;
+	uint32_t patch_outputs_written = sel->nir->info.patch_outputs_written;
+
+	while (outputs_written) {
+		gl_varying_slot location = u_bit_scan64(&outputs_written);
+		r600_add_lds_output_for_location(sel, location);
+	}
+
+	while (patch_outputs_written) {
+		gl_varying_slot location =
+			VARYING_SLOT_PATCH0 + u_bit_scan(&patch_outputs_written);
+		r600_add_lds_output_for_location(sel, location);
+	}
+}
+
+static void r600_cache_lds_info_from_nir_variables(struct r600_pipe_shader_selector *sel)
+{
+	nir_foreach_shader_out_variable(variable, sel->nir) {
+		const struct glsl_type *type = variable->type;
+
+		if (nir_is_arrayed_io(variable, sel->nir->info.stage)) {
+			assert(glsl_type_is_array(type));
+			type = glsl_get_array_element(type);
+		}
+
+		unsigned attrib_count = nir_variable_count_slots(variable, type);
+		for (unsigned i = 0; i < attrib_count; i++)
+			r600_add_lds_output_for_location(sel, variable->data.location + i);
+	}
+}
+
+static void r600_cache_lds_info(struct r600_pipe_shader_selector *sel)
+{
+	sel->lds_patch_outputs_written_mask = 0;
+	sel->lds_outputs_written_mask = 0;
+
+	switch (sel->type) {
+	case MESA_SHADER_VERTEX:
+	case MESA_SHADER_TESS_CTRL:
+		break;
+	default:
+		return;
+	}
+
+	if (sel->nir->info.io_lowered)
+		r600_cache_lds_info_from_lowered_nir(sel);
+	else
+		r600_cache_lds_info_from_nir_variables(sel);
+}
+
+static void r600_cache_nir_selector_info(struct r600_pipe_shader_selector *sel)
+{
+	sel->nir_info.images_declared = sel->nir->info.images_used[0];
+	sel->nir_info.writes_memory = sel->nir->info.writes_memory;
+	sel->nir_info.fs_early_depth_stencil =
+		sel->nir->info.fs.early_fragment_tests |
+		sel->nir->info.fs.post_depth_coverage;
+	sel->nir_info.vs_window_space =
+		sel->nir->info.stage == MESA_SHADER_VERTEX &&
+		sel->nir->info.vs.window_space_position;
+	sel->nir_info.writes_viewport_index =
+		r600_nir_writes_viewport_index(sel->nir);
+	sel->nir_info.image_file_max =
+		(int)BITSET_LAST_BIT(sel->nir->info.images_used) - 1;
+	sel->nir_info.ps_nr_cbufs = r600_get_ps_nr_cbufs(sel->nir);
+
+	sel->nir_info.tes_prim_mode =
+		u_tess_prim_from_shader(sel->nir->info.tess._primitive_mode);
+	sel->nir_info.tes_spacing = (sel->nir->info.tess.spacing + 1) % 3;
+	sel->nir_info.tes_vertex_order_cw = !sel->nir->info.tess.ccw;
+	sel->nir_info.tes_point_mode = sel->nir->info.tess.point_mode;
+	sel->nir_info.tcs_vertices_out = sel->nir->info.tess.tcs_vertices_out;
+	r600_cache_lds_info(sel);
+}
 
 void r600_init_command_buffer(struct r600_command_buffer *cb, unsigned num_dw)
 {
@@ -40,7 +287,7 @@ void r600_add_atom(struct r600_context *rctx,
 		   struct r600_atom *atom,
 		   unsigned id)
 {
-	assert(id < R600_NUM_ATOMS);
+	assert(id < R600_NUM_ATOMS && R600_NUM_ATOMS <= 64);
 	assert(rctx->atoms[id] == NULL);
 	rctx->atoms[id] = atom;
 	atom->id = id;
@@ -765,12 +1012,46 @@ static void r600_update_compressed_colortex_mask_images(struct r600_image_state 
 	}
 }
 
+static inline void r600_check_image_buffer_dirty(struct r600_context *const rctx,
+						 const bool ssbo,
+						 const mesa_shader_stage stage,
+						 const unsigned offset)
+{
+	unsigned last_offset;
+	switch ((unsigned)ssbo) {
+	case 0:
+		switch (stage) {
+		case MESA_SHADER_VERTEX:
+		default:
+			last_offset = rctx->fragment_images[0].last_offset;
+			break;
+		case MESA_SHADER_FRAGMENT:
+			last_offset = rctx->fragment_images[1].last_offset;
+			break;
+		}
+		break;
+	default:
+		last_offset = rctx->fragment_buffers[stage].last_offset;
+		break;
+	}
+
+	if (likely(last_offset == offset))
+		return;
+
+	for (unsigned k = 0; k < ARRAY_SIZE(rctx->fragment_images); k++)
+		if (rctx->fragment_images[k].enabled_mask)
+			r600_mark_atom_dirty(rctx, &rctx->fragment_images[k].atom);
+	for (unsigned k = 0; k < ARRAY_SIZE(rctx->fragment_buffers); k++)
+		if (r600_check_buffer_shader_supported(k) && rctx->fragment_buffers[k].enabled_mask)
+			r600_mark_atom_dirty(rctx, &rctx->fragment_buffers[k].atom);
+}
+
 /* Compute the key for the hw shader variant */
-static inline void r600_shader_selector_key(const struct pipe_context *ctx,
+static inline void r600_shader_selector_key(struct pipe_context *ctx,
 		const struct r600_pipe_shader_selector *sel,
 		union r600_shader_key *key)
 {
-	const struct r600_context *rctx = (struct r600_context *)ctx;
+	struct r600_context *rctx = (struct r600_context *)ctx;
 	memset(key, 0, sizeof(*key));
 
 	switch (sel->type) {
@@ -782,23 +1063,39 @@ static inline void r600_shader_selector_key(const struct pipe_context *ctx,
 		if (rctx->ps_shader->current->shader.gs_prim_id_input && !rctx->gs_shader) {
 			key->vs.as_gs_a = true;
 		}
+		if (rctx->vs_shader->current->shader.num_images || rctx->vs_shader->current->shader.num_ssbos) {
+			key->vs.nr_cbufs = rctx->framebuffer.state.nr_cbufs;
+			key->vs.dynamic_ssbo_offset = r600_image_buffer_offset(rctx, true, sel->type);
+			r600_check_image_buffer_dirty(rctx, true, sel->type, key->vs.dynamic_ssbo_offset);
+		}
 		break;
 	}
 	case MESA_SHADER_GEOMETRY:
 		key->gs.tri_strip_adj_fix = rctx->gs_tri_strip_adj_fix;
+		if (rctx->gs_shader->current->shader.num_ssbos) {
+			key->gs.nr_cbufs = rctx->framebuffer.state.nr_cbufs;
+			key->gs.dynamic_ssbo_offset = r600_image_buffer_offset(rctx, true, sel->type);
+			r600_check_image_buffer_dirty(rctx, true, sel->type, key->gs.dynamic_ssbo_offset);
+		}
 		break;
 	case MESA_SHADER_FRAGMENT: {
-		if (rctx->ps_shader->info.images_declared)
-			key->ps.image_size_const_offset = util_last_bit(rctx->samplers[MESA_SHADER_FRAGMENT].views.enabled_mask);
+		if (rctx->ps_shader->nir_info.images_declared)
+			key->ps.dynamic_uniform_offset = util_last_bit(rctx->samplers[MESA_SHADER_FRAGMENT].views.enabled_mask);
 		key->ps.color_two_side = rctx->rasterizer && rctx->rasterizer->two_side;
 		key->ps.alpha_to_one = rctx->alpha_to_one &&
 				      rctx->rasterizer && rctx->rasterizer->multisample_enable &&
 				      !rctx->cb_state.cb0_is_integer;
 		key->ps.alpha_to_one_and_coverage = key->ps.alpha_to_one && rctx->alpha_to_one_and_coverage;
 		key->ps.nr_cbufs = rctx->framebuffer.state.nr_cbufs;
+		if (rctx->ps_shader->current->shader.num_images || rctx->ps_shader->current->shader.num_ssbos) {
+			key->ps.dynamic_image_offset = r600_image_buffer_offset(rctx, false, sel->type);
+			key->ps.dynamic_ssbo_offset = r600_image_buffer_offset(rctx, true, sel->type);
+			r600_check_image_buffer_dirty(rctx, false, sel->type, key->ps.dynamic_image_offset);
+			r600_check_image_buffer_dirty(rctx, true, sel->type, key->ps.dynamic_ssbo_offset);
+		}
                 key->ps.apply_sample_id_mask = (rctx->ps_iter_samples > 1) || !rctx->rasterizer->multisample_enable;
 		/* Dual-source blending only makes sense with nr_cbufs == 1. */
-		if (key->ps.nr_cbufs == 1 && rctx->dual_src_blend) {
+		if (rctx->framebuffer.state.nr_cbufs == 1 && rctx->dual_src_blend) {
 			key->ps.nr_cbufs = 2;
 			key->ps.dual_source_blend = 1;
 		}
@@ -806,9 +1103,19 @@ static inline void r600_shader_selector_key(const struct pipe_context *ctx,
 	}
 	case MESA_SHADER_TESS_EVAL:
 		key->tes.as_es = (rctx->gs_shader != NULL);
+		if (rctx->tes_shader->current->shader.num_ssbos) {
+			key->tes.nr_cbufs = rctx->framebuffer.state.nr_cbufs;
+			key->tes.dynamic_ssbo_offset = r600_image_buffer_offset(rctx, true, sel->type);
+			r600_check_image_buffer_dirty(rctx, true, sel->type, key->tes.dynamic_ssbo_offset);
+		}
 		break;
 	case MESA_SHADER_TESS_CTRL:
-		key->tcs.prim_mode = rctx->tes_shader->info.properties[TGSI_PROPERTY_TES_PRIM_MODE];
+		key->tcs.prim_mode = rctx->tes_shader->nir_info.tes_prim_mode;
+		if (rctx->tcs_shader && rctx->tcs_shader->current->shader.num_ssbos) {
+			key->tcs.nr_cbufs = rctx->framebuffer.state.nr_cbufs;
+			key->tcs.dynamic_ssbo_offset = r600_image_buffer_offset(rctx, true, sel->type);
+			r600_check_image_buffer_dirty(rctx, true, sel->type, key->tcs.dynamic_ssbo_offset);
+		}
 		break;
 	case MESA_SHADER_COMPUTE:
 		break;
@@ -826,29 +1133,35 @@ r600_shader_precompile_key(const struct pipe_context *ctx,
 
 	switch (sel->type) {
 	case MESA_SHADER_VERTEX:
+		key->vs.nr_cbufs = sel->nir_info.ps_nr_cbufs;
+		break;
+
 	case MESA_SHADER_TESS_EVAL:
 		/* Assume no tess or GS for setting .as_es.  In order to
 		 * precompile with es, we'd need the other shaders we're linked
 		 * with (see the link_shader screen method)
 		 */
+		key->tes.nr_cbufs = sel->nir_info.ps_nr_cbufs;
 		break;
 
 	case MESA_SHADER_GEOMETRY:
+		key->gs.nr_cbufs = sel->nir_info.ps_nr_cbufs;
 		break;
 
 	case MESA_SHADER_FRAGMENT:
-		key->ps.image_size_const_offset = sel->info.file_max[TGSI_FILE_IMAGE];
+		key->ps.dynamic_uniform_offset = sel->nir_info.image_file_max;
 
 		/* This is used for gl_FragColor output expansion to the number
 		 * of color buffers bound, but also with sb it'll drop outputs
 		 * to unused cbufs.
 		 */
-		key->ps.nr_cbufs = sel->info.file_max[TGSI_FILE_OUTPUT] + 1;
+		key->ps.nr_cbufs = sel->nir_info.ps_nr_cbufs;
 		break;
 
 	case MESA_SHADER_TESS_CTRL:
 		/* Prim mode comes from the TES, but we need some valid value. */
 		key->tcs.prim_mode = MESA_PRIM_TRIANGLES;
+		key->tcs.nr_cbufs = sel->nir_info.ps_nr_cbufs;
 		break;
 
 	case MESA_SHADER_COMPUTE:
@@ -933,10 +1246,16 @@ struct r600_pipe_shader_selector *r600_create_shader_state_tokens(struct pipe_co
 	sel->type = mesa_shader_stage;
 	if (ir == PIPE_SHADER_IR_TGSI) {
 		sel->tokens = tgsi_dup_tokens((const struct tgsi_token *)prog);
-		tgsi_scan_shader(sel->tokens, &sel->info);
+		glsl_type_singleton_init_or_ref();
+		r600_tgsi_to_nir(ctx, sel, mesa_shader_stage);
+		r600_cache_nir_selector_info(sel);
+		glsl_type_singleton_decref();
+		FREE(sel->tokens);
+		sel->tokens = NULL;
+		ir = PIPE_SHADER_IR_NIR;
 	} else if (ir == PIPE_SHADER_IR_NIR){
 		sel->nir = (nir_shader *)prog;
-		nir_tgsi_scan_shader(sel->nir, &sel->info, true);
+		r600_cache_nir_selector_info(sel);
 	}
 	sel->ir_type = ir;
 	return sel;
@@ -946,7 +1265,6 @@ static void *r600_create_shader_state(struct pipe_context *ctx,
 			       const struct pipe_shader_state *state,
 			       unsigned mesa_shader_stage)
 {
-	int i;
 	struct r600_pipe_shader_selector *sel;
 	
 	if (state->type == PIPE_SHADER_IR_TGSI)
@@ -961,33 +1279,11 @@ static void *r600_create_shader_state(struct pipe_context *ctx,
 	switch (mesa_shader_stage) {
 	case MESA_SHADER_GEOMETRY:
 		sel->gs_output_prim =
-			sel->info.properties[TGSI_PROPERTY_GS_OUTPUT_PRIM];
+			sel->nir->info.gs.output_primitive;
 		sel->gs_max_out_vertices =
-			sel->info.properties[TGSI_PROPERTY_GS_MAX_OUTPUT_VERTICES];
+			sel->nir->info.gs.vertices_out;
 		sel->gs_num_invocations =
-			sel->info.properties[TGSI_PROPERTY_GS_INVOCATIONS];
-		break;
-	case MESA_SHADER_VERTEX:
-	case MESA_SHADER_TESS_CTRL:
-		sel->lds_patch_outputs_written_mask = 0;
-		sel->lds_outputs_written_mask = 0;
-
-		for (i = 0; i < sel->info.num_outputs; i++) {
-			unsigned name = sel->info.output_semantic_name[i];
-			unsigned index = sel->info.output_semantic_index[i];
-
-			switch (name) {
-			case TGSI_SEMANTIC_TESSINNER:
-			case TGSI_SEMANTIC_TESSOUTER:
-			case TGSI_SEMANTIC_PATCH:
-				sel->lds_patch_outputs_written_mask |=
-					1ull << r600_get_lds_unique_index(name, index);
-				break;
-			default:
-				sel->lds_outputs_written_mask |=
-					1ull << r600_get_lds_unique_index(name, index);
-			}
-		}
+			sel->nir->info.gs.invocations;
 		break;
 	default:
 		break;
@@ -1042,16 +1338,26 @@ static void r600_bind_ps_state(struct pipe_context *ctx, void *state)
 	rctx->ps_shader = (struct r600_pipe_shader_selector *)state;
 }
 
-static struct tgsi_shader_info *r600_get_vs_info(struct r600_context *rctx)
+static struct r600_pipe_shader_selector *r600_get_last_vertex_stage(struct r600_context *rctx)
 {
 	if (rctx->gs_shader)
-		return &rctx->gs_shader->info;
+		return rctx->gs_shader;
 	else if (rctx->tes_shader)
-		return &rctx->tes_shader->info;
+		return rctx->tes_shader;
 	else if (rctx->vs_shader)
-		return &rctx->vs_shader->info;
+		return rctx->vs_shader;
 	else
 		return NULL;
+}
+
+static void r600_update_last_vertex_stage_viewport_state(struct r600_context *rctx)
+{
+	struct r600_pipe_shader_selector *sel = r600_get_last_vertex_stage(rctx);
+
+	if (sel)
+		r600_update_vs_writes_viewport_index(&rctx->b,
+						       sel->nir_info.vs_window_space,
+						       sel->nir_info.writes_viewport_index);
 }
 
 static void r600_bind_vs_state(struct pipe_context *ctx, void *state)
@@ -1062,7 +1368,7 @@ static void r600_bind_vs_state(struct pipe_context *ctx, void *state)
 		return;
 
 	rctx->vs_shader = (struct r600_pipe_shader_selector *)state;
-	r600_update_vs_writes_viewport_index(&rctx->b, r600_get_vs_info(rctx));
+	r600_update_last_vertex_stage_viewport_state(rctx);
 
         if (rctx->vs_shader->so.num_outputs)
            rctx->b.streamout.stride_in_dw = rctx->vs_shader->so.stride;
@@ -1076,7 +1382,7 @@ static void r600_bind_gs_state(struct pipe_context *ctx, void *state)
 		return;
 
 	rctx->gs_shader = (struct r600_pipe_shader_selector *)state;
-	r600_update_vs_writes_viewport_index(&rctx->b, r600_get_vs_info(rctx));
+	r600_update_last_vertex_stage_viewport_state(rctx);
 
 	if (!state)
 		return;
@@ -1100,7 +1406,7 @@ static void r600_bind_tes_state(struct pipe_context *ctx, void *state)
 		return;
 
 	rctx->tes_shader = (struct r600_pipe_shader_selector *)state;
-	r600_update_vs_writes_viewport_index(&rctx->b, r600_get_vs_info(rctx));
+	r600_update_last_vertex_stage_viewport_state(rctx);
 
 	if (!state)
 		return;
@@ -1124,12 +1430,7 @@ void r600_delete_shader_selector(struct pipe_context *ctx,
 		p = c;
 	}
 
-	if (sel->ir_type == PIPE_SHADER_IR_TGSI) {
-		free(sel->tokens);
-		/* We might have converted the TGSI shader to a NIR shader */
-		ralloc_free(sel->nir);
-	}
-	else if (sel->ir_type == PIPE_SHADER_IR_NIR)
+	if (sel->ir_type == PIPE_SHADER_IR_NIR)
 		ralloc_free(sel->nir);
 	free(sel->nir_blob);
 	free(sel);
@@ -1454,16 +1755,22 @@ void r600_palm_to_aruba_setup_buffer_constants(struct r600_context *rctx, int sh
 {
 	struct r600_textures_info *samplers = &rctx->samplers[shader_type];
 	struct r600_image_state *images = NULL;
-	int bits, sview_bits, img_bits;
+	int bits, sview_bits, img_base, img_bits;
 	uint32_t array_size;
 	int i;
 	uint32_t *constants;
 	uint32_t base_offset;
+	unsigned image_offset;
 
 	if (shader_type == MESA_SHADER_FRAGMENT) {
-		images = &rctx->fragment_images;
+		images = &rctx->fragment_images[1];
+		image_offset = util_last_bit(rctx->fragment_images[0].enabled_mask);
 	} else if (shader_type == MESA_SHADER_COMPUTE) {
 		images = &rctx->compute_images;
+		image_offset = 0;
+	} else if (shader_type == MESA_SHADER_VERTEX) {
+		images = &rctx->fragment_images[0];
+		image_offset = 0;
 	}
 
 	if (!samplers->views.dirty_buffer_constants &&
@@ -1474,9 +1781,11 @@ void r600_palm_to_aruba_setup_buffer_constants(struct r600_context *rctx, int sh
 		images->dirty_buffer_constants = false;
 	samplers->views.dirty_buffer_constants = false;
 
-	bits = sview_bits = util_last_bit(samplers->views.enabled_mask);
-	if (images)
-		bits += util_last_bit(images->enabled_mask);
+	bits = sview_bits = img_base = util_last_bit(samplers->views.enabled_mask);
+	if (images) {
+		img_base += image_offset;
+		bits += image_offset + util_last_bit(images->enabled_mask);
+	}
 	img_bits = bits;
 
 	array_size = bits * sizeof(uint32_t);
@@ -1491,7 +1800,7 @@ void r600_palm_to_aruba_setup_buffer_constants(struct r600_context *rctx, int sh
 		}
 	}
 	if (images) {
-		for (i = sview_bits; i < img_bits; i++) {
+		for (i = img_base; i < img_bits; i++) {
 			int idx = i - sview_bits;
 			if (images->enabled_mask & (1 << idx)) {
 				uint32_t offset = (base_offset / 4) + i;
@@ -1512,13 +1821,20 @@ void r600_cedar_to_hemlock_setup_buffer_constants(struct r600_context *rctx, int
 	struct r600_textures_info *const samplers = &rctx->samplers[shader_type];
 	struct r600_image_state *images = NULL;
 	struct r600_image_state *buffers = NULL;
+	unsigned image_offset;
 
 	if (shader_type == MESA_SHADER_FRAGMENT) {
-		images = &rctx->fragment_images;
-		buffers = &rctx->fragment_buffers;
+		images = &rctx->fragment_images[1];
+		buffers = &rctx->fragment_buffers[shader_type];
+		image_offset = util_last_bit(rctx->fragment_images[0].enabled_mask);
 	} else if (shader_type == MESA_SHADER_COMPUTE) {
 		images = &rctx->compute_images;
 		buffers = &rctx->compute_buffers;
+		image_offset = 0;
+	} else if (shader_type == MESA_SHADER_VERTEX) {
+		images = &rctx->fragment_images[0];
+		buffers = &rctx->fragment_buffers[shader_type];
+		image_offset = 0;
 	}
 
 	if (!samplers->views.dirty_buffer_constants &&
@@ -1532,10 +1848,13 @@ void r600_cedar_to_hemlock_setup_buffer_constants(struct r600_context *rctx, int
 		buffers->dirty_buffer_constants = false;
 	samplers->views.dirty_buffer_constants = false;
 
-	const unsigned sview_bits = util_last_bit(samplers->views.enabled_mask);
+	unsigned img_base;
+	const unsigned sview_bits = img_base = util_last_bit(samplers->views.enabled_mask);
 	unsigned bits = sview_bits;
-	if (images)
-		bits += util_last_bit(images->enabled_mask);
+	if (images) {
+		img_base += image_offset;
+		bits += image_offset + util_last_bit(images->enabled_mask);
+	}
 	const unsigned img_bits = bits;
 	if (buffers)
 		bits += util_last_bit(buffers->enabled_mask);
@@ -1556,7 +1875,7 @@ void r600_cedar_to_hemlock_setup_buffer_constants(struct r600_context *rctx, int
 		}
 	}
 	if (images) {
-		for (unsigned i = sview_bits; i < img_bits; i++) {
+		for (unsigned i = img_base; i < img_bits; i++) {
 			int idx = i - sview_bits;
 			if (images->enabled_mask & (1 << idx)) {
 				uint32_t offset = (base_offset / 4) + i;
@@ -1716,8 +2035,10 @@ void r600_update_compressed_resource_state(struct r600_context *rctx, bool compu
 				r600_update_compressed_colortex_mask(&rctx->samplers[i].views);
 			}
 		}
-		if (!compute_only)
-			r600_update_compressed_colortex_mask_images(&rctx->fragment_images);
+		if (!compute_only) {
+			for (unsigned k = 0; k < ARRAY_SIZE(rctx->fragment_images); k++)
+				r600_update_compressed_colortex_mask_images(&rctx->fragment_images[k]);
+		}
 		r600_update_compressed_colortex_mask_images(&rctx->compute_images);
 	}
 
@@ -1740,11 +2061,13 @@ void r600_update_compressed_resource_state(struct r600_context *rctx, bool compu
 		struct r600_image_state *istate;
 
 		if (!compute_only) {
-			istate = &rctx->fragment_images;
-			if (istate->compressed_depthtex_mask)
-				r600_decompress_depth_images(rctx, istate);
-			if (istate->compressed_colortex_mask)
-				r600_decompress_color_images(rctx, istate);
+			for (unsigned k = 0; k < ARRAY_SIZE(rctx->fragment_images); k++) {
+				istate = &rctx->fragment_images[k];
+				if (istate->compressed_depthtex_mask)
+					r600_decompress_depth_images(rctx, istate);
+				if (istate->compressed_colortex_mask)
+					r600_decompress_color_images(rctx, istate);
+			}
 		}
 
 		istate = &rctx->compute_images;
@@ -2622,7 +2945,7 @@ static void r600_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info 
 	const enum mesa_prim rast_prim = rctx->current_rast_prim;
 
 	rctx->current_rast_prim = rctx->gs_shader ? rctx->gs_shader->gs_output_prim
-		: rctx->tes_shader ? rctx->tes_shader->info.properties[TGSI_PROPERTY_TES_PRIM_MODE]
+		: rctx->tes_shader ? rctx->tes_shader->nir_info.tes_prim_mode
 		: info->mode;
 
 	if (rast_prim != rctx->current_rast_prim) {
@@ -3917,8 +4240,10 @@ static void r600_invalidate_buffer(struct pipe_context *ctx, struct pipe_resourc
 	}
 
 	/* SSBOs */
-	struct r600_image_state *istate = &rctx->fragment_buffers;
-	{
+        for (shader = 0; shader < ARRAY_SIZE(rctx->fragment_buffers); shader++) {
+		if (!r600_check_buffer_shader_supported(shader))
+			continue;
+		struct r600_image_state *istate = &rctx->fragment_buffers[shader];
 		uint32_t mask = istate->enabled_mask;
 		bool found = false;
 		while (mask) {

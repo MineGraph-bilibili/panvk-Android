@@ -115,6 +115,75 @@ brw_urb_fence_desc(const struct intel_device_info *devinfo)
    return brw_urb_desc(devinfo, GEN_GFX125_URB_OPCODE_FENCE, false, false, 0);
 }
 
+static inline bool
+brw_sampler_message_is_gather4(unsigned msg_type)
+{
+   switch (msg_type) {
+   case GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4:
+   case GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_L:
+   case GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_B:
+   case GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_I:
+   case GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_C:
+   case GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO:
+   case GEN_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_C:
+   case GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_I_C:
+   case GEN_XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_L_C:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static inline uint64_t
+brw_sampler_64bit_desc(const struct intel_device_info *devinfo,
+                       unsigned msg_type,
+                       unsigned surface_state_index,
+                       unsigned sampler_state_index,
+                       unsigned data_return_format,
+                       unsigned simd_mode,
+                       unsigned r_offset,
+                       unsigned v_offset,
+                       unsigned u_offset,
+                       uint8_t write_channel_mask,
+                       bool trtt_null,
+                       uint8_t gather_component)
+{
+   /* TODO: optimization that can be enabled later */
+   bool enable_lsc_backing = false;
+   /* TODO: support gather4 */
+   bool is_gather4 = brw_sampler_message_is_gather4(msg_type);
+   bool address_input_format;
+   /* Sampler doesn't support CacheMode overwrite Field MBZ */
+   unsigned cache_mode_load = 0;
+   /* TODO: support feedback message */
+   bool feedback_message = false;
+   uint64_t msg_desc = SET_BITS_64(msg_type, 5, 0) |
+                       SET_BITS_64(enable_lsc_backing, 6, 6) |
+                       SET_BITS_64(data_return_format, 15, 15) |
+                       SET_BITS_64(cache_mode_load, 19, 16) |
+                       SET_BITS_64(trtt_null, 20, 20) |
+                       SET_BITS_64(feedback_message, 21, 21) |
+                       SET_BITS_64(surface_state_index, 26, 22) |
+                       SET_BITS_64(sampler_state_index, 29, 27) |
+                       SET_BITS_64(r_offset, 33, 30) |
+                       SET_BITS_64(v_offset, 37, 34) |
+                       SET_BITS_64(u_offset, 41, 38);
+
+   if (is_gather4)
+      msg_desc |= SET_BITS_64(gather_component, 10, 9);
+   else
+      msg_desc |= SET_BITS_64(write_channel_mask, 10, 7);
+
+   if (simd_mode == GEN_XE2_SAMPLER_SIMD_MODE_SIMD16H ||
+       simd_mode == GEN_XE2_SAMPLER_SIMD_MODE_SIMD32H)
+      address_input_format = 1;
+   else
+      address_input_format = 0;
+   msg_desc |= SET_BITS_64(address_input_format, 14, 14);
+
+   return msg_desc;
+}
+
 /**
  * Construct a message descriptor immediate with the specified sampler
  * function controls.
@@ -680,6 +749,30 @@ brw_fb_write_desc_last_render_target(const struct intel_device_info *devinfo,
    return GET_BITS(desc, 12, 12);
 }
 
+static inline uint64_t
+brw_64bit_render_target_msg_desc(const struct intel_device_info *devinfo,
+                                 uint8_t msg_type,
+                                 bool last_render_target,
+                                 bool null_rt,
+                                 brw_reg sample_mask,
+                                 brw_reg src_depth,
+                                 brw_reg src_stencil,
+                                 brw_reg src0_alpha,
+                                 unsigned components)
+{
+   uint8_t component_mask = (1 << components) - 1;
+   uint64_t msg = SET_BITS_64(msg_type, 5, 0) |
+                  SET_BITS_64(component_mask, 10, 7) |
+                  SET_BITS_64(last_render_target, 14, 14) |
+                  SET_BITS_64(null_rt, 21, 21) |
+                  SET_BITS_64((sample_mask.file != BAD_FILE), 34, 34) |
+                  SET_BITS_64((src_depth.file != BAD_FILE), 35, 35) |
+                  SET_BITS_64((src_stencil.file != BAD_FILE), 36, 36) |
+                  SET_BITS_64((src0_alpha.file != BAD_FILE), 37, 37);
+
+   return msg;
+}
+
 static inline bool
 brw_fb_write_desc_coarse_write(const struct intel_device_info *devinfo,
                                uint32_t desc)
@@ -751,7 +844,7 @@ static inline unsigned
 brw_lsc_msg_dest_len(const struct intel_device_info *devinfo,
                      enum lsc_data_size data_sz, unsigned n)
 {
-   return DIV_ROUND_UP(lsc_data_size_bytes(data_sz) * n,
+   return DIV_ROUND_UP(lsc_data_size_register_bytes(data_sz) * n,
                        reg_unit(devinfo) * REG_SIZE) * reg_unit(devinfo);
 }
 
@@ -775,6 +868,16 @@ brw_mdc_sm2_exec_size(uint32_t sm2)
 {
    assert(sm2 <= 1);
    return 8 << sm2;
+}
+
+static inline uint64_t
+brw_btd_64bit_spawn_desc(ASSERTED const struct intel_device_info *devinfo,
+                         uint8_t opcode)
+{
+   assert(devinfo->has_ray_tracing);
+   return SET_BITS_64(opcode, 3, 0) |
+          SET_BITS_64(1, 5, 4) | /* Message Family = BTD_SPAWN_MSG */
+          SET_BITS_64(0, 13, 12); /* Ordinary Spawn: This is a callable mode. */
 }
 
 static inline uint32_t
@@ -822,6 +925,15 @@ brw_rt_trace_ray_desc_exec_size(UNUSED const struct intel_device_info *devinfo,
    return brw_mdc_sm2_exec_size(GET_BITS(desc, 8, 8));
 }
 
+static inline uint64_t
+brw_rt_trace_64bit_desc(ASSERTED const struct intel_device_info *devinfo,
+                        uint8_t opcode)
+{
+   assert(devinfo->has_ray_tracing);
+   return SET_BITS_64(opcode, 3, 0) |
+          SET_BITS_64(0, 5, 4) /* Message Family = TRACE_RAY_MSG */;
+}
+
 /**
  * Construct a message descriptor immediate with the specified pixel
  * interpolator function controls.
@@ -852,28 +964,61 @@ enum brw_conditional_mod brw_swap_cmod(enum brw_conditional_mod cmod);
 /** Maximum SEND message length */
 #define BRW_MAX_MSG_LENGTH 15
 
-/** Offset encoding signed size limits (top bit is the sign) */
+/** Xe2 Offset encoding signed size limits (top bit is the sign) */
 #define LSC_ADDRESS_OFFSET_FLAT_BITS 20
 #define LSC_ADDRESS_OFFSET_SS_BITS   17
 #define LSC_ADDRESS_OFFSET_BTI_BITS  12
 
+/** Xe3P-64bit Offset encoding signed size limits (top bit is the sign) */
+#define LSC_64BIT_STATELESS_OFFSET_BITS 21
+#define LSC_64BIT_STATEFUL_OFFSET_BITS  16
+
 static inline unsigned
-brw_max_immediate_offset_bits(enum lsc_addr_surface_type binding_type)
+brw_max_immediate_offset_bits(enum lsc_addr_surface_type binding_type,
+                              bool efficient_64bit)
 {
-   static const unsigned max_bits[] = {
-      [LSC_ADDR_SURFTYPE_FLAT] = LSC_ADDRESS_OFFSET_FLAT_BITS,
-      [LSC_ADDR_SURFTYPE_BSS]  = LSC_ADDRESS_OFFSET_SS_BITS,
-      [LSC_ADDR_SURFTYPE_SS]   = LSC_ADDRESS_OFFSET_SS_BITS,
-      [LSC_ADDR_SURFTYPE_BTI]  = LSC_ADDRESS_OFFSET_BTI_BITS,
-   };
-   assert(binding_type <= LSC_ADDR_SURFTYPE_BTI);
-   return max_bits[binding_type];
+   if (efficient_64bit) {
+      return binding_type == LSC_ADDR_SURFTYPE_FLAT ?
+             LSC_64BIT_STATELESS_OFFSET_BITS :
+             LSC_64BIT_STATEFUL_OFFSET_BITS;
+   } else {
+      static const unsigned max_bits[] = {
+         [LSC_ADDR_SURFTYPE_FLAT] = LSC_ADDRESS_OFFSET_FLAT_BITS,
+         [LSC_ADDR_SURFTYPE_BSS]  = LSC_ADDRESS_OFFSET_SS_BITS,
+         [LSC_ADDR_SURFTYPE_SS]   = LSC_ADDRESS_OFFSET_SS_BITS,
+         [LSC_ADDR_SURFTYPE_BTI]  = LSC_ADDRESS_OFFSET_BTI_BITS,
+      };
+      assert(binding_type <= LSC_ADDR_SURFTYPE_BTI);
+      return max_bits[binding_type];
+   }
+}
+
+static inline unsigned
+brw_immediate_offset_alignment(uint32_t element_size_B,
+                               bool efficient_64bit)
+{
+   return efficient_64bit ? element_size_B : 4;
 }
 
 static inline bool
 brw_lsc_supports_base_offset(const struct intel_device_info *devinfo)
 {
    return devinfo->ver >= 20;
+}
+
+static inline bool
+brw_lsc_can_use_instruction_offset(enum lsc_addr_surface_type binding_type,
+                                   bool efficient_64bit,
+                                   uint32_t element_size_B,
+                                   int32_t offset)
+{
+   const unsigned max_bits =
+      brw_max_immediate_offset_bits(binding_type, efficient_64bit);
+   return
+      offset % brw_immediate_offset_alignment(element_size_B,
+                                              efficient_64bit) == 0 &&
+      offset >= u_intN_min(max_bits) &&
+      offset <= u_intN_max(max_bits);
 }
 
 static inline bool

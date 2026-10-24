@@ -100,7 +100,7 @@ virtio_bo_iova(struct fd_bo *bo)
 static void
 virtio_bo_set_name(struct fd_bo *bo, const char *fmt, va_list ap)
 {
-   char name[32];
+   char name[FD_MSM_GEM_NAME_LENGTH + 1];
    int sz;
 
    /* Note, we cannot set name on the host for the shmem bo, as
@@ -111,7 +111,7 @@ virtio_bo_set_name(struct fd_bo *bo, const char *fmt, va_list ap)
       return;
 
    sz = vsnprintf(name, sizeof(name), fmt, ap);
-   sz = MIN2(sz, sizeof(name));
+   sz = MIN2(sz, FD_MSM_GEM_NAME_LENGTH);
 
    unsigned req_len = sizeof(struct msm_ccmd_gem_set_name_req) + align(sz, 4);
 

@@ -122,7 +122,9 @@ genX_bits_included_symbols = [
   '3DSTATE_CPSIZE_CONTROL_BUFFER::Surface Base Address',
   '3DSTATE_CPSIZE_CONTROL_BUFFER::Surface Pitch',
   'COMPUTE_WALKER::body',
+  'COMPUTE_WALKER_2::body',
   'EXECUTE_INDIRECT_DISPATCH::body',
+  'EXECUTE_INDIRECT_DISPATCH_2::body',
   # structures
   '3DSTATE_CONSTANT_ALL_DATA',
   'RENDER_SURFACE_STATE::Surface Base Address',

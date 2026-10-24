@@ -33,9 +33,6 @@ spec@arb_shader_image_load_store@early-z@occlusion query test/early-z pass,Fail
 
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
 
-# error: main:90: eglChooseConfig() returned no configs
-spec@egl 1.4@eglterminate then unbind context,Fail
-
 spec@egl_chromium_sync_control@conformance,Fail
 # piglit: error: SBC did not change after second SwapBuffers: 0
 spec@egl_chromium_sync_control@conformance@eglGetSyncValuesCHROMIUM_msc_and_sbc_test,Fail
@@ -55,7 +52,6 @@ spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
 
 # eglChooseConfig() failed
-spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 
 spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
@@ -103,5 +99,5 @@ glx@glx-visuals-depth -pixmap,Fail
 glx@glx-visuals-stencil -pixmap,Fail
 
 # uprev Piglit in Mesa
-vulkan@shaders@cmat-uniform-ctor,Fail
+spec@ext_transform_feedback2@draw-auto offset,Fail
 

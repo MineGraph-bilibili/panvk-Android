@@ -26,6 +26,12 @@ DELAYED_DECODER_DELETES = [
 ]
 
 DELAYED_DECODER_DELETE_DICT_ENTRIES = [
+    "vkDestroyDescriptorSetLayout",
+    "vkDestroyPipelineCache",
+    "vkDestroyRenderPass",
+    "vkDestroySampler",
+    "vkDestroySamplerYcbcrConversion",
+    "vkDestroySamplerYcbcrConversionKHR",
     "vkDestroyShaderModule",
 ]
 
@@ -734,6 +740,7 @@ custom_decodes = {
     "vkGetImageMemoryRequirements" : emit_global_state_wrapped_decoding,
     "vkGetImageMemoryRequirements2" : emit_global_state_wrapped_decoding,
     "vkGetImageMemoryRequirements2KHR" : emit_global_state_wrapped_decoding,
+    "vkGetImageSubresourceLayout" : emit_global_state_wrapped_decoding,
     "vkGetBufferMemoryRequirements" : emit_global_state_wrapped_decoding,
     "vkGetBufferMemoryRequirements2": emit_global_state_wrapped_decoding,
     "vkGetBufferMemoryRequirements2KHR": emit_global_state_wrapped_decoding,
@@ -892,6 +899,21 @@ custom_decodes = {
     "vkGetDeviceImageMemoryRequirements" : emit_global_state_wrapped_decoding,
     "vkGetDeviceImageMemoryRequirementsKHR" : emit_global_state_wrapped_decoding,
 
+    # VK_EXT_private_data
+    "vkCreatePrivateDataSlotEXT" : emit_global_state_wrapped_decoding,
+    "vkDestroyPrivateDataSlotEXT" : emit_global_state_wrapped_decoding,
+    "vkGetPrivateDataEXT" : emit_global_state_wrapped_decoding,
+    "vkSetPrivateDataEXT" : emit_global_state_wrapped_decoding,
+
+    # VK_EXT_private_data in core after VK_VERSION_1_3
+    "vkCreatePrivateDataSlot" : emit_global_state_wrapped_decoding,
+    "vkDestroyPrivateDataSlot" : emit_global_state_wrapped_decoding,
+    "vkGetPrivateData" : emit_global_state_wrapped_decoding,
+    "vkSetPrivateData" : emit_global_state_wrapped_decoding,
+
+    # VK_EXT_debug_utils
+    "vkSetDebugUtilsObjectNameEXT" : emit_global_state_wrapped_decoding,
+    "vkSetDebugUtilsObjectTagEXT" : emit_global_state_wrapped_decoding,
 }
 
 class VulkanDecoder(VulkanWrapperGenerator):

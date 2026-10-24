@@ -5,8 +5,8 @@
 
 #include "vn_common.h"
 
-#include "venus-protocol/vn_protocol_driver_host_copy.h"
 #include "vk_format.h"
+#include "vn_protocol_driver_host_copy.h"
 
 #include "vn_device.h"
 

@@ -23,6 +23,7 @@ files_r600 = files(
   'r600_dump.h',
   'r600_formats.h',
   'r600_hw_context.c',
+  'r600_image_buffer.h',
   'r600_inline.h',
   'r600_isa.c',
   'r600_isa.h',

@@ -525,6 +525,14 @@ iris_get_timestamp(struct pipe_screen *pscreen)
    return result;
 }
 
+static uint64_t
+iris_convert_timestamp(struct pipe_screen *pscreen, uint64_t raw_timestamp)
+{
+   struct iris_screen *screen = (struct iris_screen *) pscreen;
+
+   return intel_device_info_timebase_scale(screen->devinfo, raw_timestamp);
+}
+
 void
 iris_screen_destroy(struct iris_screen *screen)
 {
@@ -799,6 +807,7 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->is_format_supported = iris_is_format_supported;
    pscreen->context_create = iris_create_context;
    pscreen->get_timestamp = iris_get_timestamp;
+   pscreen->convert_timestamp = iris_convert_timestamp;
    pscreen->query_memory_info = iris_query_memory_info;
    pscreen->get_driver_query_group_info = iris_get_monitor_group_info;
    pscreen->get_driver_query_info = iris_get_monitor_info;

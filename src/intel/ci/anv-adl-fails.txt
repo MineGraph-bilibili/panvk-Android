@@ -13,10 +13,6 @@ dEQP-VK.sparse_resources.buffer.ssbo.sparse_residency.non_resident_buffer_strict
 
 dEQP-VK.video.capabilities.av1_decode_dpb_video_format_support_query,Fail
 dEQP-VK.video.capabilities.av1_decode_dst_video_format_support_query,Fail
-dEQP-VK.video.decode.vp9.basic_10_not_matching_order_layered_dpb_video_layout,Fail
-dEQP-VK.video.decode.vp9.basic_10_not_matching_order_separated_dpb_video_layout,Fail
-dEQP-VK.video.decode.vp9.inter_intra_only_layered_dpb_video_layout,Fail
-dEQP-VK.video.decode.vp9.inter_intra_only_separated_dpb_video_layout,Fail
 
 # fluster
 GStreamer-H.264-Vulkan@CVFC1_Sony_C,Fail
@@ -311,8 +307,6 @@ GStreamer-H.265-Vulkan@ALPHA_A_BBC_1,Crash
 GStreamer-H.265-Vulkan@Bipred_8by8_A_Qualcomm_2,Crash
 GStreamer-H.265-Vulkan@Bitdepth_A_RExt_Sony_1,Crash
 GStreamer-H.265-Vulkan@Bitdepth_B_RExt_Sony_1,Crash
-GStreamer-H.265-Vulkan@CAINIT_G_SHARP_3,Crash
-GStreamer-H.265-Vulkan@CAINIT_H_SHARP_3,Crash
 GStreamer-H.265-Vulkan@CCP_10bit_RExt_QCOM_1,Crash
 GStreamer-H.265-Vulkan@CCP_12bit_RExt_QCOM_1,Crash
 GStreamer-H.265-Vulkan@CCP_8bit_RExt_QCOM_1,Crash
@@ -329,17 +323,11 @@ GStreamer-H.265-Vulkan@CONFCROP_A_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@CONFCROP_B_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@CONFCROP_C_VIDYO_3,Crash
 GStreamer-H.265-Vulkan@CONFWIN_A_Sony_1,Fail
-GStreamer-H.265-Vulkan@DBLK_A_MAIN10_VIXS_4,Fail
-GStreamer-H.265-Vulkan@DBLK_C_SONY_3,Fail
-GStreamer-H.265-Vulkan@DBLK_D_VIXS_2,Crash
 GStreamer-H.265-Vulkan@DEPTH_A_NOKIA_1,Crash
 GStreamer-H.265-Vulkan@DISFLAG_A_QUALCOMM_1,Crash
 GStreamer-H.265-Vulkan@DPB_A_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@DPB_B_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@DPB_Loop_Filters_A_MediaTek_2,Crash
-GStreamer-H.265-Vulkan@DSLICE_A_HHI_5,Crash
-GStreamer-H.265-Vulkan@DSLICE_B_HHI_5,Crash
-GStreamer-H.265-Vulkan@DSLICE_C_HHI_5,Crash
 GStreamer-H.265-Vulkan@Delta_QP_Chroma_QP_Offsets_A_Qualcomm_2,Crash
 GStreamer-H.265-Vulkan@EXTPREC_HIGHTHROUGHPUT_444_16_INTRA_10BIT_RExt_Sony_1,Crash
 GStreamer-H.265-Vulkan@EXTPREC_HIGHTHROUGHPUT_444_16_INTRA_12BIT_RExt_Sony_1,Crash
@@ -349,7 +337,6 @@ GStreamer-H.265-Vulkan@EXTPREC_MAIN_444_16_INTRA_10BIT_RExt_Sony_1,Crash
 GStreamer-H.265-Vulkan@EXTPREC_MAIN_444_16_INTRA_12BIT_RExt_Sony_1,Crash
 GStreamer-H.265-Vulkan@EXTPREC_MAIN_444_16_INTRA_16BIT_RExt_Sony_1,Crash
 GStreamer-H.265-Vulkan@EXTPREC_MAIN_444_16_INTRA_8BIT_RExt_Sony_1,Crash
-GStreamer-H.265-Vulkan@EXT_A_ericsson_4,Crash
 GStreamer-H.265-Vulkan@ExplicitRdpcm_A_BBC_1,Crash
 GStreamer-H.265-Vulkan@ExplicitRdpcm_B_BBC_2,Crash
 GStreamer-H.265-Vulkan@GENERAL_10b_420_RExt_Sony_1,Crash
@@ -414,7 +401,6 @@ GStreamer-H.265-Vulkan@PPI_B_InterDigital_2,Crash
 GStreamer-H.265-Vulkan@PPSSLIST_A_Sony_2,Crash
 GStreamer-H.265-Vulkan@PSEXT_A_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@QMATRIX_A_RExt_Sony_1,Crash
-GStreamer-H.265-Vulkan@RAP_B_Bossen_2,Fail
 GStreamer-H.265-Vulkan@REFLAYER_A_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@REFLAYER_B_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@REFLAYER_C_VIDYO_2,Crash
@@ -425,11 +411,6 @@ GStreamer-H.265-Vulkan@REPFMT_B_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@REPFMT_C_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@RESCHANGE_A_VIDYO_1,Crash
 GStreamer-H.265-Vulkan@RESPHASE_A_SAMSUNG_2,Crash
-GStreamer-H.265-Vulkan@RPLM_B_qualcomm_4,Fail
-GStreamer-H.265-Vulkan@RPS_B_qualcomm_5,Crash
-GStreamer-H.265-Vulkan@RPS_C_ericsson_5,Crash
-GStreamer-H.265-Vulkan@RPS_E_qualcomm_5,Crash
-GStreamer-H.265-Vulkan@RPS_F_docomo_2,Fail
 GStreamer-H.265-Vulkan@SAO_A_RExt_MediaTek_1,Crash
 GStreamer-H.265-Vulkan@SCREFOFF_A_QCOM_1,Crash
 GStreamer-H.265-Vulkan@SIM_A_IDCC_1,Crash
@@ -471,24 +452,8 @@ GStreamer-H.265-Vulkan@WPP_AND_TILE_AND_CABAC_BYPASS_ALIGN_0_HIGH_TP_444_14BIT_R
 GStreamer-H.265-Vulkan@WPP_AND_TILE_AND_CABAC_BYPASS_ALIGN_1_HIGH_TP_444_14BIT_RExt_Apple_2,Crash
 GStreamer-H.265-Vulkan@WPP_AND_TILE_AND_CABAC_EXT_PREC_1_HIGH_TP_444_14BIT_RExt_Apple_2,Crash
 GStreamer-H.265-Vulkan@WPP_AND_TILE_HIGH_TP_444_8BIT_RExt_Apple_2,Crash
-GStreamer-H.265-Vulkan@WPP_A_ericsson_MAIN10_2,Crash
-GStreamer-H.265-Vulkan@WPP_A_ericsson_MAIN_2,Crash
-GStreamer-H.265-Vulkan@WPP_B_ericsson_MAIN10_2,Crash
-GStreamer-H.265-Vulkan@WPP_B_ericsson_MAIN_2,Crash
-GStreamer-H.265-Vulkan@WPP_C_ericsson_MAIN10_2,Crash
-GStreamer-H.265-Vulkan@WPP_C_ericsson_MAIN_2,Crash
-GStreamer-H.265-Vulkan@WPP_D_ericsson_MAIN10_2,Crash
-GStreamer-H.265-Vulkan@WPP_D_ericsson_MAIN_2,Crash
-GStreamer-H.265-Vulkan@WPP_E_ericsson_MAIN10_2,Crash
-GStreamer-H.265-Vulkan@WPP_E_ericsson_MAIN_2,Crash
-GStreamer-H.265-Vulkan@WPP_F_ericsson_MAIN10_2,Crash
-GStreamer-H.265-Vulkan@WPP_F_ericsson_MAIN_2,Crash
 GStreamer-H.265-Vulkan@WPP_HIGH_TP_444_8BIT_RExt_Apple_2,Crash
 GStreamer-H.265-Vulkan@Zero_and_One_Palette_Size_A_Canon_2,Crash
-GStreamer-H.265-Vulkan@cip_B_NEC_3,Fail
-GStreamer-H.265-Vulkan@ipcm_A_NEC_3,Fail
-GStreamer-H.265-Vulkan@ipcm_B_NEC_3,Fail
-GStreamer-H.265-Vulkan@ipcm_E_NEC_2,Fail
 GStreamer-VP9-Vulkan@vp90-2-05-resize.ivf,Fail
 GStreamer-VP9-Vulkan@vp90-2-11-size-351x287.webm,Fail
 GStreamer-VP9-Vulkan@vp90-2-11-size-352x287.webm,Fail

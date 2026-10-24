@@ -3793,7 +3793,6 @@ dEQP-VK.compute.shader_object_spirv.cooperative_matrix.op_constant_null.null_c,C
 dEQP-VK.compute.shader_object_spirv.cooperative_matrix.op_constant_null.null_r,Crash
 dEQP-VK.renderpasses.dynamic_rendering.partial_secondary_cmd_buff.local_read.interaction_with_shader_object,Fail
 dEQP-VK.renderpasses.dynamic_rendering.partial_secondary_cmd_buff.local_read.remap_single_attachment_shader_object,Fail
-dEQP-VK.spirv_assembly.instruction.compute.variable_pointers.compute.opselect_different_strides,Fail
 dEQP-VK.wsi.direct.present_timing.basic.large_queue_size,Fail
 dEQP-VK.wsi.direct.present_timing.time_domain.calibration.clock_monotonic,Fail
 dEQP-VK.wsi.direct.present_timing.time_domain.calibration.clock_monotonic_raw,Fail
@@ -3802,3 +3801,5 @@ dEQP-VK.wsi.direct.present_timing.time_domain.calibration.present_stage_local,Fa
 dEQP-VK.wsi.direct.present_timing.time_domain.calibration.query_performance_counter,Fail
 dEQP-VK.wsi.direct.present_timing.time_domain.calibration.swapchain_local,Fail
 dEQP-VK.wsi.direct.present_timing.time_domain.properties.properties,Fail
+
+dEQP-VK.api.fill_and_update_buffer.dedicated_alloc.fill_buffer_vk_whole_size_device_address,Crash

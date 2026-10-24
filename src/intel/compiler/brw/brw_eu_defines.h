@@ -18,6 +18,7 @@
  * intel/compiler and i965 codebase. */
 
 #define INTEL_MASK(high, low) (((1u<<((high)-(low)+1))-1)<<(low))
+#define INTEL_MASK_64(high, low) (((1ull<<((high)-(low)+1))-1)<<(low))
 /* Using the GNU statement expression extension */
 #define SET_FIELD(value, field)                                         \
    ({                                                                   \
@@ -33,8 +34,17 @@
       fieldval & INTEL_MASK(high, low);                                 \
    })
 
+#define SET_BITS_64(value, high, low)                                   \
+   ({                                                                   \
+      const uint64_t fieldval = (uint64_t)(value) << (low);             \
+      assert((fieldval & ~INTEL_MASK_64(high, low)) == 0);              \
+      fieldval & INTEL_MASK_64(high, low);                              \
+   })
+
 #define GET_BITS(data, high, low) ((data & INTEL_MASK((high), (low))) >> (low))
+#define GET_BITS_64(data, high, low) ((data & INTEL_MASK_64((high), (low))) >> (low))
 #define GET_FIELD(word, field) (((word)  & field ## _MASK) >> field ## _SHIFT)
+#define GET_BITS_64(data, high, low) ((data & INTEL_MASK_64((high), (low))) >> (low))
 
 # define GFX7_GS_CONTROL_DATA_FORMAT_GSCTL_CUT		0
 # define GFX7_GS_CONTROL_DATA_FORMAT_GSCTL_SID		1
@@ -178,9 +188,11 @@ enum ENUM_PACKED opcode {
    BRW_OPCODE_SENDC,
    BRW_OPCODE_SENDS,
    BRW_OPCODE_SENDSC,
+   BRW_OPCODE_SENDG, /* Gfx35+ with 64bits addressing */
    BRW_OPCODE_MATH,
    BRW_OPCODE_ADD,
    BRW_OPCODE_MUL,
+   BRW_OPCODE_MULLH,
    BRW_OPCODE_AVG,
    BRW_OPCODE_FRC,
    BRW_OPCODE_RNDU,
@@ -231,6 +243,7 @@ enum ENUM_PACKED opcode {
    SHADER_OPCODE_INT_REMAINDER,
    SHADER_OPCODE_SIN,
    SHADER_OPCODE_COS,
+   SHADER_OPCODE_TANH,
 
    /**
     * A generic "send" opcode.  The first two sources are the message
@@ -535,15 +548,19 @@ enum ENUM_PACKED opcode {
 
 enum send_srcs {
    /** The 32-bit message descriptor (can be a register) */
-   SEND_SRC_DESC,
+   SEND_SRC_DESC = 0,
    /** The 32-bit extended message descriptor (can be a register) */
-   SEND_SRC_EX_DESC,
+   SEND_SRC_EX_DESC = 1,
+   /** The 64-bit indirect 0 message descriptor (can be a register) */
+   SENDG_SRC_IND_0_DESC = 0,
+   /** The 64-bit indirect 1 message descriptor (can be a register) */
+   SENDG_SRC_IND_1_DESC = 1,
    /** The leading register for the first SEND payload */
-   SEND_SRC_PAYLOAD1,
+   SEND_SRC_PAYLOAD1 = 2,
    /** The leading register for the second split-SEND payload */
-   SEND_SRC_PAYLOAD2,
+   SEND_SRC_PAYLOAD2 = 3,
 
-   SEND_NUM_SRCS
+   SEND_NUM_SRCS = 4,
 };
 
 enum send_gather_srcs {
@@ -554,6 +571,7 @@ enum send_gather_srcs {
 };
 
 enum fb_write_logical_srcs {
+   FB_WRITE_LOGICAL_SRC_BINDING,     /* Optional Gfx35+ */
    FB_WRITE_LOGICAL_SRC_COLOR0,      /* REQUIRED */
    FB_WRITE_LOGICAL_SRC_COLOR1,      /* for dual source blend messages */
    FB_WRITE_LOGICAL_SRC_SRC0_ALPHA,
@@ -681,8 +699,6 @@ enum rt_logical_srcs {
    RT_LOGICAL_SRC_GLOBALS,
    /** Trace ray payloads */
    RT_LOGICAL_SRC_PAYLOADS,
-   /** Synchronous tracing (ray query) */
-   RT_LOGICAL_SRC_SYNCHRONOUS,
 
    RT_LOGICAL_NUM_SRCS
 };
@@ -1056,4 +1072,3 @@ enum ENUM_PACKED brw_rnd_mode {
 #define GFX7_BYTE_SCATTERED_DATA_ELEMENT_BYTE     0
 #define GFX7_BYTE_SCATTERED_DATA_ELEMENT_WORD     1
 #define GFX7_BYTE_SCATTERED_DATA_ELEMENT_DWORD    2
-

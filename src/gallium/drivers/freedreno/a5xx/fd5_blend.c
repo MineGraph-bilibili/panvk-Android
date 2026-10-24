@@ -8,6 +8,7 @@
 
 #include "pipe/p_state.h"
 #include "util/u_blend.h"
+#include "util/u_dual_blend.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
 
@@ -103,13 +104,18 @@ fd5_blend_state_create(struct pipe_context *pctx,
 //               A5XX_RB_MRT_BUF_INFO_DITHER_MODE(DITHER_ALWAYS);
    }
 
+   so->use_dual_src_blend =
+      cso->rt[0].blend_enable && util_blend_state_is_dual(cso, 0);
+
    so->rb_blend_cntl =
       A5XX_RB_BLEND_CNTL_ENABLE_BLEND(mrt_blend) |
+      COND(so->use_dual_src_blend, A5XX_RB_BLEND_CNTL_DUAL_COLOR_IN_ENABLE) |
       COND(cso->alpha_to_coverage, A5XX_RB_BLEND_CNTL_ALPHA_TO_COVERAGE) |
       COND(cso->independent_blend_enable, A5XX_RB_BLEND_CNTL_INDEPENDENT_BLEND);
    so->sp_blend_cntl =
       A5XX_SP_BLEND_CNTL_ENABLE_BLEND(mrt_blend) |
       A5XX_SP_BLEND_CNTL_UNK8 |
+      COND(so->use_dual_src_blend, A5XX_SP_BLEND_CNTL_DUAL_COLOR_IN_ENABLE) |
       COND(cso->alpha_to_coverage, A5XX_SP_BLEND_CNTL_ALPHA_TO_COVERAGE);
 
    return so;

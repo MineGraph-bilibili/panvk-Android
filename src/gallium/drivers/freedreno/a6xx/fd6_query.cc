@@ -334,7 +334,7 @@ time_elapsed_accumulate_result(struct fd_acc_query *aq,
                                union pipe_query_result *result)
 {
    struct fd6_query_sample *sp = fd6_query_sample(s);
-   result->u64 = ticks_to_ns(sp->result);
+   result->u64 = fd_ticks_to_ns(sp->result);
 }
 
 static void
@@ -354,7 +354,7 @@ timestamp_accumulate_result(struct fd_acc_query *aq,
                             union pipe_query_result *result)
 {
    struct fd6_query_sample *sp = fd6_query_sample(s);
-   result->u64 = ticks_to_ns(sp->start);
+   result->u64 = fd_ticks_to_ns(sp->start);
 }
 
 static void
@@ -513,7 +513,7 @@ pipeline_stats_resume(struct fd_acc_query *aq, struct fd_batch *batch)
 
    /* snapshot the start value: */
    fd_pkt7(cs, CP_REG_TO_MEM, 3)
-      .add(CP_REG_TO_MEM_0(.reg = reg, .cnt = 2, ._64b = true))
+      .add(CP_REG_TO_MEM_0(.reg = reg, .cnt = 2, .is_64b = true))
       .add(A5XX_CP_REG_TO_MEM_DEST(stats_sample(aq, start)));
 
    assert(type < ARRAY_SIZE(batch->pipeline_stats_queries_active));
@@ -536,7 +536,7 @@ pipeline_stats_pause(struct fd_acc_query *aq, struct fd_batch *batch)
 
    /* snapshot the end values: */
    fd_pkt7(cs, CP_REG_TO_MEM, 3)
-      .add(CP_REG_TO_MEM_0(.reg = reg, .cnt = 2, ._64b = true))
+      .add(CP_REG_TO_MEM_0(.reg = reg, .cnt = 2, .is_64b = true))
       .add(A5XX_CP_REG_TO_MEM_DEST(stats_sample(aq, stop)));
 
    assert(type < ARRAY_SIZE(batch->pipeline_stats_queries_active));
@@ -658,7 +658,7 @@ accumultate_primitives_emitted(struct fd_acc_query *aq, fd_cs &cs, int idx)
 {
    /* result += stop - start: */
    fd_pkt7(cs, CP_MEM_TO_MEM, 9)
-      .add(CP_MEM_TO_MEM_0(.neg_c = true, ._double = true, .unk31 = true))
+      .add(CP_MEM_TO_MEM_0(.neg_c = true, ._double = true, .wait_cache_flush = true))
       .add(CP_MEM_TO_MEM_DST(primitives_sample(aq, result.emitted)))
       .add(CP_MEM_TO_MEM_SRC_A(primitives_sample(aq, result.emitted)))
       .add(CP_MEM_TO_MEM_SRC_B(primitives_sample(aq, stop[idx].emitted)))
@@ -670,7 +670,7 @@ accumultate_primitives_generated(struct fd_acc_query *aq, fd_cs &cs, int idx)
 {
    /* result += stop - start: */
    fd_pkt7(cs, CP_MEM_TO_MEM, 9)
-      .add(CP_MEM_TO_MEM_0(.neg_c = true, ._double = true, .unk31 = true))
+      .add(CP_MEM_TO_MEM_0(.neg_c = true, ._double = true, .wait_cache_flush = true))
       .add(CP_MEM_TO_MEM_DST(primitives_sample(aq, result.generated)))
       .add(CP_MEM_TO_MEM_SRC_A(primitives_sample(aq, result.generated)))
       .add(CP_MEM_TO_MEM_SRC_B(primitives_sample(aq, stop[idx].generated)))
@@ -869,7 +869,7 @@ perfcntr_resume(struct fd_acc_query *aq, struct fd_batch *batch) assert_dt
       const struct fd_perfcntr_counter *counter = entry->counter;
 
       fd_pkt7(cs, CP_REG_TO_MEM, 3)
-         .add(CP_REG_TO_MEM_0(.reg = counter->counter_reg_lo, ._64b = true))
+         .add(CP_REG_TO_MEM_0(.reg = counter->counter_reg_lo, .is_64b = true))
          .add(A5XX_CP_REG_TO_MEM_DEST(query_sample_idx(aq, i, start)));
    }
 }
@@ -891,7 +891,7 @@ perfcntr_pause(struct fd_acc_query *aq, struct fd_batch *batch) assert_dt
       const struct fd_perfcntr_counter *counter = entry->counter;
 
       fd_pkt7(cs, CP_REG_TO_MEM, 3)
-         .add(CP_REG_TO_MEM_0(.reg = counter->counter_reg_lo, ._64b = true))
+         .add(CP_REG_TO_MEM_0(.reg = counter->counter_reg_lo, .is_64b = true))
          .add(A5XX_CP_REG_TO_MEM_DEST(query_sample_idx(aq, i, stop)));
    }
 
@@ -1024,7 +1024,7 @@ fd6_query_context_init(struct pipe_context *pctx) disable_thread_safety_analysis
    ctx->query_update_batch = fd_acc_query_update_batch;
 
    ctx->record_timestamp = record_timestamp<CHIP>;
-   ctx->ts_to_ns = ticks_to_ns;
+   ctx->ts_to_ns = fd_ticks_to_ns;
 
    pctx->create_batch_query = fd6_create_batch_query<CHIP>;
 

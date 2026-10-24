@@ -13,8 +13,6 @@
 extern "C" {
 #endif
 
-void print_stack_trace(void);
-
 /* Panfrost wrappers for Mesa CPU scope traces.
  *
  * CPU tracing (not to be confused with GPU command stream tracing with

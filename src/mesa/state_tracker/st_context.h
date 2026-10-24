@@ -199,6 +199,11 @@ struct st_context
       unsigned fb_num_samples;
       unsigned fb_num_layers;
       unsigned fb_num_cb;
+      /* Whether the single color buffer is a YUV render target
+       * (GL_EXT_YUV_target).  Computed when the framebuffer changes so that
+       * consumers like st_update_blend() don't have to recompute it.
+       */
+      bool fb_is_yuv;
       unsigned num_viewports;
       struct pipe_scissor_state scissor[PIPE_MAX_VIEWPORTS];
       struct pipe_viewport_state viewport[PIPE_MAX_VIEWPORTS];

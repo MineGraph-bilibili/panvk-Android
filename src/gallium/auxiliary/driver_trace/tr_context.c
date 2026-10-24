@@ -1013,6 +1013,25 @@ trace_context_set_polygon_stipple(struct pipe_context *_pipe,
 }
 
 static void
+trace_context_set_sample_coverage(struct pipe_context *_pipe,
+                                  float value, bool invert)
+{
+   struct trace_context *tr_ctx = trace_context(_pipe);
+   struct pipe_context *pipe = tr_ctx->pipe;
+
+   trace_dump_call_begin("pipe_context", "set_sample_coverage");
+
+   trace_dump_arg(ptr, pipe);
+   trace_dump_arg(float, value);
+   trace_dump_arg(bool, invert);
+
+   pipe->set_sample_coverage(pipe, value, invert);
+
+   trace_dump_call_end();
+}
+
+
+static void
 trace_context_set_min_samples(struct pipe_context *_pipe,
                               unsigned min_samples)
 {
@@ -2588,6 +2607,7 @@ trace_context_create(struct trace_screen *tr_scr,
    TR_CTX_INIT(set_stencil_ref);
    TR_CTX_INIT(set_clip_state);
    TR_CTX_INIT(set_sample_mask);
+   TR_CTX_INIT(set_sample_coverage);
    TR_CTX_INIT(set_constant_buffer);
    TR_CTX_INIT(set_framebuffer_state);
    TR_CTX_INIT(set_inlinable_constants);

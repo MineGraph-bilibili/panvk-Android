@@ -1,9 +1,11 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
+use crate::data_type::NumericType;
 use crate::debug::*;
 use crate::ir::*;
 use crate::model::model_for_gpu_id;
+use crate::ops::OpNop;
 use compiler::bindings::*;
 use kraid_bindings::*;
 
@@ -96,6 +98,8 @@ fn nir_opts(arch: u8, merge_wg: bool) -> nir_shader_compiler_options {
         } else {
             0
         },
+        lower_mediump_io: Some(pan_nir_lower_mediump_io),
+        io_options: nir_io_has_intrinsics | nir_io_non_interpolated_as_uint,
         ..Default::default()
     }
 }
@@ -105,25 +109,15 @@ pub extern "C" fn kraid_get_nir_shader_compiler_options(
     arch: u8,
     merge_wg: bool,
 ) -> *const nir_shader_compiler_options {
-    static OPTS: OnceLock<
-        HashMap<
-            (u8, bool),
-            // Somebody did something silly and put a callback in
-            // nir_shader_compiler_options and now it's not Send so
-            // we can't put it in a OnceLock.  Work around that by
-            // stashing a u8 array instead
-            [u8; std::mem::size_of::<nir_shader_compiler_options>()],
-        >,
-    > = OnceLock::new();
+    static OPTS: OnceLock<HashMap<(u8, bool), nir_shader_compiler_options>> =
+        OnceLock::new();
 
     let opts = OPTS
         .get_or_init(|| {
             let mut map = HashMap::new();
             for arch in 9..=15 {
                 for merge_wg in [false, true] {
-                    let opts = unsafe {
-                        std::mem::transmute(nir_opts(arch, merge_wg))
-                    };
+                    let opts = nir_opts(arch, merge_wg);
                     map.insert((arch, merge_wg), opts);
                 }
             }
@@ -132,7 +126,7 @@ pub extern "C" fn kraid_get_nir_shader_compiler_options(
         .get(&(arch, merge_wg))
         .expect("Unsupported GPU arch");
 
-    unsafe { std::mem::transmute(opts) }
+    opts as *const _
 }
 
 fn dynarray_append_vec<T: Copy>(buf: &mut util_dynarray, vec: Vec<T>) {
@@ -147,11 +141,86 @@ fn dynarray_append_vec<T: Copy>(buf: &mut util_dynarray, vec: Vec<T>) {
     }
 }
 
-fn write_back_info(src: &ShaderInfo, dst: &mut pan_shader_info) {
+fn write_back_info(
+    model: &dyn Model,
+    src: &ShaderInfo,
+    nir: &nir_shader,
+    dst: &mut pan_shader_info,
+) {
     dst.work_reg_count = src.registers_used.into();
     dst.tls_size = src.tls_size;
     dst.preload = src.register_preload;
     dst.has_shader_clk_instr = src.has_ld_gclk;
+
+    if model.arch() >= 9 {
+        let bifrost_info = unsafe { dst.__bindgen_anon_2.bifrost.as_mut() };
+        bifrost_info.uses_flat_shading = src.uses_flat_shading;
+
+        if nir.info.stage() == MESA_SHADER_FRAGMENT {
+            let translate_color = |dt: &Option<DataType>| {
+                let Some(dt) = dt else {
+                    return nir_type_invalid;
+                };
+                let num_type = match dt.num_type() {
+                    NumericType::SignedInteger => nir_type_int,
+                    NumericType::UnsignedInteger => nir_type_uint,
+                    NumericType::Float => nir_type_float,
+                    _ => panic!("Invalid color data type"),
+                };
+                num_type | dt.bits()
+            };
+
+            for (i, btype) in src.blend_types.iter().enumerate() {
+                bifrost_info.blend[i].type_ = translate_color(btype);
+            }
+            bifrost_info.blend_src1_type = translate_color(&src.blend1_type);
+        }
+    } else {
+        panic!("Unsupported GPU generation");
+    }
+
+    if nir.info.stage() == MESA_SHADER_VERTEX {
+        // TODO: only for BI_IDVS_ALL (only one supported right now)
+        let secondary_mask =
+            unsafe { val_ex_fifo_varying_bits() } | (1 << VARYING_SLOT_POS);
+        dst.__bindgen_anon_1.vs.secondary_enable =
+            (nir.info.outputs_written & !secondary_mask) != 0;
+    }
+}
+
+/// v9 reuses psiz writes as line width when drawing lines.
+/// We cannot know what we're drawing at compile time so we need to create
+/// a variant without psiz writes to be selected when we aren't drawing points
+fn encode_no_psiz_variant(
+    nir: &nir_shader,
+    s: &mut Shader,
+    model: &dyn Model,
+    binary: &mut util_dynarray,
+    info: &mut pan_shader_info,
+) {
+    // TODO: v10+ HW should ignore psiz writes, investigate
+    if nir.info.internal
+        || nir.info.stage() != MESA_SHADER_VERTEX
+        || (nir.info.outputs_written & (1 << VARYING_SLOT_PSIZ)) == 0
+    {
+        return;
+    }
+
+    info.__bindgen_anon_1.vs.no_psiz_offset = binary.size;
+    // Find the store with is_psiz set
+    let store = s
+        .blocks
+        .iter_mut()
+        .rev()
+        .flat_map(|b| b.instrs.iter_mut().rev())
+        .find(|i| matches!(&i.op, Op::Store(s) if s.is_psiz))
+        .expect("No psiz write found");
+
+    // Patch it out, but preserve flow
+    store.op = Op::Nop(OpNop {});
+
+    let bin = model.encode_shader(s);
+    dynarray_append_vec(binary, bin);
 }
 
 #[unsafe(no_mangle)]
@@ -161,31 +230,72 @@ pub extern "C" fn kraid_compile_nir(
     binary: &mut util_dynarray,
     info: &mut pan_shader_info,
 ) {
-    let model = model_for_gpu_id(inputs.gpu_id).unwrap();
+    let model = model_for_gpu_id(inputs.gpu_id, inputs.gpu_variant).unwrap();
 
     if DEBUG.contains(DebugFlags::PRINT) {
         eprint!("{}", nir.to_string().unwrap());
     }
 
-    let mut s = Shader::from_nir(model.as_ref(), nir);
+    let mut s = Shader::from_nir(model.as_ref(), nir, inputs);
     s.run_pass("after translation from NIR", |_| {});
 
     pass!(s.remat_constants());
     pass!(s.widen_alu_ops());
     pass!(s.legalize_src_swizzles());
     pass!(s.opt_copy_prop());
+    while pass!(s.opt_dst_mod_prop()) {
+        pass!(s.opt_copy_prop());
+    }
     pass!(s.lower_mkvec_swz());
+    pass!(s.opt_var());
     pass!(s.opt_dce());
     pass!(s.lower_small_constants());
+    if inputs.fau.promote_immediates {
+        pass!(s.opt_promote_consts(&mut info.fau));
+    }
     pass!(s.legalize());
+    pass!(s.schedule_for_pressure());
     // Shader::assign_registers() uses pass!() internally
     s.assign_registers();
     pass!(s.lower_copy());
+
+    // These have to happen after register allocation because they may add
+    // critical edges.
+    pass!(s.opt_jump_thread());
+    pass!(s.opt_fall_through());
+
+    // These have to happen last since we can't remove any instructions after
+    // they've completed.
     pass!(s.assign_message_slots());
+    pass!(s.insert_required_waits());
+    pass!(s.mark_reconvergence());
+    pass!(s.opt_flow());
 
-    let bin = model.encode_shader(&s);
-    dynarray_append_vec(binary, bin);
+    if !s.is_empty() {
+        info.stats = s.get_stats();
+        pass!(s.lower_blend_call());
 
-    write_back_info(&s.info, info);
+        let bin = model.encode_shader(&s);
+        let code_size = std::mem::size_of_val(&bin[..]);
+        dynarray_append_vec(binary, bin);
+
+        encode_no_psiz_variant(nir, &mut s, model.as_ref(), binary, info);
+
+        if info.stats.isa == PAN_STAT_VALHALL {
+            info.stats.__bindgen_anon_1.valhall.code_size =
+                code_size.try_into().unwrap();
+        } else {
+            panic!("Unsupported ISA");
+        }
+    } else {
+        info.stats = pan_stats {
+            isa: PAN_STAT_VALHALL,
+            __bindgen_anon_1: pan_stats__bindgen_ty_1 {
+                valhall: valhall_stats::default(),
+            },
+        }
+    }
+
+    write_back_info(model.as_ref(), &s.info, nir, info);
     unsafe { pan_shader_update_info(info, nir, inputs) };
 }

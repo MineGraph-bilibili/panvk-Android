@@ -30,6 +30,7 @@
 
 #include <stdbool.h>
 
+#include "common/intel_common.h"
 #include "dev/intel_device_info.h"
 #include "genxml/gen_macros.h"
 

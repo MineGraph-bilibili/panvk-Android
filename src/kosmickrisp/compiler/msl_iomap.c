@@ -282,9 +282,8 @@ fs_input_block(nir_shader *shader, struct nir_to_msl_ctx *ctx)
       struct io_slot_info info = ctx->outputs_info[location];
       const char *type = alu_type_to_string(info.type);
       const char *vector_suffix = vector_suffixes[info.num_components];
-      P_IND(ctx, "%s%s ", type, vector_suffix);
-      P(ctx, "%s [[%s, raster_order_group(0)]];\n", FS_OUTPUT_NAME[location],
-        FS_OUTPUT_SEMANTIC[location]);
+      P_IND(ctx, "%s%s %s [[%s]];\n", type, vector_suffix,
+            FS_OUTPUT_NAME[location], FS_OUTPUT_SEMANTIC[location]);
    }
 
    ctx->indentlevel--;
@@ -472,7 +471,9 @@ msl_emit_output_var(struct nir_to_msl_ctx *ctx, nir_shader *shader)
       P_IND(ctx, "%s out = {};\n", FRAGMENT_OUTPUT_TYPE);
 
       /* Load inputs to output */
-      u_foreach_bit64(location, shader->info.outputs_read) {
+      uint64_t actual_io =
+         shader->info.outputs_read & shader->info.outputs_written;
+      u_foreach_bit64(location, actual_io) {
          P_IND(ctx, "out.%s = in.%s;\n", FS_OUTPUT_NAME[location],
                FS_OUTPUT_NAME[location]);
       }
@@ -484,9 +485,13 @@ msl_emit_output_var(struct nir_to_msl_ctx *ctx, nir_shader *shader)
 
 void
 msl_output_name(struct nir_to_msl_ctx *ctx, unsigned location,
-                unsigned component)
+                unsigned component, bool load_from_input)
 {
-   P(ctx, "out.")
+   if (load_from_input) {
+      P(ctx, "in.");
+   } else {
+      P(ctx, "out.");
+   }
    switch (ctx->shader->info.stage) {
    case MESA_SHADER_VERTEX:
       varying_slot_name(ctx, location, component);

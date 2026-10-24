@@ -10,7 +10,7 @@
 
 static void
 ctx_disassemble_program_elk(struct intel_batch_decode_ctx *ctx,
-                            uint32_t ksp,
+                            uint64_t ksp,
                             const char *short_name,
                             const char *name)
 {

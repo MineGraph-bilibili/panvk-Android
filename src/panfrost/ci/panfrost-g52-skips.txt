@@ -70,3 +70,6 @@ dEQP-VK.wsi.wayland.swapchain.render.10swapchains.*
 # Nightly run expectations update
 spec@egl_ext_surface_compression@create
 
+# uprev Piglit in Mesa
+glx@glx_ext_no_config_context@no fbconfig
+

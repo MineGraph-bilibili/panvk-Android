@@ -348,7 +348,7 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
    }
 
    if (rsc->texture && !etna_resource_newer(rsc, etna_resource(rsc->texture)) &&
-       (!translate_pe_format_rb_swap(prsc->format) || rsc->shared)) {
+       (!translate_pe_format_rb_swap(prsc->format, screen) || rsc->shared)) {
       /* We have a texture resource which is the same age or newer than the
        * render resource. Use the texture resource, which avoids bouncing
        * pixels between the two resources, and we can de-tile it in s/w. */

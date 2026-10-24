@@ -6,6 +6,7 @@
 #define ANV_BVH_BUILD_HELPERS_H
 
 #include "vk_bvh_helpers.h"
+#include "vk_debug.h"
 #include "anv_bvh_defines.h"
 
 #if ((VK_USED_BUILD_FLAGS & ANV_BUILD_FLAG_WRITE_LOOKUP_MAPS_FOR_UPDATE) != 0)

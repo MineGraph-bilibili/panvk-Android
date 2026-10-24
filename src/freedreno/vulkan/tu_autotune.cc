@@ -667,7 +667,7 @@ struct tu_autotune::rp_entry {
    {
       tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
       tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(TU_CALLX(device, __CP_ALWAYS_ON_COUNTER)({}).reg) | CP_REG_TO_MEM_0_CNT(2) |
-                        CP_REG_TO_MEM_0_64B);
+                        CP_REG_TO_MEM_0_IS_64B);
       tu_cs_emit_qw(cs, timestamp_iova);
    }
 
@@ -1795,12 +1795,20 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    /* Just to ensure a segfault for accesses, in case we don't set it. */
    *rp_ctx = nullptr;
 
+   /* Records why the mode wasn't the autotuner's to pick, for the trace and for anything else that wants to tell a
+    * tuned RP apart from one whose mode was decided for it.
+    */
+   auto forced = [&](const char *reason, render_mode mode) {
+      cmd_buffer->state.rp.force_render_mode_reason = reason;
+      return mode;
+   };
+
    /* If a feedback loop in the subpass caused one of the pipelines used to set
     * SINGLE_PRIM_MODE(FLUSH_PER_OVERLAP_AND_OVERWRITE) or even SINGLE_PRIM_MODE(FLUSH), then that should cause
     * significantly increased SYSMEM bandwidth (though we haven't quantified it).
     */
    if (rp_state->sysmem_single_prim_mode)
-      return render_mode::GMEM;
+      return forced("Uses SINGLE_PRIM_MODE, which is expensive in sysmem", render_mode::GMEM);
 
    /* If the user is using a fragment density map, then this will cause less FS invocations with GMEM, which has a
     * hard-to-measure impact on performance because it depends on how heavy the FS is in addition to how many
@@ -1808,13 +1816,13 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
     * because if SYSMEM is actually faster then they could've just not used the fragment density map.
     */
    if (pass->has_fdm)
-      return render_mode::GMEM;
+      return forced("Uses a fragment density map", render_mode::GMEM);
 
    /* There is a special HW path for unresolves into GMEM, and all known users of MSRTSS are VR apps made for tilers,
     * so they would expect for MSRTSS RPs to be in GMEM mode.
     */
    if (pass->has_msrtss)
-      return render_mode::GMEM;
+      return forced("Uses MSRTSS", render_mode::GMEM);
 
    /* SYSMEM is always a safe default mode when we can't fully engage the autotuner. From testing, we know that for an
     * incorrect decision towards SYSMEM tends to be far less impactful than an incorrect decision towards GMEM, which
@@ -1845,8 +1853,12 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    bool ignore_small_rp = !config.test(mod_flag::TUNE_SMALL) && rp_state->drawcall_count < 5 &&
                           (!latency_info || !latency_info->seen_latency_spike);
 
-   if (!enabled || simultaneous_use || ignore_small_rp)
-      return default_mode;
+   if (!enabled)
+      return forced("Autotuner is disabled", default_mode);
+   if (simultaneous_use)
+      return forced("VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT", default_mode);
+   if (ignore_small_rp)
+      return forced("Too few draws to tune", default_mode);
 
    /* We can return early with the decision based on the draw call count, instead of needing to hash the renderpass
     * instance and look up the history, which is far more expensive.
@@ -1855,12 +1867,20 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
     * and we cannot do so in those cases.
     */
    bool can_early_return = !config.test(mod_flag::PREEMPT_OPTIMIZE);
+   const char *early_return_reason = nullptr;
    auto early_return_mode = [&]() -> std::optional<render_mode> {
-      if ((config.test(mod_flag::BIG_GMEM) && rp_state->drawcall_count >= 10) ||
-          config.is_enabled(algorithm::PREFER_GMEM))
+      if (config.test(mod_flag::BIG_GMEM) && rp_state->drawcall_count >= 10) {
+         early_return_reason = "TU_AUTOTUNE_FLAGS=big_gmem";
          return render_mode::GMEM;
-      if (config.is_enabled(algorithm::PREFER_SYSMEM))
+      }
+      if (config.is_enabled(algorithm::PREFER_GMEM)) {
+         early_return_reason = "TU_AUTOTUNE_ALGO=prefer_gmem";
+         return render_mode::GMEM;
+      }
+      if (config.is_enabled(algorithm::PREFER_SYSMEM)) {
+         early_return_reason = "TU_AUTOTUNE_ALGO=prefer_sysmem";
          return render_mode::SYSMEM;
+      }
       return std::nullopt;
    }();
 
@@ -1868,7 +1888,7 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
       at_log_base_h("%" PRIu32 " draw calls, using %s (early)",
                     key_opt ? key_opt->hash : rp_key(pass, framebuffer, cmd_buffer).hash, rp_state->drawcall_count,
                     render_mode_str(*early_return_mode));
-      return *early_return_mode;
+      return forced(early_return_reason, *early_return_mode);
    }
 
    rp_key key(0);
@@ -1904,13 +1924,13 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
        * draws into smaller ones with tiling.
        */
       at_log_base_h("high preemption latency risk, using GMEM", key.hash);
-      return render_mode::GMEM;
+      return forced("High preemption latency risk", render_mode::GMEM);
    }
 
    if (early_return_mode) {
       at_log_base_h("%" PRIu32 " draw calls, using %s (late)", key.hash, rp_state->drawcall_count,
                     render_mode_str(*early_return_mode));
-      return *early_return_mode;
+      return forced(early_return_reason, *early_return_mode);
    }
 
    if (config.is_enabled(algorithm::PROFILED) || config.is_enabled(algorithm::PROFILED_IMM))
@@ -1985,16 +2005,16 @@ tu_autotune::write_preempt_counters_to_iova(struct tu_cs *cs,
       tu_cs_emit_wfi(cs);
 
    tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
-   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(preemption_latency_counter->counter_reg_lo) | CP_REG_TO_MEM_0_64B);
+   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(preemption_latency_counter->counter_reg_lo) | CP_REG_TO_MEM_0_IS_64B);
    tu_cs_emit_qw(cs, latency_iova);
 
    tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
-   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(always_count_counter->counter_reg_lo) | CP_REG_TO_MEM_0_64B);
+   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(always_count_counter->counter_reg_lo) | CP_REG_TO_MEM_0_IS_64B);
    tu_cs_emit_qw(cs, always_count_iova);
 
    tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
    tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(TU_CALLX(device, __CP_ALWAYS_ON_COUNTER)({}).reg) | CP_REG_TO_MEM_0_CNT(2) |
-                     CP_REG_TO_MEM_0_64B);
+                     CP_REG_TO_MEM_0_IS_64B);
    tu_cs_emit_qw(cs, aon_iova);
 }
 

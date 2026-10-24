@@ -387,12 +387,14 @@ finish_assembler_test()
 {
    finish_program(program.get());
    std::vector<uint32_t> binary;
-   unsigned exec_size = emit_program(program.get(), binary);
+   std::vector<aco_symbol> symbols;
+   aco_callback_params params = {};
+   emit_program(program.get(), binary, symbols, true, &params);
 
    /* we could use CLRX for disassembly but that would require it to be
     * installed */
    if (program->gfx_level >= GFX8) {
-      print_asm(program.get(), rad_info.family, binary, exec_size / 4u, output);
+      print_asm(program.get(), rad_info.family, binary, params.exec_size / 4u, output);
    } else {
       // TODO: maybe we should use CLRX and skip this test if it's not available?
       for (uint32_t dword : binary)

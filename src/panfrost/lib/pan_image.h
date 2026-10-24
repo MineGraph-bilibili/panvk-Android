@@ -344,13 +344,49 @@ pan_image_test_props(const struct pan_kmod_dev_props *dprops,
       .mod_handler = pan_mod_get_handler(arch, iprops->modifier),
    };
 
-   if (!image.mod_handler)
+   if (!image.mod_handler || !image.mod_handler->get_format_caps)
       return PAN_MOD_NOT_SUPPORTED;
 
-   enum pan_mod_support ret =
-      image.mod_handler->test_props(dprops, &image.props, iusage);
-   if (ret == PAN_MOD_NOT_SUPPORTED)
-      return ret;
+   uint32_t caps =
+      image.mod_handler->get_format_caps(dprops, iprops->format, iprops->modifier);
+   if (!caps)
+      return PAN_MOD_NOT_SUPPORTED;
+
+   if (iprops->dim == MALI_TEXTURE_DIMENSION_1D &&
+       !(caps & PAN_MOD_FORMAT_CAP_DIM_1D))
+      return PAN_MOD_NOT_SUPPORTED;
+   if (iprops->dim == MALI_TEXTURE_DIMENSION_2D &&
+       !(caps & PAN_MOD_FORMAT_CAP_DIM_2D))
+      return PAN_MOD_NOT_SUPPORTED;
+   if (iprops->dim == MALI_TEXTURE_DIMENSION_3D &&
+       !(caps & PAN_MOD_FORMAT_CAP_DIM_3D))
+      return PAN_MOD_NOT_SUPPORTED;
+
+   if (iprops->nr_samples > 1 && !(caps & PAN_MOD_FORMAT_CAP_MSAA))
+      return PAN_MOD_NOT_SUPPORTED;
+
+   if (iusage) {
+      if ((iusage->bind & PAN_BIND_STORAGE_IMAGE) &&
+          !(caps & PAN_MOD_FORMAT_CAP_STORAGE_IMAGE))
+         return PAN_MOD_NOT_SUPPORTED;
+      if ((iusage->bind & PAN_BIND_DEPTH_STENCIL) &&
+          !(caps & PAN_MOD_FORMAT_CAP_DEPTH_STENCIL))
+         return PAN_MOD_NOT_SUPPORTED;
+      if (iusage->standard_sparse_mapping_granularity &&
+          !(caps & PAN_MOD_FORMAT_CAP_SPARSE_MAP))
+         return PAN_MOD_NOT_SUPPORTED;
+      if (iusage->host_copy && !(caps & PAN_MOD_FORMAT_CAP_HOST_COPY))
+         return PAN_MOD_NOT_SUPPORTED;
+      if (iusage->wsi && !(caps & PAN_MOD_FORMAT_CAP_WSI))
+         return PAN_MOD_NOT_SUPPORTED;
+   }
+
+   enum pan_mod_support ret = PAN_MOD_OPTIMAL;
+   if (image.mod_handler->test_props) {
+      ret = image.mod_handler->test_props(dprops, &image.props, iusage);
+      if (ret == PAN_MOD_NOT_SUPPORTED)
+         return ret;
+   }
 
    /* Now make sure the layout can be properly initialized on all planes. */
    uint32_t plane_count = util_format_get_num_planes(image.props.format);
@@ -371,24 +407,12 @@ static inline bool
 pan_image_test_modifier_with_format(const struct pan_kmod_dev_props *dprops,
                                     uint64_t modifier, enum pipe_format format)
 {
-   /* To check if a <modifier,format> pair is supported, we define the smallest
-    * possible 2D image (or 3D image if this is a 3D compressed format). */
-   const struct pan_image_props iprops = {
-      .modifier = modifier,
-      .format = format,
-      .extent_px = {
-            .width = util_format_get_blockwidth(format),
-            .height = util_format_get_blockheight(format),
-            .depth = util_format_get_blockdepth(format),
-      },
-      .nr_samples = 1,
-      .dim = util_format_get_blockdepth(format) > 1 ? MALI_TEXTURE_DIMENSION_3D
-                                                    : MALI_TEXTURE_DIMENSION_2D,
-      .nr_slices = 1,
-      .array_size = 1,
-   };
+   const unsigned arch = pan_arch(dprops->gpu_id);
+   const struct pan_mod_handler *handler = pan_mod_get_handler(arch, modifier);
+   if (!handler || !handler->get_format_caps)
+      return false;
 
-   return pan_image_test_props(dprops, &iprops, NULL) != PAN_MOD_NOT_SUPPORTED;
+   return handler->get_format_caps(dprops, format, modifier) != 0;
 }
 
 #ifdef __cplusplus

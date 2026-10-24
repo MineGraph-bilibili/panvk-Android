@@ -92,12 +92,8 @@ wsi_device_init(struct wsi_device *wsi,
    wsi->sw = device_options->sw_device || (WSI_DEBUG & WSI_DEBUG_SW);
    wsi->wants_linear = (WSI_DEBUG & WSI_DEBUG_LINEAR) != 0;
    wsi->x11.extra_xwayland_image = device_options->extra_xwayland_image;
-   wsi->x11.use_raw_fd_modifier =
-      device_options->x11_use_raw_fd_modifier;
    wsi->wayland.disable_timestamps = (WSI_DEBUG & WSI_DEBUG_NOWLTS) != 0;
    wsi->emulate_24as32 = device_options->emulate_24as32;
-   wsi->wait_present_before_queue =
-      device_options->wait_present_before_queue;
 #define WSI_GET_CB(func) \
    PFN_vk##func func = (PFN_vk##func)proc_addr(pdevice, "vk" #func)
    WSI_GET_CB(GetPhysicalDeviceExternalSemaphoreProperties);
@@ -2893,12 +2889,9 @@ wsi_common_queue_present(const struct wsi_device *wsi,
 #endif
       }
 
-      if (wsi->sw || wsi->wait_present_before_queue) {
-         results[i] = wsi->WaitForFences(
-            vk_device_to_handle(dev), 1, &swapchain->fences[image_index],
-            true, ~0ull);
-         if (results[i] != VK_SUCCESS)
-            continue;
+      if (wsi->sw && !swapchain->sw_fence_wait_in_present_thread) {
+         wsi->WaitForFences(vk_device_to_handle(dev),
+                            1, &swapchain->fences[image_index], true, ~0ull);
       }
 
       const VkPresentRegionKHR *region = NULL;
@@ -2991,11 +2984,10 @@ wsi_common_create_swapchain_image(const struct wsi_device *wsi,
    assert(pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL);
    assert(!(image_usage & ~chain->image_info.usage2.usage));
 
-   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pCreateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO: {
-         const VkImageFormatListCreateInfo *iflci =
-            (const VkImageFormatListCreateInfo *)ext;
+         const VkImageFormatListCreateInfo *iflci = ext;
          const VkImageFormatListCreateInfo *swc_iflci =
             &chain->image_info.format_list;
 

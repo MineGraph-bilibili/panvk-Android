@@ -32,6 +32,13 @@ def lowered_fround_even(src):
 
 lower_algebraic.append((('fround_even', a), lowered_fround_even(a)))
 
+# Since fceil/ffloor preserve signed-zero, this ftrunc lowering does so too.
+lower_ftrunc = [
+    (('ftrunc', a) , ('bcsel', ('flt', a, 0.0), ('fceil', a), ('ffloor', a)))
+]      
+
+lower_algebraic.extend(lower_ftrunc)
+
 lower_insert_extract = [
    (('insert_u8', 'a@32', b), ('bitfield_insert', 0, a, ('imul', b, 8), 8)),
    (('insert_u16', 'a@32', b), ('bitfield_insert', 0, a, ('imul', b, 16), 16)),

@@ -220,4 +220,14 @@ st_update_framebuffer_state( struct st_context *st )
    st->state.fb_num_samples = util_framebuffer_get_num_samples(&framebuffer);
    st->state.fb_num_layers = util_framebuffer_get_num_layers(&framebuffer);
    st->state.fb_num_cb = framebuffer.nr_cbufs;
+
+   /* Cache whether the (single) color target is a multi-planar YUV render
+    * target (GL_EXT_YUV_target), ie. one with a separate chroma plane.  Packed
+    * YUV (YUYV & friends) keeps chroma in the same plane and reports a single
+    * plane, so it does not need the extra per-plane handling in the driver.
+    */
+   st->state.fb_is_yuv = framebuffer.nr_cbufs == 1 &&
+                         framebuffer.cbufs[0].texture &&
+                         util_format_is_yuv(framebuffer.cbufs[0].format) &&
+                         util_format_get_num_planes(framebuffer.cbufs[0].format) > 1;
 }

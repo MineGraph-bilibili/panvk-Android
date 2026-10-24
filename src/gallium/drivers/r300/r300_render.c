@@ -1262,6 +1262,7 @@ void r300_blitter_draw_rectangle(struct blitter_context *blitter,
     /* XXX workaround for a lockup in MSAA resolve on SWTCL chipsets, this
      * function most probably doesn't handle type=NONE correctly */
     if ((!r300->screen->caps.has_tcl && type == UTIL_BLITTER_ATTRIB_NONE) ||
+        width > R300_POINTSIZE_MAX || height > R300_POINTSIZE_MAX ||
         type == UTIL_BLITTER_ATTRIB_TEXCOORD_XYZW ||
         num_instances > 1) {
         util_blitter_draw_rectangle(blitter, vertex_elements_cso, get_vs,

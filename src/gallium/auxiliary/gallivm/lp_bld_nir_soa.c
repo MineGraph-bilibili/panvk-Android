@@ -2371,13 +2371,21 @@ static void emit_reduce(struct lp_build_nir_soa_context *bld, LLVMValueRef src,
    struct lp_build_context *vec_bld = is_flt ? get_flt_bld(bld, bit_size, true) :
       get_int_bld(bld, is_unsigned, bit_size, true);
 
+   /* x86 lacks native FP16 arithmetic (without AVX512-FP16) and LLVM has no
+    * software runtime libcall for f16 fminnum/fmaxnum, leading to a fatal
+    * error during SelectionDAG. Fall back to the element-wise reduction loop
+    * unless AVX512-FP16 is supported. */
+   bool f16_minmax_supported = util_get_cpu_caps()->has_avx512fp16;
+   bool is_f16_minmax = is_flt && bit_size == 16 &&
+                        (reduction_op == nir_op_fmin || reduction_op == nir_op_fmax);
    /*
     * For a reduce operation with the correct cluster size, the llvm
     * intrinsics can be used as long as the exec_mask is taken into account.
     * Values are defaulted in disabled lanes depending on the operation.
     */
    if (instr->intrinsic == nir_intrinsic_reduce &&
-       cluster_size == bld->int_bld.type.length) {
+       cluster_size == bld->int_bld.type.length &&
+       (f16_minmax_supported || !is_f16_minmax)) {
       char intrinsic[64];
       uint32_t length = vec_bld->type.length;
       uint32_t src_width = bit_size;
@@ -3331,6 +3339,7 @@ do_alu_action(struct lp_build_nir_soa_context *bld,
       result = lp_build_abs(float_bld, src[0]);
       break;
    case nir_op_fadd:
+   case nir_op_fadd_rtne:
       result = lp_build_add(float_bld, src[0], src[1]);
       break;
    case nir_op_fceil:

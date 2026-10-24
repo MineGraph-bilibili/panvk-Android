@@ -18,6 +18,7 @@
 #include "kk_sampler.h"
 
 #include "util/format/u_format.h"
+#include "util/half_float.h"
 
 static inline uint32_t
 align_u32(uint32_t v, uint32_t a)
@@ -75,6 +76,10 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
             desc[plane].image_gpu_resource_id =
                view->planes[plane].sampled_gpu_resource_id;
          }
+
+         float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
+         desc[plane].image_min_lod_fp16 = _mesa_float_to_half(min_lod);
+         desc[plane].image_min_lod_uint16 = min_lod;
       }
    }
 
@@ -95,9 +100,9 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
          uint8_t sampler_plane = MIN2(plane, sampler->plane_count - 1u);
          assert(sampler->planes[sampler_plane].hw->handle);
          desc[plane].sampler_index = sampler->planes[sampler_plane].hw->index;
-         desc[plane].lod_bias_fp16 = sampler->lod_bias_fp16;
-         desc[plane].lod_min_fp16 = sampler->lod_min_fp16;
-         desc[plane].lod_max_fp16 = sampler->lod_max_fp16;
+         desc[plane].sampler_lod_bias_fp16 = sampler->lod_bias_fp16;
+         desc[plane].sampler_lod_min_fp16 = sampler->lod_min_fp16;
+         desc[plane].sampler_lod_max_fp16 = sampler->lod_max_fp16;
          desc[plane].clamp_0_sampler_index_or_negative = -1;
       }
 
@@ -420,6 +425,13 @@ kk_push_descriptor_set_update(struct kk_push_descriptor_set *push_set,
 
 static void kk_descriptor_pool_free(struct kk_descriptor_pool *pool,
                                     uint64_t addr, uint64_t size);
+
+void
+kk_descriptor_pool_set_label(struct kk_descriptor_pool *pool, const char *label)
+{
+   if (pool->bo)
+      kk_bo_set_label(pool->bo, label);
+}
 
 static void
 kk_descriptor_set_destroy(struct kk_device *dev,

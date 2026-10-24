@@ -1659,7 +1659,7 @@ static nir_def *
 ntr_lower_backend_tex_wrap(nir_builder *b, nir_def *coord, rc_wrap_mode wrapmode)
 {
    nir_def *xyz =
-      nir_channels(b, coord, BITFIELD_MASK(MIN2(coord->num_components, 3)));
+      nir_channels(b, coord, nir_component_mask(MIN2(coord->num_components, 3)));
 
    switch (wrapmode) {
    case RC_WRAP_REPEAT:
@@ -1695,6 +1695,78 @@ ntr_lower_backend_tex_wrap(nir_builder *b, nir_def *coord, rc_wrap_mode wrapmode
    return ntr_tex_coord_replace_xyz(b, coord, xyz);
 }
 
+/* Map a cube direction addressing a logical NPOT face into the top-left
+ * subregion of the physical POT face without changing the selected face.
+ *
+ * Let a = logical_size / physical_size and M = max(abs(coord)). For each
+ * face, adding (1 - a) * M in the appropriate signed directions maps the
+ * face-local S and T coordinates from [0, 1] to [0, a], while preserving
+ * the original major component.
+ *
+ * The face basis vectors are +X=(+,+,+), -X=(-,+,-), +Y=(-,+,-),
+ * -Y=(-,-,+), +Z=(-,+,+), and -Z=(+,+,-).
+ */
+static nir_def *
+ntr_lower_backend_tex_cube(nir_builder *b, nir_def *coord, nir_def *factor,
+                           nir_def *upper_factor, nir_def **edge_delta)
+{
+   assert(coord->num_components >= 3);
+   assert(!edge_delta || upper_factor);
+
+   nir_def *scale = nir_channel(b, factor, 0);
+   nir_def *xyz = nir_trim_vector(b, coord, 3);
+   nir_def *abs_xyz = nir_fabs(b, xyz);
+   nir_def *ax = nir_channel(b, abs_xyz, 0);
+   nir_def *ay = nir_channel(b, abs_xyz, 1);
+   nir_def *az = nir_channel(b, abs_xyz, 2);
+   nir_def *one = nir_imm_float(b, 1.0f);
+   nir_def *neg_one = nir_imm_float(b, -1.0f);
+   nir_def *sign = nir_fcsel_ge(b, xyz, one, neg_one);
+   nir_def *sx = nir_channel(b, sign, 0);
+   nir_def *sy = nir_channel(b, sign, 1);
+   nir_def *sz = nir_channel(b, sign, 2);
+
+   /* Match the conventional X, then Y, then Z cube face tie-breaking. */
+   nir_def *max_yz = nir_fmax(b, ay, az);
+   nir_def *max_xz = nir_fmax(b, ax, az);
+   nir_def *face_x = nir_fsub(b, ax, max_yz);
+   nir_def *face_y = nir_fsub(b, ay, max_xz);
+
+   nir_def *basis_x = nir_vec3(b, sx, one, sx);
+   nir_def *basis_y = nir_vec3(b, neg_one, sy, nir_fneg(b, sy));
+   nir_def *basis_z = nir_vec3(b, nir_fneg(b, sz), one, sz);
+   nir_def *basis =
+      nir_fcsel_ge(b, face_x, basis_x,
+                   nir_fcsel_ge(b, face_y, basis_y, basis_z));
+   nir_def *major = nir_fmax(b, ax, max_yz);
+   nir_def *offset = nir_fmul(b, major, nir_fsub(b, one, scale));
+   nir_def *lowered = nir_fadd(b, nir_fmul(b, xyz, scale),
+                              nir_fmul(b, basis, offset));
+
+   if (upper_factor) {
+      nir_def *upper = nir_channel(b, upper_factor, 0);
+
+      /* Keep linear filtering inside the logical face by clamping its minor
+       * coordinates to the last texel center. The major coordinate is
+       * unchanged. */
+      nir_def *edge =
+         nir_fmul(b, major,
+                  nir_fsub(b, one, nir_fmul_imm(b, upper, 2.0f)));
+      nir_def *oriented = nir_fmul(b, basis, lowered);
+      if (edge_delta) {
+         nir_def *min_oriented =
+            nir_fmin(b, nir_channel(b, oriented, 0),
+                     nir_fmin(b, nir_channel(b, oriented, 1),
+                              nir_channel(b, oriented, 2)));
+         *edge_delta = nir_fsub(b, min_oriented, edge);
+      }
+      oriented = nir_fmax(b, oriented, edge);
+      lowered = nir_fmul(b, basis, oriented);
+   }
+
+   return ntr_tex_coord_replace_xyz(b, coord, lowered);
+}
+
 static bool
 ntr_lower_backend_tex_instr(nir_builder *b, nir_tex_instr *tex, void *data)
 {
@@ -1707,31 +1779,68 @@ ntr_lower_backend_tex_instr(nir_builder *b, nir_tex_instr *tex, void *data)
    unsigned sampler = tex->sampler_index;
    assert(sampler < ARRAY_SIZE(state->fs_state->unit));
 
-   const rc_wrap_mode wrapmode = state->fs_state->unit[sampler].wrap_mode;
+   const rc_wrap_mode wrapmode[3] = {
+      state->fs_state->unit[sampler].wrap_mode_s,
+      state->fs_state->unit[sampler].wrap_mode_t,
+      state->fs_state->unit[sampler].wrap_mode_r,
+   };
    const bool clamp_scale =
       state->fs_state->unit[sampler].clamp_and_scale_before_fetch;
-   const bool is_rect = tex->sampler_dim == GLSL_SAMPLER_DIM_RECT;
+   const bool clamp_to_edge[] = {
+      state->fs_state->unit[sampler].clamp_to_edge_s,
+      state->fs_state->unit[sampler].clamp_to_edge_t,
+      state->fs_state->unit[sampler].clamp_to_edge_r,
+   };
+   const bool scale_cube =
+      state->fs_state->unit[sampler].scale_cube_coords_before_fetch;
+   const bool clamp_cube =
+      state->fs_state->unit[sampler].clamp_cube_coords_before_fetch;
+   const bool bias_cube_lod =
+      state->fs_state->unit[sampler].bias_cube_lod_at_edge;
+   const bool shader_rect = tex->sampler_dim == GLSL_SAMPLER_DIM_RECT;
+   const bool state_rect =
+      (state->fs_state->unnormalized_coords_mask & (1u << sampler)) &&
+      tex->sampler_dim == GLSL_SAMPLER_DIM_2D;
+   const bool is_rect = shader_rect || state_rect;
+   const bool correct_cube_lod =
+      bias_cube_lod && (tex->op == nir_texop_tex || tex->op == nir_texop_txb);
+
+   assert(!scale_cube || tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE);
+   assert(!clamp_cube || scale_cube);
+   assert(!bias_cube_lod || clamp_cube);
 
    b->cursor = nir_before_instr(&tex->instr);
    nir_def *coord = nir_get_tex_src(tex, nir_tex_src_coord);
+   bool emulate_wrap = false;
+   bool project_wrap = false;
+
+   for (unsigned i = 0;
+        i < MIN2(coord->num_components, ARRAY_SIZE(wrapmode)); i++) {
+      emulate_wrap |= wrapmode[i] != RC_WRAP_NONE;
+      project_wrap |= wrapmode[i] == RC_WRAP_REPEAT ||
+                      wrapmode[i] == RC_WRAP_MIRRORED_REPEAT;
+   }
 
    /* R300 cannot sample from rectangles, and the wrap fallback needs
     * normalized coordinates even on R500.
     */
-   if (is_rect && (!state->is_r500 || wrapmode != RC_WRAP_NONE)) {
+   if (is_rect && (!state->is_r500 || emulate_wrap)) {
       nir_def *factor =
          ntr_load_state_constant(state->c, b, RC_STATE_R300_TEXRECT_FACTOR,
                                  sampler, coord->num_components);
       coord = nir_fmul(b, coord, factor);
       tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
       progress = true;
+   } else if (state_rect) {
+      /* R500 supports unnormalized coordinates in the texture instruction. */
+      tex->sampler_dim = GLSL_SAMPLER_DIM_RECT;
+      progress = true;
    }
 
    /* When we emulate wrap or clamp/scale in ALU, projection has to happen
     * before that emulation.
     */
-   if (wrapmode == RC_WRAP_REPEAT || wrapmode == RC_WRAP_MIRRORED_REPEAT ||
-       clamp_scale) {
+   if (project_wrap || clamp_scale || scale_cube) {
       nir_def *projector = nir_steal_tex_src(tex, nir_tex_src_projector);
       if (projector) {
          coord = nir_fmul(b, coord, nir_frcp(b, projector));
@@ -1739,20 +1848,83 @@ ntr_lower_backend_tex_instr(nir_builder *b, nir_tex_instr *tex, void *data)
       }
    }
 
-   if (wrapmode != RC_WRAP_NONE) {
-      coord = ntr_lower_backend_tex_wrap(b, coord, wrapmode);
+   if (emulate_wrap) {
+      nir_def *components[4];
+
+      assert(coord->num_components <= ARRAY_SIZE(components));
+      for (unsigned i = 0; i < coord->num_components; i++) {
+         components[i] = nir_channel(b, coord, i);
+         if (i < ARRAY_SIZE(wrapmode) && wrapmode[i] != RC_WRAP_NONE)
+            components[i] =
+               ntr_lower_backend_tex_wrap(b, components[i], wrapmode[i]);
+      }
+      coord = nir_vec(b, components, coord->num_components);
       progress = true;
    }
 
    if (clamp_scale) {
+      unsigned coord_components = MIN2(coord->num_components, 3);
       nir_def *xyz =
-         nir_channels(b, coord, BITFIELD_MASK(MIN2(coord->num_components, 3)));
-      coord = ntr_tex_coord_replace_xyz(b, coord, nir_fsat(b, xyz));
+         nir_channels(b, coord, nir_component_mask(coord_components));
+      xyz = nir_fsat(b, xyz);
 
       nir_def *factor =
          ntr_load_state_constant(state->c, b, RC_STATE_R300_TEXSCALE_FACTOR,
-                                 sampler, coord->num_components);
-      coord = nir_fmul(b, coord, factor);
+                                 sampler, coord_components);
+      xyz = nir_fmul(b, xyz, factor);
+
+      if (clamp_to_edge[0] || clamp_to_edge[1] || clamp_to_edge[2]) {
+         nir_def *components[3];
+         nir_def *upper =
+            ntr_load_state_constant(state->c, b, RC_STATE_R300_TEXSCALE_UPPER,
+                                    sampler, coord_components);
+         nir_def *clamped = nir_fmin(b, xyz, upper);
+
+         /* The hardware clamps against the physical POT allocation. Linear
+          * filtering at the logical upper edge would therefore include the
+          * first padding texel. Stop at the last logical texel center for
+          * coordinates which use CLAMP_TO_EDGE. */
+         for (unsigned i = 0; i < coord_components; i++) {
+            components[i] = nir_channel(
+               b, clamp_to_edge[i] ? clamped : xyz, i);
+         }
+         xyz = nir_vec(b, components, coord_components);
+      }
+
+      coord = ntr_tex_coord_replace_xyz(b, coord, xyz);
+      progress = true;
+   }
+
+   if (scale_cube) {
+      nir_def *edge_delta = NULL;
+      nir_def *factor =
+         ntr_load_state_constant(state->c, b, RC_STATE_R300_TEXSCALE_FACTOR,
+                                 sampler, 1);
+      nir_def *upper =
+         clamp_cube ? ntr_load_state_constant(state->c, b,
+                                              RC_STATE_R300_TEXSCALE_UPPER,
+                                              sampler, 1)
+                    : NULL;
+      coord = ntr_lower_backend_tex_cube(
+         b, coord, factor, upper, correct_cube_lod ? &edge_delta : NULL);
+
+      if (correct_cube_lod) {
+         /* r300 applies a global +1/32 LOD correction. The piecewise cube
+          * transform can make helper pixels across the logical upper edge
+          * push a magnified edge pixel into minification. Cancel that one
+          * step only where the edge clamp activates. */
+         nir_def *bias = nir_fcsel_ge(b, edge_delta,
+                                      nir_imm_float(b, 0.0f),
+                                      nir_imm_float(b, -1.0f / 32.0f));
+         nir_def *original_bias =
+            nir_steal_tex_src(tex, nir_tex_src_bias);
+
+         if (original_bias)
+            bias = nir_fadd(b, original_bias, bias);
+         else
+            tex->op = nir_texop_txb;
+         nir_tex_instr_add_src(tex, nir_tex_src_bias, bias);
+      }
       progress = true;
    }
 

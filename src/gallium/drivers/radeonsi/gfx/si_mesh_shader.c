@@ -10,6 +10,8 @@
 #include "si_gfx.h"
 #include "util/u_upload_mgr.h"
 
+#include "ac_cmdbuf_cp.h"
+
 #define SI_MESH_PIPELINE_STATE_DIRTY_MASK \
    (BITFIELD_BIT(MESA_SHADER_TASK) | \
     BITFIELD_BIT(MESA_SHADER_MESH) | \
@@ -787,8 +789,8 @@ static void si_emit_task_wait_packets(struct si_context *sctx)
    si_cp_write_data(sctx, sctx->task_wait_buf, 0, 4, V_371_MEMORY, V_371_MICRO_ENGINE,
                     &sctx->task_wait_count);
 
-   si_cp_wait_mem(sctx, sctx->gfx_cs.gang_cs, sctx->task_wait_buf->gpu_address,
-                  sctx->task_wait_count, 0xffffffff, WAIT_REG_MEM_EQUAL);
+   ac_emit_cp_wait_mem(&sctx->gfx_cs.gang_cs->current, sctx->task_wait_buf->gpu_address,
+                       sctx->task_wait_count, 0xffffffff, WAIT_REG_MEM_EQUAL);
 
    sctx->last_task_wait_count = sctx->task_wait_count;
 }

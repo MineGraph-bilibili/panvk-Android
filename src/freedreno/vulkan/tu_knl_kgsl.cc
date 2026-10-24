@@ -79,7 +79,7 @@ static void kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo);
 
 static VkResult
 bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
-                enum tu_bo_alloc_flags flags)
+                uint64_t align, enum tu_bo_alloc_flags flags)
 {
    struct dma_heap_allocation_data alloc = {
       .len = size,
@@ -102,7 +102,7 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
     * alive after the BO is destroyed, so the memory is never reclaimed.
     */
    VkResult result =
-      tu_bo_init_dmabuf(dev, out_bo, -1, TU_BO_ALLOC_NO_FLAGS, alloc.fd);
+      tu_bo_init_dmabuf(dev, out_bo, -1, align, TU_BO_ALLOC_NO_FLAGS, alloc.fd);
    close(alloc.fd);
 
    return result;
@@ -110,7 +110,7 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
 
 static VkResult
 bo_init_new_ion(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
-                enum tu_bo_alloc_flags flags)
+                uint64_t align, enum tu_bo_alloc_flags flags)
 {
    struct ion_new_allocation_data alloc = {
       .len = size,
@@ -128,7 +128,7 @@ bo_init_new_ion(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
 
    /* See bo_init_new_dmaheap(): the fd is ours to close. */
    VkResult result =
-      tu_bo_init_dmabuf(dev, out_bo, -1, TU_BO_ALLOC_NO_FLAGS, alloc.fd);
+      tu_bo_init_dmabuf(dev, out_bo, -1, align, TU_BO_ALLOC_NO_FLAGS, alloc.fd);
    close(alloc.fd);
 
    return result;
@@ -136,7 +136,7 @@ bo_init_new_ion(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
 
 static VkResult
 bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
-                       enum tu_bo_alloc_flags flags)
+                       uint64_t align, enum tu_bo_alloc_flags flags)
 {
    struct ion_allocation_data alloc = {
       .len = size,
@@ -175,7 +175,7 @@ bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t si
 
    /* See bo_init_new_dmaheap(): the fd is ours to close. */
    VkResult result =
-      tu_bo_init_dmabuf(dev, out_bo, -1, TU_BO_ALLOC_NO_FLAGS, share.fd);
+      tu_bo_init_dmabuf(dev, out_bo, -1, align, TU_BO_ALLOC_NO_FLAGS, share.fd);
    close(share.fd);
 
    return result;
@@ -245,11 +245,31 @@ kgsl_sparse_vma_map(struct tu_device *dev,
    return VK_SUCCESS;
 }
 
+static uint32_t
+kgsl_align_flag(uint64_t align)
+{
+   if (align > os_page_size) {
+      /* kgsl treats the alignment as a hint and will round it down, but
+       * at least with current behavior, a 64K alignment and 1 MB alignment
+       * are respected.
+       */
+      if (align <= (1 << 16)) { /* 64K */
+         return 16 << KGSL_MEMALIGN_SHIFT;
+      } else {
+         assert(align <= (1 << 20)); /* 1 MB */
+         return 20 << KGSL_MEMALIGN_SHIFT;
+      }
+   }
+
+   return 0;
+}
+
 static VkResult
 kgsl_bo_init(struct tu_device *dev,
              struct vk_object_base *base,
              struct tu_bo **out_bo,
              uint64_t size,
+             uint64_t align,
              uint64_t client_iova,
              VkMemoryPropertyFlags mem_property,
              enum tu_bo_alloc_flags flags,
@@ -268,11 +288,11 @@ kgsl_bo_init(struct tu_device *dev,
 
       switch(dev->physical_device->kgsl_dma_type) {
       case TU_KGSL_DMA_TYPE_DMAHEAP:
-         return bo_init_new_dmaheap(dev, out_bo, size, flags);
+         return bo_init_new_dmaheap(dev, out_bo, size, align, flags);
       case TU_KGSL_DMA_TYPE_ION:
-         return bo_init_new_ion(dev, out_bo, size, flags);
+         return bo_init_new_ion(dev, out_bo, size, align, flags);
       case TU_KGSL_DMA_TYPE_ION_LEGACY:
-         return bo_init_new_ion_legacy(dev, out_bo, size, flags);
+         return bo_init_new_ion_legacy(dev, out_bo, size, align, flags);
       }
    }
 
@@ -295,6 +315,15 @@ kgsl_bo_init(struct tu_device *dev,
 
    if (flags & TU_BO_ALLOC_REPLAYABLE)
       req.flags |= KGSL_MEMFLAGS_USE_CPU_MAP;
+
+   req.flags |= kgsl_align_flag(align);
+
+   /* Forcing everything in the first 4GB is overkill, but we don't have many
+    * other options here since we don't control iova addresses and kgsl
+    * doesn't have a flag to avoid 32B rollover.
+    */
+   if (flags & TU_BO_ALLOC_NO_32B_ROLLOVER)
+      req.flags |= KGSL_MEMFLAGS_FORCE_32BIT;
 
    int ret;
 
@@ -346,6 +375,7 @@ static VkResult
 kgsl_bo_init_dmabuf(struct tu_device *dev,
                     struct tu_bo **out_bo,
                     uint64_t size,
+                    uint64_t align,
                     enum tu_bo_alloc_flags flags,
                     int fd)
 {
@@ -359,6 +389,8 @@ kgsl_bo_init_dmabuf(struct tu_device *dev,
       .type = KGSL_USER_MEM_TYPE_DMABUF,
    };
    int ret;
+
+   req.flags |= kgsl_align_flag(align);
 
    ret = safe_ioctl(dev->physical_device->local_fd,
                     IOCTL_KGSL_GPUOBJ_IMPORT, &req);
@@ -475,7 +507,7 @@ kgsl_sparse_vma_init(struct tu_device *dev,
                      struct tu_sparse_vma *out_vma,
                      uint64_t *out_iova,
                      enum tu_sparse_vma_flags flags,
-                     uint64_t size, uint64_t client_iova)
+                     uint64_t size, uint64_t align, uint64_t client_iova)
 {
    /* Note: we cannot use kgsl_gpumem_alloc_id because it only has a 32-bit
     * flags value. kgsl_gpuobj_alloc seems to be the only ioctl we can use.
@@ -491,6 +523,8 @@ kgsl_sparse_vma_init(struct tu_device *dev,
 
    if (!(flags & TU_SPARSE_VMA_MAP_ZERO))
       req.flags |= KGSL_MEMFLAGS_VBO_NO_MAP_ZERO;
+
+   req.flags |= kgsl_align_flag(align);
 
    int ret;
 
@@ -1796,10 +1830,8 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
    struct tu_physical_device *device = (struct tu_physical_device *)
       vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,
                 VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
-   if (!device) {
-      close(fd);
+   if (!device)
       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
-   }
 
    static const char dma_heap_path[] = "/dev/dma_heap/system";
    static const char ion_path[] = "/dev/ion";
@@ -1883,6 +1915,8 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
    device->has_set_iova = kgsl_is_memory_type_supported(
       fd, KGSL_MEMFLAGS_USE_CPU_MAP);
 
+   device->has_iova_align = true;
+
    /* Even if kernel is new enough, the GPU itself may not support it. */
    device->has_cached_coherent_memory = kgsl_is_memory_type_supported(
       fd, KGSL_MEMFLAGS_IOCOHERENT |
@@ -1931,8 +1965,8 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
       device->ubwc_config.macrotile_mode = FDL_MACROTILE_8_CHANNEL;
       break;
    default:
-      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
-                       "unknown UBWC version 0x%x", ubwc_version);
+      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "unknown UBWC version 0x%x", ubwc_version);
+      goto fail;
    }
 
    /* kgsl unfortunately hardcodes some settings for certain GPUs and doesn't
@@ -1958,7 +1992,6 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
 
 fail:
    vk_free(&instance->vk.alloc, device);
-   close(fd);
    if (dma_fd >= 0)
       close(dma_fd);
    return result;

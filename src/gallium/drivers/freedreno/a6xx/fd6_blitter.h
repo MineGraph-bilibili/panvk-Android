@@ -36,7 +36,7 @@ void fd6_clear_surface(struct fd_context *ctx, fd_cs &cs,
                        BITMASK_ENUM(fd_buffer_mask) buffers) assert_dt;
 template <chip CHIP>
 void fd6_resolve_tile(struct fd_batch *batch, fd_cs &cs, uint32_t base,
-                      struct pipe_surface *psurf,
+                      uint32_t uv_base, struct pipe_surface *psurf,
                       BITMASK_ENUM(fd_buffer_mask) buffers) assert_dt;
 
 #endif /* FD6_BLIT_H_ */

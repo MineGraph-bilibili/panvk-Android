@@ -22,6 +22,7 @@
  */
 
 #include "lvp_private.h"
+#include "lp_texture_handle.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_surface.h"
@@ -436,12 +437,12 @@ lvp_CreateImageView(VkDevice _device,
 
       if (image->planes[image_plane].bo->bind & PIPE_BIND_SHADER_IMAGE) {
          view->planes[view_plane].iv = lvp_create_imageview(view, plane_format, image_plane);
-         view->planes[view_plane].image_handle = (void *)(uintptr_t)device->queue.ctx->create_image_handle(device->queue.ctx, &view->planes[view_plane].iv);
+         view->planes[view_plane].image_handle = llvmpipe_create_image_handle(device->pscreen, &view->planes[view_plane].iv);
       }
 
       if (image->planes[image_plane].bo->bind & PIPE_BIND_SAMPLER_VIEW) {
          view->planes[view_plane].sv = lvp_create_samplerview(view, plane_format, image_plane);
-         view->planes[view_plane].texture_handle = (void *)(uintptr_t)device->queue.ctx->create_texture_handle(device->queue.ctx, &view->planes[view_plane].sv, NULL);
+         view->planes[view_plane].texture_handle = llvmpipe_create_texture_handle(device->pscreen, &view->planes[view_plane].sv, NULL);
       }
    }
 
@@ -465,10 +466,10 @@ lvp_DestroyImageView(VkDevice _device, VkImageView _iview,
    simple_mtx_lock(&device->queue.lock);
 
    for (uint8_t plane = 0; plane < iview->plane_count; plane++) {
-      device->queue.ctx->delete_image_handle(device->queue.ctx, (uint64_t)(uintptr_t)iview->planes[plane].image_handle);
+      llvmpipe_delete_image_handle(device->pscreen, iview->planes[plane].image_handle);
 
       pipe_resource_reference(&iview->planes[plane].sv.texture, NULL);
-      device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)iview->planes[plane].texture_handle);
+      llvmpipe_delete_texture_handle(device->pscreen, iview->planes[plane].texture_handle);
    }
    simple_mtx_unlock(&device->queue.lock);
 
@@ -728,12 +729,12 @@ lvp_CreateBufferView(VkDevice _device,
 
    if (buffer->bo->bind & PIPE_BIND_SAMPLER_VIEW) {
       view->sv = lvp_create_samplerview_buffer(view);
-      view->texture_handle = (void *)(uintptr_t)device->queue.ctx->create_texture_handle(device->queue.ctx, &view->sv, NULL);
+      view->texture_handle = llvmpipe_create_texture_handle(device->pscreen, &view->sv, NULL);
    }
 
    if (buffer->bo->bind & PIPE_BIND_SHADER_IMAGE) {
       view->iv = lvp_create_imageview_buffer(view);
-      view->image_handle = (void *)(uintptr_t)device->queue.ctx->create_image_handle(device->queue.ctx, &view->iv);
+      view->image_handle = llvmpipe_create_image_handle(device->pscreen, &view->iv);
    }
 
    simple_mtx_unlock(&device->queue.lock);
@@ -756,9 +757,9 @@ lvp_DestroyBufferView(VkDevice _device, VkBufferView bufferView,
    simple_mtx_lock(&device->queue.lock);
 
    pipe_resource_reference(&view->sv.texture, NULL);
-   device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)view->texture_handle);
+   llvmpipe_delete_texture_handle(device->pscreen, view->texture_handle);
 
-   device->queue.ctx->delete_image_handle(device->queue.ctx, (uint64_t)(uintptr_t)view->image_handle);
+   llvmpipe_delete_image_handle(device->pscreen, view->image_handle);
 
    simple_mtx_unlock(&device->queue.lock);
 

@@ -115,6 +115,7 @@ etna_blend_state_create(struct pipe_context *pctx,
 bool
 etna_update_blend(struct etna_context *ctx)
 {
+   const bool widen_32bpc_colormask = !VIV_FEATURE(ctx->screen, ETNA_FEATURE_PE_32BPC_COLORMASK_FIX);
    struct pipe_framebuffer_state *pfb = &ctx->framebuffer_s.base;
    struct pipe_blend_state *pblend = ctx->blend;
    struct etna_blend_state *blend = etna_blend_state(pblend);
@@ -161,6 +162,15 @@ etna_update_blend(struct etna_context *ctx)
 
          colormask = (user->colormask >> 2) & 0x3;
          full_overwrite = blend->rt[src].fo_allowed && colormask == 0x3;
+      }
+
+      if (widen_32bpc_colormask) {
+         const bool is_128bit_plane = src >= 0 ||
+                                      (ctx->framebuffer_s.rt_is_128bit & (1u << i));
+         const bool is_32bpc = desc->channel[0].size == 32 && desc->nr_channels <= 2;
+
+         if (is_128bit_plane || is_32bpc)
+            colormask = (colormask & 1 ? 0x3 : 0) | (colormask & 2 ? 0xc : 0);
       }
 
       if (current_rt == 0) {

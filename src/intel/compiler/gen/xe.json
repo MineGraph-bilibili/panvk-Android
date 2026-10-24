@@ -375,5 +375,20 @@
                                            23,  21,
                                            20,  18 ]
         }
+    },
+    "Xe3P_64bit": {
+        "import": "Xe3P",
+        "fields": {
+            "SENDG_DST_REG_FILE":           [  33,  33 ],
+            "SENDG_SRC0_LEN":               [  71,  67 ],
+            "SENDG_INDMSGDESC0_ISPRESENT":  [  34,  34 ],
+            "SENDG_INDMSGDESC1_ISPRESENT":  [  35,  35 ],
+            "SENDG_INDMSGDESC0_ADDR":       [  45,  43 ],
+            "SENDG_INDMSGDESC1_ADDR":       [  40,  38 ],
+            "SEND_EOT":                     [  32,  32 ],
+
+            "SEND_DESC_IS_REG":             null,
+            "SEND_EX_DESC_IS_REG":          null
+        }
     }
 }

@@ -45,20 +45,4 @@ panfrost_create_kms_dumb_buffer_for_resource(struct pipe_resource *rsc,
                                              struct renderonly *ro,
                                              struct winsys_handle *out_handle);
 
-#ifdef HAVE_PAN_KMOD_KBASE
-/**
- * panfrost_kbase_screen_create - create a Panfrost screen via the Mali kbase
- *   driver (/dev/mali*) without a DRM fd.
- *
- * @path: device node path, e.g. "/dev/mali0"
- * @config: Gallium screen configuration (may be NULL)
- *
- * This is the entry point for headless / surfaceless rendering on platforms
- * where only the ARM Mali kbase kernel driver is available (no panfrost.ko).
- */
-struct pipe_screen *
-panfrost_kbase_screen_create(const char *path,
-                             const struct pipe_screen_config *config);
-#endif /* HAVE_PAN_KMOD_KBASE */
-
 #endif /* __PAN_DRM_PUBLIC_H__ */

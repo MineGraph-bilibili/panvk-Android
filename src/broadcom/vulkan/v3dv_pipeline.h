@@ -339,9 +339,6 @@ struct v3dv_pipeline {
    VkShaderStageFlags active_stages;
    VkPipelineCreateFlagBits2KHR flags;
 
-   struct v3dv_render_pass *pass;
-   struct v3dv_subpass *subpass;
-
    struct v3dv_pipeline_stage *stages[BROADCOM_SHADER_STAGES];
 
    /* For VK_KHR_dynamic_rendering */

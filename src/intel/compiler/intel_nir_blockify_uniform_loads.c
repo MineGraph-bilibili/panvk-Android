@@ -121,7 +121,7 @@ rebase_const_offset_ubo_loads_intr(nir_builder *b,
  * simple hack using existing passes does a fairly good job for now.
  */
 bool
-brw_nir_rebase_const_offset_ubo_loads(nir_shader *shader)
+intel_nir_rebase_const_offset_ubo_loads(nir_shader *shader)
 {
    return nir_shader_intrinsics_pass(shader,
                                      rebase_const_offset_ubo_loads_intr,

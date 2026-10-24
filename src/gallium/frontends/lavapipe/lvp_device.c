@@ -22,6 +22,7 @@
  */
 
 #include "lvp_private.h"
+#include "lp_texture_handle.h"
 #include "lvp_conv.h"
 #include "lvp_acceleration_structure.h"
 
@@ -54,7 +55,7 @@
 #include <sys/sysinfo.h>
 #endif
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include "vk_android.h"
 #endif
 
@@ -233,6 +234,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_calibrated_timestamps             = true,
    .EXT_color_write_enable                = true,
    .EXT_conditional_rendering             = true,
+   .EXT_cooperative_matrix_maintenance1   = true,
    .EXT_debug_marker                      = true,
    .EXT_depth_bias_control                = true,
    .EXT_depth_clip_enable                 = true,
@@ -319,7 +321,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_robustness2                       = true,
    .EXT_zero_initialize_device_memory     = true,
    .AMDX_shader_enqueue                   = true,
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    .ANDROID_native_buffer                 = true,
 #endif
    .GOOGLE_decorate_string                = true,
@@ -909,10 +911,16 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       .cooperativeMatrix = has_cooperative_matrix(),
       .cooperativeMatrixRobustBufferAccess = has_cooperative_matrix(),
 
-      .cooperativeMatrixFlexibleDimensions = true,
-      .cooperativeMatrixConversions = true,
+      .cooperativeMatrixProperties2 = true,
       .cooperativeMatrixReductions = true,
+      .cooperativeMatrixConversions = true,
       .cooperativeMatrixPerElementOperations = true,
+      .cooperativeMatrixGetCoordinate = true,
+
+      .cooperativeMatrixFlexibleDimensions = true,
+      .cooperativeMatrixConversionsNV = true,
+      .cooperativeMatrixReductionsNV = true,
+      .cooperativeMatrixPerElementOperationsNV = true,
       .cooperativeMatrixTensorAddressing = true,
       .cooperativeMatrixBlockLoads = true,
 
@@ -945,6 +953,8 @@ static VkImageLayout lvp_host_copy_image_layouts[] = {
    VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR,
    VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
    VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR,
+   VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ,
+   VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
 };
 
 static void
@@ -1150,8 +1160,8 @@ lvp_get_properties(const struct lvp_physical_device *device, struct vk_propertie
 
       .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
-      .independentResolveNone = false,
-      .independentResolve = false,
+      .independentResolveNone = true,
+      .independentResolve = true,
 
       .filterMinmaxImageComponentMapping = true,
       .filterMinmaxSingleComponentFormats = true,
@@ -2034,9 +2044,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
       .seamless_cube_map = 1,
       .max_lod = 0.25,
    };
-   device->null_texture_handle = (void *)(uintptr_t)device->queue.ctx->create_texture_handle(device->queue.ctx,
+   device->null_texture_handle = llvmpipe_create_texture_handle(device->pscreen,
       &(struct pipe_sampler_view){ 0 }, &null_sampler);
-   device->null_image_handle = (void *)(uintptr_t)device->queue.ctx->create_image_handle(device->queue.ctx,
+   device->null_image_handle = llvmpipe_create_image_handle(device->pscreen,
       &(struct pipe_image_view){ 0 });
 
    device->bda_texture_handles = UTIL_DYNARRAY_INIT;
@@ -2064,22 +2074,20 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyDevice(
 {
    VK_FROM_HANDLE(lvp_device, device, _device);
 
-   lvp_device_finish_accel_struct_state(device);
-
    vk_meta_device_finish(&device->vk, &device->meta);
 
    util_dynarray_foreach(&device->bda_texture_handles, struct lp_texture_handle *, handle)
-      device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)*handle);
+      llvmpipe_delete_texture_handle(device->pscreen, *handle);
 
    util_dynarray_fini(&device->bda_texture_handles);
 
    util_dynarray_foreach(&device->bda_image_handles, struct lp_texture_handle *, handle)
-      device->queue.ctx->delete_image_handle(device->queue.ctx, (uint64_t)(uintptr_t)*handle);
+      llvmpipe_delete_image_handle(device->pscreen, *handle);
 
    util_dynarray_fini(&device->bda_image_handles);
 
-   device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)device->null_texture_handle);
-   device->queue.ctx->delete_image_handle(device->queue.ctx, (uint64_t)(uintptr_t)device->null_image_handle);
+   llvmpipe_delete_texture_handle(device->pscreen, device->null_texture_handle);
+   llvmpipe_delete_image_handle(device->pscreen, device->null_image_handle);
 
    device->queue.ctx->delete_fs_state(device->queue.ctx, device->noop_fs);
 
@@ -2175,8 +2183,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
    int priority = 0;
 
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
-      switch ((unsigned)ext->sType) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
+      switch ((unsigned)sType) {
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
          import_info = (VkImportMemoryFdInfoKHR*)ext;
          assert_memhandle_type(import_info->handleType);
@@ -2187,7 +2195,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
          break;
       }
       case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:
-         mem_flags = (void*)ext;
+         mem_flags = ext;
          break;
       default:
          break;
@@ -2217,7 +2225,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
       mem->map = mem->vk.host_ptr;
       mem->memory_type = LVP_DEVICE_MEMORY_TYPE_USER_PTR;
    }
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    else if (mem->vk.ahardware_buffer) {
       error = lvp_import_ahb_memory(device, pAllocateInfo, mem);
       if (error != VK_SUCCESS)
@@ -2455,8 +2463,8 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetBufferMemoryRequirements2(
 {
    lvp_GetBufferMemoryRequirements(device, pInfo->buffer,
                                    &pMemoryRequirements->memoryRequirements);
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -2492,8 +2500,8 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetImageMemoryRequirements2(
    lvp_GetImageMemoryRequirements(device, pInfo->image,
                                   &pMemoryRequirements->memoryRequirements);
 
-   vk_foreach_struct(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
             (VkMemoryDedicatedRequirements *) ext;
@@ -2569,7 +2577,7 @@ lvp_image_bind(struct lvp_device *device,
    VkResult result;
 
    if (!mem) {
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       return lvp_bind_anb_memory(device, bind_info);
 #else
       const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
@@ -2759,9 +2767,9 @@ lvp_sampler_init(struct lvp_device *device, struct lp_sampler_descriptor *desc, 
    memcpy(&state.border_color, &vk_state->border_color_value, sizeof(vk_state->border_color_value));
 
    simple_mtx_lock(&device->queue.lock);
-   struct lp_texture_handle *texture_handle = (void *)(uintptr_t)device->queue.ctx->create_texture_handle(device->queue.ctx, NULL, &state);
+   struct lp_texture_handle *texture_handle = llvmpipe_create_texture_handle(device->pscreen, NULL, &state);
    desc->sampler_index = texture_handle->sampler_index;
-   device->queue.ctx->delete_texture_handle(device->queue.ctx, (uint64_t)(uintptr_t)texture_handle);
+   llvmpipe_delete_texture_handle(device->pscreen, texture_handle);
    simple_mtx_unlock(&device->queue.lock);
 
    lp_jit_sampler_from_pipe(&desc->jit, &state);
@@ -3030,6 +3038,26 @@ fill_matrix_prop_khr(struct __vk_outarray *base, struct matrix_prop *prop)
 }
 
 static void
+fill_matrix_prop_ext(struct __vk_outarray *base, struct matrix_prop *prop)
+{
+   vk_outarray(VkCooperativeMatrixProperties2EXT) *out = (void *)base;
+
+   vk_outarray_append_typed(VkCooperativeMatrixProperties2EXT, out, p)
+   {
+      *p = (struct VkCooperativeMatrixProperties2EXT){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_2_EXT,
+         .MGranularity = 8,
+         .NGranularity = 8,
+         .KGranularity = 8,
+         .AType = prop->a_type,
+         .BType = prop->b_type,
+         .CType = prop->c_type,
+         .ResultType = prop->r_type
+      };
+   }
+}
+
+static void
 fill_flexible_matrix_prop_nv(struct __vk_outarray *base, struct matrix_prop *prop)
 {
    vk_outarray(VkCooperativeMatrixFlexibleDimensionsPropertiesNV) *out = (void *)base;
@@ -3093,5 +3121,19 @@ lvp_GetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV(
 {
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixFlexibleDimensionsPropertiesNV, out, pProperties, pPropertyCount);
    fill_array_sizes_structs(&out.base, fill_flexible_matrix_prop_nv);
+   return vk_outarray_status(&out);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+lvp_GetPhysicalDeviceCooperativeMatrixProperties2EXT(VkPhysicalDevice physicalDevice,
+                                                     const VkPhysicalDeviceCooperativeMatrixInfo2EXT *info,
+                                                     uint32_t *pPropertyCount,
+                                                     VkCooperativeMatrixProperties2EXT *pProperties)
+{
+   VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixProperties2EXT, out, pProperties, pPropertyCount);
+
+   if (info->scope == VK_SCOPE_SUBGROUP_KHR &&
+       !(info->flags & VK_COOPERATIVE_MATRIX_SATURATING_ACCUMULATION_BIT_EXT))
+      fill_array_sizes_structs(&out.base, fill_matrix_prop_ext);
    return vk_outarray_status(&out);
 }

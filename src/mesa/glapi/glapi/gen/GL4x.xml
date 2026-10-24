@@ -65,6 +65,76 @@
   <function name="MemoryBarrierByRegion" es2="3.1" no_error="true">
     <param name="barriers" type="GLbitfield"/>
   </function>
+
+  <!-- These functions alias ones from GL_ARB_robustness.  The remaining
+       promoted entry points are defined in KHR_robustness.xml. -->
+
+  <function name="GetnMapdv" alias="GetnMapdvARB">
+    <param name="target" type="GLenum"/>
+    <param name="query" type="GLenum"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="v" type="GLdouble *" output="true"/>
+  </function>
+
+  <function name="GetnMapfv" alias="GetnMapfvARB">
+    <param name="target" type="GLenum"/>
+    <param name="query" type="GLenum"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="v" type="GLfloat *" output="true"/>
+  </function>
+
+  <function name="GetnMapiv" alias="GetnMapivARB">
+    <param name="target" type="GLenum"/>
+    <param name="query" type="GLenum"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="v" type="GLint *" output="true"/>
+  </function>
+
+  <function name="GetnPixelMapfv" alias="GetnPixelMapfvARB">
+    <param name="map" type="GLenum"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="values" type="GLfloat *" output="true"/>
+  </function>
+
+  <function name="GetnPixelMapuiv" alias="GetnPixelMapuivARB">
+    <param name="map" type="GLenum"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="values" type="GLuint *" output="true"/>
+  </function>
+
+  <function name="GetnPixelMapusv" alias="GetnPixelMapusvARB">
+    <param name="map" type="GLenum"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="values" type="GLushort *" output="true"/>
+  </function>
+
+  <function name="GetnPolygonStipple" alias="GetnPolygonStippleARB">
+    <param name="bufSize" type="GLsizei"/>
+    <param name="pattern" type="GLubyte *" output="true"/>
+  </function>
+
+  <function name="GetnTexImage" alias="GetnTexImageARB">
+    <param name="target" type="GLenum"/>
+    <param name="level" type="GLint"/>
+    <param name="format" type="GLenum"/>
+    <param name="type" type="GLenum"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="img" type="GLvoid *" output="true"/>
+  </function>
+
+  <function name="GetnCompressedTexImage" alias="GetnCompressedTexImageARB">
+    <param name="target" type="GLenum"/>
+    <param name="lod" type="GLint"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="img" type="GLvoid *" output="true"/>
+  </function>
+
+  <function name="GetnUniformdv" alias="GetnUniformdvARB">
+    <param name="program" type="GLuint"/>
+    <param name="location" type="GLint"/>
+    <param name="bufSize" type="GLsizei"/>
+    <param name="params" type="GLdouble *" output="true"/>
+  </function>
 </category>
 
 <category name="4.6">

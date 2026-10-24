@@ -59,7 +59,10 @@ wsi_metal_surface_get_capabilities(VkIcdSurfaceBase *surface,
    if (!caps->surfaceCapabilities.currentExtent.width && !caps->surfaceCapabilities.currentExtent.height)
       caps->surfaceCapabilities.currentExtent.width = caps->surfaceCapabilities.currentExtent.height = UINT32_MAX;
 
-   caps->surfaceCapabilities.minImageCount = 2;
+   /* Force recommended 3 drawables, otherwise the OS frame pacing may slow
+    * down presentation.
+    */
+   caps->surfaceCapabilities.minImageCount = 3;
    caps->surfaceCapabilities.maxImageCount = 3;
 
    caps->surfaceCapabilities.minImageExtent = (VkExtent2D) { 1, 1 };
@@ -81,10 +84,6 @@ wsi_metal_surface_get_capabilities(VkIcdSurfaceBase *surface,
    VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
    if (pdevice->supported_extensions.EXT_attachment_feedback_loop_layout)
       image_usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
-
-   VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = vk_find_struct(caps, SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT);
-   if (surface_caps && pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
-      surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
 
    VkImageUsageFlags2CreateInfoKHR *usage2 =
       vk_find_struct(caps->pNext, IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR);
@@ -122,18 +121,17 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
       wsi_metal_surface_get_capabilities(surface, wsi_device,
                                       caps);
 
-   vk_foreach_struct(ext, caps->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, caps->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
-         VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
+         VkSurfaceProtectedCapabilitiesKHR *protected = ext;
          protected->supportsProtected = VK_FALSE;
          break;
       }
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR: {
          /* TODO: support scaling */
-         VkSurfacePresentScalingCapabilitiesKHR *scaling =
-            (VkSurfacePresentScalingCapabilitiesKHR *)ext;
+         VkSurfacePresentScalingCapabilitiesKHR *scaling = ext;
          scaling->supportedPresentScaling = 0;
          scaling->supportedPresentGravityX = 0;
          scaling->supportedPresentGravityY = 0;
@@ -144,8 +142,7 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
 
       case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR: {
          /* Unsupported, just report the input present mode. */
-         VkSurfacePresentModeCompatibilityKHR *compat =
-            (VkSurfacePresentModeCompatibilityKHR *)ext;
+         VkSurfacePresentModeCompatibilityKHR *compat = ext;
          if (compat->pPresentModes) {
             if (compat->presentModeCount) {
                assert(present_mode);
@@ -163,7 +160,7 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
       }
 
       case VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT: {
-         VkPresentTimingSurfaceCapabilitiesEXT *wait = (void *)ext;
+         VkPresentTimingSurfaceCapabilitiesEXT *wait = ext;
 
          wait->presentStageQueries = 0;
          wait->presentTimingSupported = VK_FALSE;
@@ -171,6 +168,28 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
          wait->presentAtRelativeTimeSupported = VK_FALSE;
          break;
       }
+
+      case VK_STRUCTURE_TYPE_SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT: {
+         VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = ext;
+         VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
+
+         if (pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_bind_memory2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_id2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_wait2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_swapchain_mutable_format)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
+         if (pdevice->supported_extensions.EXT_present_timing)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_swapchain_maintenance1 ||
+             pdevice->supported_extensions.EXT_swapchain_maintenance1)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_DEFERRED_MEMORY_ALLOCATION_BIT_EXT;
+      }
+      break;
 
       default:
          /* Ignored */
@@ -343,6 +362,10 @@ struct wsi_metal_swapchain {
    struct wsi_metal_present_info *present_info;
 
    uint32_t current_image_index;
+
+   /* VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR */
+   bool opaque_composition;
+
    struct wsi_metal_image images[0];
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_metal_swapchain, base.base, VkSwapchainKHR,
@@ -420,6 +443,8 @@ wsi_cmd_blit_image_to_image(const struct wsi_swapchain *chain,
    assert(!chain->wsi->sw);
    
    const struct wsi_device *wsi = chain->wsi;
+   const struct wsi_metal_swapchain *metal_chain =
+      container_of(chain, struct wsi_metal_swapchain, base);
    struct wsi_metal_image *metal_image = container_of(image, struct wsi_metal_image, base);
    VkResult result;
    int queue_count = chain->blit.queue != NULL ? 1 : wsi->queue_family_count;
@@ -501,30 +526,42 @@ wsi_cmd_blit_image_to_image(const struct wsi_swapchain *chain,
                               0, NULL,
                               img_mem_barrier_count, img_mem_barriers);
 
-      struct VkImageCopy image_copy = {
-         .srcSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .mipLevel = 0,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-         },
-         .srcOffset = { .x = 0, .y = 0, .z = 0 },
-         .dstSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .mipLevel = 0,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-         },
-         .dstOffset = { .x = 0, .y = 0, .z = 0 },
-         .extent = info->create.extent,
+      const VkImageSubresourceLayers subresource = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .mipLevel = 0,
+         .baseArrayLayer = 0,
+         .layerCount = 1,
       };
 
-      wsi->CmdCopyImage(image->blit.cmd_buffers[i],
-                        image->image,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                        image->blit.image,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        1, &image_copy);
+      const VkOffset3D extent = {
+         .x = info->create.extent.width,
+         .y = info->create.extent.height,
+         .z = 1,
+      };
+      const VkImageBlit2 image_blit = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+         .srcSubresource = subresource,
+         .srcOffsets = { { .x = 0, .y = 0, .z = 0 }, extent },
+         .dstSubresource = subresource,
+         .dstOffsets = { { .x = 0, .y = 0, .z = 0 }, extent },
+      };
+      const VkBlitImageInfo2 blit_info = {
+         .sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+         .srcImage = image->image,
+         .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         .dstImage = image->blit.image,
+         .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         .regionCount = 1,
+         .pRegions = &image_blit,
+         .filter = VK_FILTER_NEAREST,
+      };
+
+      /* The reason we perform a blit instead of a copy is because we dropped
+       * the alpha when setting up the Metal layer so we need to work around
+       * that. This is due to a Metal bug.
+       */
+      wsi->metal.cmd_blit_image(image->blit.cmd_buffers[i], &blit_info,
+                                metal_chain->opaque_composition);
 
       img_mem_barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
       img_mem_barriers[0].dstAccessMask = 0;
@@ -789,8 +826,11 @@ wsi_metal_create_image(const struct wsi_metal_swapchain *metal_chain,
    if (wsi->sw || result != VK_SUCCESS)
       return result;
 
-   /* Create VkImages to handle binding at acquisition. */
-   result = wsi->CreateImage(chain->device, &chain->image_info.create,
+   /* We perform blit through rendering */
+   VkImageCreateInfo blit_create = chain->image_info.create;
+   blit_create.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+   result = wsi->CreateImage(chain->device, &blit_create,
                              &chain->alloc, &image->blit.image);
    if (result != VK_SUCCESS)
       wsi_metal_destroy_image(metal_chain, metal_image);
@@ -853,10 +893,19 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    const bool immediate_mode =
       pCreateInfo->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR;
 
+   /* Non-software implementations need to work around a Metal bug
+    * when presenting through Metal4. This is accomplished through
+    * setting the layer's opaque value to false. And since we will
+    * be blitting to the drawable, which means rendering, we can
+    * set the framebuffer only usage.
+    */
+   const bool layer_opaque = opaque_composition && wsi_device->sw;
+   const bool framebuffer_only = !wsi_device->sw;
+
    VkResult result = wsi_metal_layer_configure(metal_surface->pLayer,
       pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height,
       num_images, pCreateInfo->imageFormat, pCreateInfo->imageColorSpace,
-      opaque_composition, immediate_mode);
+      layer_opaque, immediate_mode, framebuffer_only);
    if (result != VK_SUCCESS)
       return result;
 
@@ -900,6 +949,7 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->vk_format = pCreateInfo->imageFormat;
    chain->surface = metal_surface;
    chain->current_image_index = 0;
+   chain->opaque_composition = opaque_composition;
 
    chain->present_info = wsi_metal_create_present_info();
    if (chain->present_info == NULL) {
@@ -1045,7 +1095,7 @@ wsi_metal_create_mem(const struct wsi_swapchain *chain,
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .pNext = &image_mem_dedicated_info,
       .allocationSize = requirements.size,
-      .memoryTypeIndex = requirements.memoryTypeBits,
+      .memoryTypeIndex = wsi_select_device_memory_type(wsi, requirements.memoryTypeBits),
    };
 
    return wsi->AllocateMemory(chain->device, &image_mem_info,

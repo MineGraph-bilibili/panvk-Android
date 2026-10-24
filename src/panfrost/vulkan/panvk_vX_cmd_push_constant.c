@@ -30,6 +30,9 @@ prepare_push_uniforms(struct panvk_cmd_buffer *cmdbuf,
 
    struct panvk_common_sysvals_inner common_inner = {
       .printf_buffer_address = dev->printf.bo->addr.dev,
+#if PAN_ARCH < 9
+      .constant_data = panvk_priv_mem_dev_addr(shader->data_mem),
+#endif
    };
    uint64_t *common = (uint64_t *)&common_inner;
 
@@ -99,16 +102,11 @@ panvk_per_arch(CmdPushConstants2KHR)(
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
 
-   if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_VERTEX_BIT)
+   if (pPushConstantsInfo->stageFlags &
+       (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+        VK_SHADER_STAGE_GEOMETRY_BIT))
       gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
-
-   if (pPushConstantsInfo->stageFlags &
-       VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
-      gfx_state_set_dirty(cmdbuf, TCS_PUSH_UNIFORMS);
-
-   if (pPushConstantsInfo->stageFlags &
-       VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
-      gfx_state_set_dirty(cmdbuf, TES_PUSH_UNIFORMS);
 
    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_FRAGMENT_BIT)
       gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);

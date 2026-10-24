@@ -861,7 +861,8 @@ void evergreen_apply_scissor_bug_workaround(struct r600_common_context *rctx,
 void cayman_apply_scissor_workaround_1x1(struct r600_common_context *rctx,
 					 struct radeon_cmdbuf *cs);
 void r600_update_vs_writes_viewport_index(struct r600_common_context *rctx,
-					  struct tgsi_shader_info *info);
+					  bool vs_window_space,
+					  bool writes_viewport_index);
 void r600_init_viewport_functions(struct r600_common_context *rctx);
 
 /* cayman_msaa.c */

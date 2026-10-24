@@ -21,6 +21,7 @@ EPHEMERAL=(
     "clang-${LLVM_VERSION}"
     cmake
     dpkg-dev
+    freeglut3-dev
     g++
     glslang-tools
     libasound2-dev
@@ -30,6 +31,7 @@ EPHEMERAL=(
     libfontconfig-dev
     libgl-dev
     libgles2-mesa-dev
+    libglew-dev
     libglu1-mesa-dev
     libglx-dev
     libpciaccess-dev
@@ -45,6 +47,7 @@ EPHEMERAL=(
     "llvm-${LLVM_VERSION}-dev"
     "lld-${LLVM_VERSION}"
     make
+    mesa-common-dev
     meson
     ocl-icd-opencl-dev
     patch
@@ -56,6 +59,8 @@ EPHEMERAL=(
 
 DEPS=(
     libfontconfig1
+    libglew2.2
+    libglut3.12
     libglu1-mesa
     libvulkan-dev
 )

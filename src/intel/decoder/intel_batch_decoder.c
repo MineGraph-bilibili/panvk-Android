@@ -176,7 +176,7 @@ update_count(struct intel_batch_decode_ctx *ctx,
 
 static inline void
 ctx_disassemble_program(struct intel_batch_decode_ctx *ctx,
-                        uint32_t ksp,
+                        uint64_t ksp,
                         const char *short_name,
                         const char *name)
 {
@@ -347,7 +347,8 @@ dump_binding_table(struct intel_batch_decode_ctx *ctx,
       uint32_t size = strct->dw_length * 4;
 
       if (pointers[i] % 32 != 0 ||
-          addr < bo.addr || addr + size > bo.addr + bo.size) {
+          addr < bo.addr || addr + size > bo.addr + bo.size ||
+          bo.map == NULL) {
          fprintf(ctx->fp, "pointer %u: 0x%08x <not valid>\n", i, pointers[i]);
          continue;
       }
@@ -1004,7 +1005,7 @@ str_ends_with(const char *str, const char *end)
 
 static void
 decode_dynamic_state(struct intel_batch_decode_ctx *ctx,
-                       const char *struct_type, uint32_t state_offset,
+                       const char *struct_type, uint64_t state_offset,
                        int count)
 {
    uint64_t state_addr = ctx->dynamic_base + state_offset;
@@ -1051,7 +1052,7 @@ decode_dynamic_state_pointers(struct intel_batch_decode_ctx *ctx,
 {
    struct intel_group *inst = intel_ctx_find_instruction(ctx, p);
 
-   uint32_t state_offset = 0;
+   uint64_t state_offset = 0;
 
    struct intel_field_iterator iter;
    intel_field_iterator_init(&iter, inst, p, 0, false);
@@ -1069,7 +1070,7 @@ decode_3dstate_viewport_state_pointers(struct intel_batch_decode_ctx *ctx,
                                        const uint32_t *p)
 {
    struct intel_group *inst = intel_ctx_find_instruction(ctx, p);
-   uint32_t state_offset = 0;
+   uint64_t state_offset = 0;
    bool clip = false, sf = false, cc = false;
    struct intel_field_iterator iter;
    intel_field_iterator_init(&iter, inst, p, 0, false);
@@ -1127,7 +1128,7 @@ decode_3dstate_cc_state_pointers(struct intel_batch_decode_ctx *ctx,
 
    struct intel_group *inst = intel_ctx_find_instruction(ctx, p);
 
-   uint32_t state_offset = 0;
+   uint64_t state_offset = 0;
    bool blend_change = false, ds_change = false, cc_change = false;
    struct intel_field_iterator iter;
    intel_field_iterator_init(&iter, inst, p, 0, false);
@@ -1494,7 +1495,9 @@ struct custom_decoder state_handlers[] = {
 /* Special printing of instructions */
 struct custom_decoder custom_decoders[] = {
    { "COMPUTE_WALKER", handle_compute_walker },
+   { "COMPUTE_WALKER_2", handle_compute_walker },
    { "EXECUTE_INDIRECT_DISPATCH", handle_compute_walker },
+   { "EXECUTE_INDIRECT_DISPATCH_2", handle_compute_walker },
    { "MEDIA_CURBE_LOAD", handle_media_curbe_load },
    { "3DSTATE_VERTEX_BUFFERS", handle_3dstate_vertex_buffers },
    { "3DSTATE_INDEX_BUFFER", handle_3dstate_index_buffer },
@@ -1529,11 +1532,16 @@ struct custom_decoder custom_decoders[] = {
 
    { "3DSTATE_VIEWPORT_STATE_POINTERS", decode_3dstate_viewport_state_pointers },
    { "3DSTATE_VIEWPORT_STATE_POINTERS_CC", decode_3dstate_viewport_state_pointers_cc },
+   { "3DSTATE_VIEWPORT_STATE_POINTERS_CC_2", decode_3dstate_viewport_state_pointers_cc },
    { "3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP", decode_3dstate_viewport_state_pointers_sf_clip },
+   { "3DSTATE_VIEWPORT_STATE_POINTERS_SF_CLIP_2", decode_3dstate_viewport_state_pointers_sf_clip },
    { "3DSTATE_BLEND_STATE_POINTERS", decode_3dstate_blend_state_pointers },
+   { "3DSTATE_BLEND_STATE_POINTERS_2", decode_3dstate_blend_state_pointers },
    { "3DSTATE_CC_STATE_POINTERS", decode_3dstate_cc_state_pointers },
+   { "3DSTATE_CC_STATE_POINTERS_2", decode_3dstate_cc_state_pointers },
    { "3DSTATE_DEPTH_STENCIL_STATE_POINTERS", decode_3dstate_ds_state_pointers },
    { "3DSTATE_SCISSOR_STATE_POINTERS", decode_3dstate_scissor_state_pointers },
+   { "3DSTATE_SCISSOR_STATE_POINTERS_2", decode_3dstate_scissor_state_pointers },
    { "3DSTATE_SLICE_TABLE_STATE_POINTERS", decode_3dstate_slice_table_state_pointers },
    { "MI_LOAD_REGISTER_IMM", decode_load_register_imm },
    { "MI_STORE_DATA_IMM", decode_store_data_imm },

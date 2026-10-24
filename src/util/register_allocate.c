@@ -965,7 +965,8 @@ ra_select(struct ra_graph *g)
             return false;
          }
 
-         r = g->select_reg_callback(n, select_regs, g->select_reg_callback_data);
+         r = g->select_reg_callback(n, select_regs, g->select_reg_callback_data,
+                                    g->tmp.stack_count - 1 >= g->tmp.stack_optimistic_start);
          assert(r < g->regs->count);
       } else {
          /* Find the lowest-numbered reg which is not used by a member

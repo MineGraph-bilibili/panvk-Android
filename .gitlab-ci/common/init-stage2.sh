@@ -165,6 +165,7 @@ fi
 # Increase freedreno hangcheck timer because it's right at the edge of the
 # spilling tests timing out (and some traces, too)
 if [ -n "$FREEDRENO_HANGCHECK_MS" ]; then
+    findmnt --mountpoint /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug
     echo $FREEDRENO_HANGCHECK_MS | tee -a /sys/kernel/debug/dri/128/hangcheck_period_ms
 fi
 
@@ -212,6 +213,12 @@ fi
 set +x
 
 section_end init_stage2
+
+# Store the vulkaninfo output as artifacts.
+if [ -n "${VK_DRIVER:-}" ] && command -v vulkaninfo >/dev/null 2>&1; then
+  RADV_DEBUG="${RADV_DEBUG:+$RADV_DEBUG,}info" \
+    vulkaninfo > "$RESULTS_DIR/vulkaninfo.txt" || true
+fi
 
 echo "Running ${HWCI_TEST_SCRIPT} ${HWCI_TEST_ARGS} ..."
 

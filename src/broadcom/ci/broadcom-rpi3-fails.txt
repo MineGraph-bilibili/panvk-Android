@@ -1,9 +1,3 @@
-# Test expects red instead of luminance, contra OES_depth_texture spec.
-# https://gitlab.khronos.org/Tracker/vk-gl-cts/-/issues/3815
-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component24,Fail
-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_short_depth_component16,Fail
-
 #  Creating OpenGL ES 3 context
 # Fail, context: 0x00000000, error: EGL_BAD_MATCH
 # https://gitlab.khronos.org/Tracker/vk-gl-cts/-/issues/3816
@@ -22,7 +16,6 @@ dEQP-GLES2.functional.uniform_api.random.3,Fail
 dEQP-GLES2.functional.uniform_api.random.79,Fail
 
 dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_and_pos_y_pos_z,Fail
-dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_neg_y_pos_z_and_neg_x_pos_y_neg_z,Fail
 
 # Sampling grid slightly off in test 2?
 dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_linear_linear_mirror_rgba8888,Fail
@@ -122,8 +115,63 @@ spec@!opengl 1.0@depth-clear-precision-check@depth24,Fail
 spec@!opengl 1.0@depth-clear-precision-check@depth24_stencil8,Fail
 spec@!opengl 1.0@depth-clear-precision-check@depth32,Fail
 spec@!opengl 1.0@gl-1.0-drawbuffer-modes,Fail
-spec@!opengl 1.0@gl-1.0-scissor-offscreen,Fail
 spec@!opengl 1.0@gl-1.0-user-clip-all-planes,Fail
+spec@arb_clear_texture@arb_clear_texture-3d,Fail
+spec@arb_clear_texture@arb_clear_texture-sized-formats,Fail
+spec@glsl-1.10@execution@glsl-fs-inline-explosion,Crash
+spec@glsl-1.10@execution@glsl-vs-inline-explosion,Crash
+
+# A sub-case involving polygon stipple fails because driver doesn't implement
+# stipple
+spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
+
+# Crashes in this group are CMA allocation fails
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=2,Fail
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=4,Fail
+spec@!opengl 1.1@depthstencil-default_fb-clear,Fail
+
+# These non-supported primitives draws are converted by Mesa into
+# indexed draws with supported primitives. But these indexed draws
+# require 4-byte index due the number of vertices to draw, but our
+# hardware is limited to 2-byte indexes at most.
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_polygon,Crash
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_quad_strip,Crash
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_quads,Crash
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_polygon,Crash
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_quad_strip,Crash
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_quads,Crash
+
+# GFXH-515 / SW-5891: binner uses 16-bit index for drawarrays, so the
+# draw is split in multiple calls. For trifans or lineloops it is not
+# supported because the 1st vertex must be always included, which
+# would require creating new vertex buffer to include the remaining
+# vertices plus the 1st one.
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_line_loop,Fail
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_triangle_fan,Fail
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_line_loop,Fail
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_triangle_fan,Fail
+
+spec@!opengl 1.1@draw-pixels,Fail
+spec@!opengl 1.1@line-flat-clip-color,Fail
+
+# Hardware do not support line/polygon stipple. In fact, this feature
+# was deprecated/removed in newer OpenGL spec versions. It could be
+# emulated using shaders
+spec@!opengl 1.1@line-smooth-stipple,Fail
+spec@!opengl 1.1@linestipple,Fail
+spec@!opengl 1.1@linestipple@Baseline,Fail
+spec@!opengl 1.1@linestipple@Factor 2x,Fail
+spec@!opengl 1.1@linestipple@Factor 3x,Fail
+spec@!opengl 1.1@linestipple@Line loop,Fail
+spec@!opengl 1.1@linestipple@Line strip,Fail
+spec@!opengl 1.1@linestipple@Restarting lines within a single Begin-End block,Fail
+spec@!opengl 2.1@pbo,Fail
+spec@!opengl 2.1@pbo@test_polygon_stip,Fail
+spec@!opengl 2.1@polygon-stipple-fs,Fail
+
+# Hadware do not support wireframe nor point-fill rasterization modes,
+# so glPolygonMode() cannot be implemented; everything is rasterized
+# as polygon filled.
 spec@!opengl 1.1@clipflat,Fail
 spec@!opengl 1.1@clipflat@glBegin/End(GL_POLYGON)- glFrontFace(GL_CCW)- glPolygonMode(GL_FILL)- quadrant: center bottom PV: FIRST,Fail
 spec@!opengl 1.1@clipflat@glBegin/End(GL_POLYGON)- glFrontFace(GL_CCW)- glPolygonMode(GL_FILL)- quadrant: center middle PV: FIRST,Fail
@@ -773,66 +821,6 @@ spec@!opengl 1.1@clipflat@glDrawElements(GL_TRIANGLE_STRIP)- glFrontFace(GL_CW)-
 spec@!opengl 1.1@clipflat@glDrawElements(GL_TRIANGLE_STRIP)- glFrontFace(GL_CW)- glPolygonMode(GL_LINE)- quadrant: right bottom PV: FIRST,Fail
 spec@!opengl 1.1@clipflat@glDrawElements(GL_TRIANGLE_STRIP)- glFrontFace(GL_CW)- glPolygonMode(GL_LINE)- quadrant: right middle PV: FIRST,Fail
 spec@!opengl 1.1@clipflat@glDrawElements(GL_TRIANGLE_STRIP)- glFrontFace(GL_CW)- glPolygonMode(GL_LINE)- quadrant: right top PV: FIRST,Fail
-spec@arb_clear_texture@arb_clear_texture-3d,Fail
-spec@arb_clear_texture@arb_clear_texture-sized-formats,Fail
-spec@glsl-1.10@execution@glsl-fs-inline-explosion,Crash
-spec@glsl-1.10@execution@glsl-vs-inline-explosion,Crash
-
-# A sub-case involving polygon stipple fails because driver doesn't implement
-# stipple
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
-
-# Crashes in this group are CMA allocation fails
-spec@!opengl 1.1@depthstencil-default_fb-clear samples=2,Fail
-spec@!opengl 1.1@depthstencil-default_fb-clear samples=4,Fail
-spec@!opengl 1.1@depthstencil-default_fb-clear,Fail
-
-# These non-supported primitives draws are converted by Mesa into
-# indexed draws with supported primitives. But these indexed draws
-# require 4-byte index due the number of vertices to draw, but our
-# hardware is limited to 2-byte indexes at most.
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_polygon,Crash
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_quad_strip,Crash
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_quads,Crash
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_polygon,Crash
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_quad_strip,Crash
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_quads,Crash
-
-# GFXH-515 / SW-5891: binner uses 16-bit index for drawarrays, so the
-# draw is split in multiple calls. For trifans or lineloops it is not
-# supported because the 1st vertex must be always included, which
-# would require creating new vertex buffer to include the remaining
-# vertices plus the 1st one.
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_line_loop,Fail
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_triangle_fan,Fail
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_line_loop,Fail
-spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_triangle_fan,Fail
-
-spec@!opengl 1.1@draw-pixels,Fail
-spec@!opengl 1.1@line-flat-clip-color,Fail
-
-# Hardware do not support line/polygon stipple. In fact, this feature
-# was deprecated/removed in newer OpenGL spec versions. It could be
-# emulated using shaders
-spec@!opengl 1.1@line-smooth-stipple,Fail
-spec@!opengl 1.1@linestipple,Fail
-spec@!opengl 1.1@linestipple@Baseline,Fail
-spec@!opengl 1.1@linestipple@Factor 2x,Fail
-spec@!opengl 1.1@linestipple@Factor 3x,Fail
-spec@!opengl 1.1@linestipple@Line loop,Fail
-spec@!opengl 1.1@linestipple@Line strip,Fail
-spec@!opengl 1.1@linestipple@Restarting lines within a single Begin-End block,Fail
-spec@!opengl 2.1@pbo,Fail
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-spec@!opengl 2.1@polygon-stipple-fs,Fail
-
-# There are two problems here. On one side, hardware do not support
-# different polygon mode for front and back faces. By default we
-# choose the mode set for front face, unless we are culling it; in
-# this case we choose the mode set for back face. The other problem is
-# that we do not support rendering quads, so Gallium decomposes them
-# in triangles. This has the drawback that when setting polygon mode
-# as lines, we are rendering an extra edge.
 spec@!opengl 1.1@polygon-mode,Fail
 spec@!opengl 1.1@polygon-mode-offset,Fail
 spec@!opengl 1.1@polygon-mode-offset@config 0: Expected white pixel on bottom edge,Fail
@@ -859,6 +847,7 @@ spec@!opengl 1.1@polygon-mode-offset@config 5: Expected white pixel on top edge,
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected blue pixel in center,Fail
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on right edge,Fail
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,Fail
+spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
 
 spec@!opengl 1.1@texwrap 2d proj,Fail
 spec@!opengl 1.1@texwrap 2d proj@GL_RGBA8- NPOT- projected,Fail
@@ -933,6 +922,8 @@ spec@arb_fragment_program@minmax,Fail
 spec@arb_framebuffer_object@fbo-attachments-blit-scaled-linear,Fail
 spec@arb_framebuffer_object@fbo-blit-stretch,Fail
 spec@arb_framebuffer_object@fbo-mipmap-copypix,Fail
+spec@arb_framebuffer_object@framebuffer-blit-oblong tall,Fail
+spec@arb_framebuffer_object@framebuffer-blit-oblong wide,Fail
 spec@arb_framebuffer_object@mixed-buffer-sizes,Fail
 spec@arb_framebuffer_srgb@arb_framebuffer_srgb-srgb_conformance,Fail
 spec@arb_internalformat_query2@all internalformat_<x>_size pname checks,Fail
@@ -957,15 +948,12 @@ spec@arb_occlusion_query@occlusion_query_conform,Fail
 spec@arb_occlusion_query@occlusion_query_conform@GetObjivAval_multi2,Fail
 spec@arb_pixel_buffer_object@fbo-pbo-readpixels-small,Fail
 spec@arb_pixel_buffer_object@pbo-getteximage,Fail
-spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
 spec@arb_provoking_vertex@arb-provoking-vertex-render,Fail
 spec@arb_sampler_objects@sampler-objects,Fail
 spec@arb_texture_rectangle@1-1-linear-texture,Fail
 spec@arb_texture_rectangle@texrect-many,Crash
 spec@arb_vertex_program@minmax,Fail
-spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl 1.4@largest possible eglcreatepbuffersurface and then glclear,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 spec@ext_direct_state_access@multi-texture,Crash
 spec@ext_direct_state_access@multi-texture@MultiTexSubImage1DEXT,Fail
@@ -1196,9 +1184,6 @@ spec@ext_framebuffer_multisample@unaligned-blit 4 stencil msaa,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 
 # Failures from arm32
-arm32-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
-arm32-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component24,Fail
-arm32-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_short_depth_component16,Fail
 arm32-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_center,Fail
 arm32-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
 arm32-dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_and_pos_y_pos_z,Fail
@@ -1217,9 +1202,6 @@ arm32-dEQP-GLES2.functional.uniform_api.random.3,Fail
 arm32-dEQP-GLES2.functional.uniform_api.random.79,Fail
 
 # Already known failures
-ubsan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
-ubsan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component24,Fail
-ubsan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_short_depth_component16,Fail
 ubsan-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_center,Fail
 ubsan-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
 ubsan-dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_and_pos_y_pos_z,Fail

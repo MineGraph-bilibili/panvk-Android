@@ -48,10 +48,10 @@ static uint64_t
 nvk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
 {
    uint64_t addr = 0;
-   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pCreateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO: {
-         const VkBufferOpaqueCaptureAddressCreateInfo *bda = (void *)ext;
+         const VkBufferOpaqueCaptureAddressCreateInfo *bda = ext;
          if (bda->opaqueCaptureAddress != 0) {
 #ifdef NDEBUG
             return bda->opaqueCaptureAddress;
@@ -64,7 +64,7 @@ nvk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
       }
 
       case VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT: {
-         const VkBufferDeviceAddressCreateInfoEXT *bda = (void *)ext;
+         const VkBufferDeviceAddressCreateInfoEXT *bda = ext;
          if (bda->deviceAddress != 0) {
 #ifdef NDEBUG
             return bda->deviceAddress;
@@ -77,7 +77,7 @@ nvk_get_bda_replay_addr(const VkBufferCreateInfo *pCreateInfo)
       }
 
       case VK_STRUCTURE_TYPE_OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT: {
-         const VkOpaqueCaptureDescriptorDataCreateInfoEXT *dd = (void *)ext;
+         const VkOpaqueCaptureDescriptorDataCreateInfoEXT *dd = ext;
          if (dd->opaqueCaptureDescriptorData != NULL) {
             uint64_t dd_addr = 0;
             memcpy(&dd_addr, dd->opaqueCaptureDescriptorData, sizeof(dd_addr));
@@ -195,16 +195,16 @@ nvk_GetDeviceBufferMemoryRequirements(
       .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
    };
 
-   vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *dedicated = (void *)ext;
+         VkMemoryDedicatedRequirements *dedicated = ext;
          dedicated->prefersDedicatedAllocation = false;
          dedicated->requiresDedicatedAllocation = false;
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

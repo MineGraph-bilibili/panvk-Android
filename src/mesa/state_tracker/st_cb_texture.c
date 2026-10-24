@@ -1753,6 +1753,7 @@ try_pbo_upload_common(struct gl_context *ctx,
                         CSO_BIT_RENDER_CONDITION));
 
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    cso_set_render_condition(cso, NULL, false, 0);
 
@@ -2022,6 +2023,7 @@ try_pbo_download(struct st_context *st,
                         CSO_BIT_RENDER_CONDITION));
 
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    cso_set_render_condition(cso, NULL, false, 0);
 
@@ -3331,6 +3333,16 @@ st_finalize_texture(struct gl_context *ctx,
       }
    }
 
+   /* Cache whether the extra YUV plane-view / lowering setup must run for
+    * this texture, so st_get_sampler_views() and st_get_external_sampler_key()
+    * can read a flag instead of re-deriving it on every call.
+    */
+   if (tObj->pt) {
+      enum pipe_format view_format = st_get_view_format(tObj);
+      tObj->needs_yuv_plane_views = (view_format != tObj->pt->format ||
+                                     util_format_is_yuv(view_format));
+   }
+
    /* Pull in any images not in the object's texture:
     */
    for (face = 0; face < nr_faces; face++) {
@@ -3690,6 +3702,15 @@ st_TextureView(struct gl_context *ctx,
    tex->surface_based = GL_TRUE;
    tex->surface_format =
       st_mesa_format_to_pipe_format(st_context(ctx), image->TexFormat);
+
+   /* Cache whether the extra YUV plane-view / lowering setup in
+    * st_get_sampler_views() and st_get_external_sampler_key() must run for
+    * this texture. st_finalize_texture() returns early for surface_based
+    * textures without computing this.
+    */
+   tex->needs_yuv_plane_views = tex->pt &&
+      (tex->surface_format != tex->pt->format ||
+       util_format_is_yuv(tex->surface_format));
 
    tex->lastLevel = numLevels - 1;
 

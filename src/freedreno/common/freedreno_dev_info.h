@@ -310,6 +310,9 @@ struct fd_dev_info {
       /* A702 cuts A LOT of things.. */
       bool is_a702;
 
+      /* Number of transform feedback streams supported. */
+      uint32_t num_xfb_streams;
+
       /* maximum number of descriptor sets */
       uint32_t max_sets;
 
@@ -501,6 +504,16 @@ struct fd_dev_info {
        * predt/predf and prede).
        */
       bool alias_predication_quirk;
+
+      /* There seems to be a HW bug where a dummy prefetch sam.s2en always
+       * reads its src2 from fiber 0. This may cause faults when fiber 0 is a
+       * helper and helpers are disabled. We work around this by keeping
+       * helpers enabled until after such sam.s2en.
+       */
+      bool prefetch_sam_helpers_quirk;
+
+      /* On a750+ SUBPASS_FENCE also implicitly does CCU_RESOLVE_CLEAN */
+      bool subpass_fence_cleans_resolve;
    } props;
 };
 

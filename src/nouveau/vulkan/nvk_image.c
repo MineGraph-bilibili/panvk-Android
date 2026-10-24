@@ -5,6 +5,7 @@
 #include "nvk_image.h"
 
 #include "nvk_device.h"
+#include "nvk_instance.h"
 #include "nvk_device_memory.h"
 #include "nvk_entrypoints.h"
 #include "nvk_format.h"
@@ -183,6 +184,14 @@ nvk_get_image_format_features(const struct nvk_physical_device *pdev,
 
    if (cosited_chroma)
       features |= VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT;
+
+   /* At least advertise support for NV12. This is incomplete. */
+   const struct nvk_instance *instance = nvk_physical_device_instance(pdev);
+   if (vk_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM &&
+       nvk_video_enabled(instance, &pdev->info)) {
+      features |= VK_FORMAT_FEATURE_VIDEO_DECODE_OUTPUT_BIT_KHR;
+      features |= VK_FORMAT_FEATURE_VIDEO_DECODE_DPB_BIT_KHR;
+   }
 
    return features;
 }
@@ -641,10 +650,10 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
       .maxResourceSize = UINT32_MAX, /* TODO */
    };
 
-   vk_foreach_struct(s, pImageFormatProperties->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, pImageFormatProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES: {
-         VkExternalImageFormatProperties *p = (void *)s;
+         VkExternalImageFormatProperties *p = s;
          /* From the Vulkan 1.3.256 spec:
           *
           *    "If handleType is 0, vkGetPhysicalDeviceImageFormatProperties2
@@ -659,18 +668,18 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
          break;
       }
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES: {
-         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = (void *) s;
+         VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = s;
          ycbcr_props->combinedImageSamplerDescriptorCount = plane_count;
          break;
       }
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT: {
-         VkHostImageCopyDevicePerformanceQueryEXT *host_props = (void *) s;
+         VkHostImageCopyDevicePerformanceQueryEXT *host_props = s;
          host_props->optimalDeviceAccess = true;
          host_props->identicalMemoryLayout = true;
          break;
       }
       default:
-         vk_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -943,18 +952,31 @@ nvk_image_init(struct nvk_device *dev,
             explicit_offsets_B[plane] = mod_explicit_info->pPlaneLayouts[plane].offset;
          }
       } else {
-         /* Non-linear modifiers are not supported with YCbCr */
-         assert(image->plane_count == 1);
          const struct VkImageDrmFormatModifierListCreateInfoEXT *mod_list_info =
             vk_find_struct_const(pCreateInfo->pNext,
                                  IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT);
 
-         enum pipe_format p_format =
-            nvk_format_to_pipe_format(image->vk.format);
-         image->vk.drm_format_mod =
-            nil_select_best_drm_format_mod(&pdev->info, nil_format(p_format),
-                                           mod_list_info->drmFormatModifierCount,
-                                           mod_list_info->pDrmFormatModifiers);
+         if (ycbcr_info != NULL) {
+            /* Multi-planar formats only ever advertise LINEAR (see
+             * nvk_get_drm_format_properties()), and nil has no format for the
+             * combined multi-planar format, so pick LINEAR out of the list
+             * rather than asking nil to choose.
+             */
+            image->vk.drm_format_mod = DRM_FORMAT_MOD_INVALID;
+            for (uint32_t i = 0; i < mod_list_info->drmFormatModifierCount; i++) {
+               if (mod_list_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_LINEAR) {
+                  image->vk.drm_format_mod = DRM_FORMAT_MOD_LINEAR;
+                  break;
+               }
+            }
+         } else {
+            enum pipe_format p_format =
+               nvk_format_to_pipe_format(image->vk.format);
+            image->vk.drm_format_mod =
+               nil_select_best_drm_format_mod(&pdev->info, nil_format(p_format),
+                                              mod_list_info->drmFormatModifierCount,
+                                              mod_list_info->pDrmFormatModifiers);
+         }
          assert(image->vk.drm_format_mod != DRM_FORMAT_MOD_INVALID);
       }
 
@@ -1354,10 +1376,10 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
    pMemoryRequirements->memoryRequirements.alignment = align_B;
    pMemoryRequirements->memoryRequirements.size = size_B;
 
-   vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
-         VkMemoryDedicatedRequirements *dedicated = (void *)ext;
+         VkMemoryDedicatedRequirements *dedicated = ext;
          if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
              image->vk.drm_format_mod != DRM_FORMAT_MOD_LINEAR) {
             dedicated->prefersDedicatedAllocation = true;
@@ -1379,7 +1401,7 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }

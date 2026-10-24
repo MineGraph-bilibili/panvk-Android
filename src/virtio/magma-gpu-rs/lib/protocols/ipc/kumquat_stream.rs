@@ -19,7 +19,7 @@ use zerocopy::IntoBytes;
 
 use crate::protocols::kumquat_gpu_protocol::*;
 
-const MAX_COMMAND_SIZE: usize = 4096;
+const MAX_COMMAND_SIZE: usize = 65536;
 
 pub struct KumquatStream {
     stream: Tube,
@@ -42,19 +42,19 @@ impl KumquatStream {
     ) -> Result<()> {
         let mut writer = Writer::new(&mut self.write_buffer);
 
-        let array: &[OwnedDescriptor] = match encode {
+        let array: Vec<OwnedDescriptor> = match encode {
             KumquatGpuProtocolWrite::Cmd(cmd) => {
                 writer.write_obj(cmd)?;
-                &[]
+                Vec::new()
             }
             KumquatGpuProtocolWrite::CmdWithHandle(cmd, handle) => {
                 writer.write_obj(cmd)?;
-                &[handle.os_handle]
+                vec![handle.os_handle]
             }
             KumquatGpuProtocolWrite::CmdWithData(cmd, data) => {
                 writer.write_obj(cmd)?;
                 writer.write_all(&data)?;
-                &[]
+                Vec::new()
             }
         };
 

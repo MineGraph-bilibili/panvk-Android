@@ -116,6 +116,12 @@ struct tu_shader
          /* If per_layer_viewport is true, the maximum number of layers written to.
           */
          uint8_t max_fdm_layers;
+
+         /* Whether there are read-only input attachments, i.e. input
+          * attachments that are not patched to read from GMEM. Only used for
+          * dynamic rendering.
+          */
+         bool read_only_input_attachments;
       } fs;
    };
 };

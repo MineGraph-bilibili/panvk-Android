@@ -3,15 +3,9 @@
 
 libpankmod_lib_files = files(
   'pan_kmod.c',
+  'panfrost_kmod.c',
+  'panthor_kmod.c',
 )
-
-if panfrost_kmds.contains('panfrost')
-  libpankmod_lib_files += files('panfrost_kmod.c')
-endif
-
-if panfrost_kmds.contains('panthor')
-  libpankmod_lib_files += files('panthor_kmod.c')
-endif
 
 if panfrost_kmds.contains('kbase')
   libpankmod_lib_files += files('kbase_kmod.c')

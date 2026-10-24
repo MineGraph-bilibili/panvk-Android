@@ -15,6 +15,7 @@ if with_imagination_vk or with_tools.contains('imagination')
   subdir('common')
   subdir('csbgen')
   subdir('pco')
+  subdir('pdsc')
 endif
 
 if with_imagination_vk

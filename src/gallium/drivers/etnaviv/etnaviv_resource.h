@@ -39,6 +39,7 @@
 #include "drm-uapi/drm_fourcc.h"
 
 struct etna_context;
+struct etna_screen;
 struct pipe_screen;
 struct util_dynarray;
 
@@ -71,6 +72,7 @@ struct etna_resource_level {
    uint32_t ts_size;
    uint64_t clear_value; /* clear value of resource level (mainly for TS) */
    bool ts_valid;
+   bool ts_needs_clear;
    bool ts_flushed;
    uint8_t ts_mode;
    int8_t ts_compress_fmt; /* COLOR_COMPRESSION_FORMAT_* (-1 = disable) */
@@ -232,6 +234,8 @@ struct etna_resource {
    struct pipe_resource *texture;
    /* for when PE doesn't support the base layout */
    struct pipe_resource *render;
+   /* PE can render to the base layout directly */
+   bool render_compatible;
    /* frontend flushes resource via an explicit call to flush_resource */
    bool explicit_flush;
    /* resource is shared outside of the screen */
@@ -302,9 +306,13 @@ etna_resource_hw_tileable(bool use_blt, const struct pipe_resource *pres)
    return etna_format_hw_tileable(use_blt, pres->format);
 }
 
+bool
+etna_resource_needs_rb_swap(const struct etna_screen *screen,
+                            const struct etna_resource *rsc);
+
 struct etna_resource *
-etna_resource_get_render_compatible(struct pipe_context *pctx,
-                                    struct pipe_resource *prsc);
+etna_resource_alloc_render_shadow(struct pipe_context *pctx,
+                                  struct pipe_resource *prsc);
 
 /* returns TRUE if resource TS buffer is exposed externally */
 static inline bool
@@ -318,6 +326,21 @@ etna_resource(struct pipe_resource *p)
 {
    assert(p->target != PIPE_BUFFER);
    return (struct etna_resource *)p;
+}
+
+static inline struct etna_resource *
+etna_resource_get_render_compatible(struct pipe_context *pctx,
+                                    struct pipe_resource *prsc)
+{
+   struct etna_resource *res = etna_resource(prsc);
+
+   if (res->render)
+      return etna_resource(res->render);
+
+   if (res->render_compatible)
+      return res;
+
+   return etna_resource_alloc_render_shadow(pctx, prsc);
 }
 
 static inline struct etna_buffer_resource *

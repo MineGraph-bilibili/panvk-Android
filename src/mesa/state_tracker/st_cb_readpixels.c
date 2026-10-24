@@ -143,6 +143,7 @@ try_pbo_readpixels(struct st_context *st, struct gl_renderbuffer *rb,
                         CSO_BIT_RENDER_CONDITION));
 
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    cso_set_render_condition(cso, NULL, false, 0);
 

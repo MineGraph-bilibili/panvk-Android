@@ -49,6 +49,13 @@ DEBUG_GET_ONCE_FLAGS_OPTION(midgard_debug, "MIDGARD_MESA_DEBUG",
 
 int midgard_debug = 0;
 
+uint32_t
+midgard_get_compiler_flags()
+{
+   midgard_debug = debug_get_option_midgard_debug();
+   return midgard_debug;
+}
+
 bool
 midgard_will_dump_shaders(void)
 {
@@ -1899,6 +1906,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
             UNREACHABLE("Attempted to store unknown type");
             break;
          }
+         st.src_types[0] = type;
 
          emit_mir_instruction(ctx, &st);
       } else {
@@ -2976,14 +2984,14 @@ midgard_compile_shader_nir(nir_shader *nir,
       memcpy(&info->varyings.formats, inputs->varying_layout,
              sizeof(*inputs->varying_layout));
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      pan_varying_collect_formats(&info->varyings.formats,
-                                  nir, inputs->gpu_id,
-                                  inputs->trust_varying_flat_highp_types, false);
+      pan_varying_collect_formats(&info->varyings.formats, nir, inputs->gpu_id);
       info->varyings.noperspective =
          pan_nir_collect_noperspective_varyings_fs(nir);
    }
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
+      NIR_PASS(_, nir, pan_nir_resize_varying_io, &info->varyings.formats,
+               &info->varyings.formats);
       NIR_PASS(_, nir, pan_nir_lower_vs_outputs, inputs->gpu_id,
                inputs->varying_layout, false /* has_idvs */,
                NULL /* needs_extended_fifo */);

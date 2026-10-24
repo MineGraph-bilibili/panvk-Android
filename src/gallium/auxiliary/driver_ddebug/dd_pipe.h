@@ -265,6 +265,8 @@ struct dd_draw_state
    struct pipe_stencil_ref stencil_ref;
    unsigned sample_mask;
    unsigned min_samples;
+   float sample_coverage;
+   bool sample_coverage_invert;
    struct pipe_clip_state clip_state;
    struct pipe_framebuffer_state framebuffer_state;
    struct pipe_poly_stipple polygon_stipple;

@@ -73,6 +73,7 @@ struct blt_clear_op
 struct blt_imgcopy_op
 {
    unsigned flip_y:1;
+   unsigned downsample_one_sample:1;
    struct blt_imginfo src;
    struct blt_imginfo dest;
    uint16_t src_x;

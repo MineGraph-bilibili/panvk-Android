@@ -62,7 +62,7 @@ struct v3dv_bo {
     * Whether only our process has a reference to the BO (meaning that
     * it's safe to reuse it in the BO cache).
     */
-   bool private;
+   bool is_private;
 
    /** If this BO has been imported */
    bool is_import;
@@ -91,10 +91,10 @@ struct v3dv_bo {
    uint64_t report_obj_handle;
 };
 
-void v3dv_bo_init(struct v3dv_bo *bo, uint32_t handle, uint32_t size, uint32_t offset, const char *name, uint64_t report_id, VkObjectType obj_type, uint64_t obj_handle, bool private);
-void v3dv_bo_init_import(struct v3dv_bo *bo, uint32_t handle, uint32_t size, uint32_t offset, VkObjectType obj_type, uint64_t obj_handle, bool private);
+void v3dv_bo_init(struct v3dv_bo *bo, uint32_t handle, uint32_t size, uint32_t offset, const char *name, uint64_t report_id, VkObjectType obj_type, uint64_t obj_handle, bool is_private);
+void v3dv_bo_init_import(struct v3dv_bo *bo, uint32_t handle, uint32_t size, uint32_t offset, VkObjectType obj_type, uint64_t obj_handle, bool is_private);
 
-struct v3dv_bo *v3dv_bo_alloc(struct v3dv_device *device, uint32_t size, const char *name, bool private, VkObjectType obj_type, uint64_t obj_handle);
+struct v3dv_bo *v3dv_bo_alloc(struct v3dv_device *device, uint32_t size, const char *name, bool is_private, VkObjectType obj_type, uint64_t obj_handle);
 
 bool v3dv_bo_free(struct v3dv_device *device, struct v3dv_bo *bo, uint64_t mem_report_obj_handle);
 

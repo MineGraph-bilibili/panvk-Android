@@ -102,25 +102,73 @@ anv_physical_device_init_va_ranges(struct anv_physical_device *device)
 
    address = va_add(&device->va.first_2mb, address, 2 * _1Mb);
 
-   address = va_add(&device->va.general_state_pool, address,
-                    2 * _1Gb - address);
+   if (device->uses_efficient_64bit) {
+      /* Xe3p+ */
+      address = align64(address, _4Gb);
 
-   address = va_add(&device->va.low_heap, address, _1Gb);
+      /* Push descriptor surface states, blorp surface states, dynamic states */
+      address = va_add(&device->va.internal_surface_state_pool, address, _4Gb);
+      /* App descriptor surface states */
+      address = va_add(&device->va.bindless_surface_state_pool, address, _4Gb);
+      /* Shaders, we can only program a U20 in number of pages */
+      address = va_add(&device->va.shader_heap, address, 4 * _1Gb - 64 * _1Mb);
 
-   /* The binding table pool has to be located directly in front of the
-    * surface states.
-    */
-   address = va_add(&device->va.binding_table_pool, address, _1Gb);
-   address = va_add(&device->va.internal_surface_state_pool, address, 1 * _1Gb);
-   assert(device->va.internal_surface_state_pool.addr ==
-          align64(device->va.internal_surface_state_pool.addr, 2 * _1Gb));
-   /* Scratch surface state overlaps with the internal surface state */
-   va_at(&device->va.scratch_surface_state_pool,
-         device->va.internal_surface_state_pool.addr,
-         8 * _1Mb);
-   address = va_add(&device->va.bindless_surface_state_pool, address, 2 * _1Gb);
+      address = va_add(&device->va.null_initialized_heap, address, _1Gb * 8);
+   } else if (!device->indirect_descriptors) {
+      /* Gfx12.5+ */
+      address = va_add(&device->va.general_state_pool, address,
+                       2 * _1Gb - address);
+      address = va_add(&device->va.low_heap, address, _1Gb);
 
-   if (device->indirect_descriptors) {
+      /* The binding table pool has to be located directly in front of the
+       * surface states.
+       */
+      address = va_add(&device->va.binding_table_pool, address, _1Gb);
+      address = va_add(&device->va.internal_surface_state_pool, address, 1 * _1Gb);
+      assert(device->va.internal_surface_state_pool.addr ==
+             align64(device->va.internal_surface_state_pool.addr, 2 * _1Gb));
+      /* Scratch surface state overlaps with the internal surface state */
+      va_at(&device->va.scratch_surface_state_pool,
+            device->va.internal_surface_state_pool.addr,
+            8 * _1Mb);
+      address = va_add(&device->va.bindless_surface_state_pool, address, 2 * _1Gb);
+
+      /* We use a trick to compute constant data offsets in the shaders to avoid
+       * unnecessary 64bit address computations (see lower_load_constant() in
+       * anv_nir_apply_pipeline_layout.c). This assumes the shader heap is
+       * located at an address with the lower 32bits at 0.
+       */
+      address = align64(address, _4Gb);
+      address = va_add(&device->va.shader_heap, address, 3 * _1Gb);
+
+      address = va_add(&device->va.dynamic_state_pool, address, _1Gb);
+      address = va_add(&device->va.dynamic_visible_pool, address,
+                       device->info.verx10 >= 125 ? (2 * _1Gb) : (3 * _1Gb - 4096));
+      assert(device->va.dynamic_visible_pool.addr % _4Gb == 0);
+      address = va_add(&device->va.push_descriptor_buffer_pool, address, _1Gb - 4096);
+
+      address = align64(address, _1Gb);
+      address = va_add(&device->va.aux_tt_pool, address, 2 * _1Gb);
+      address = va_add(&device->va.null_initialized_heap, address, _1Gb * 8);
+   } else {
+      /* Pre Gfx12.5 */
+      address = va_add(&device->va.general_state_pool, address,
+                       2 * _1Gb - address);
+      address = va_add(&device->va.low_heap, address, _1Gb);
+
+      /* The binding table pool has to be located directly in front of the
+       * surface states.
+       */
+      address = va_add(&device->va.binding_table_pool, address, _1Gb);
+      address = va_add(&device->va.internal_surface_state_pool, address, 1 * _1Gb);
+      assert(device->va.internal_surface_state_pool.addr ==
+             align64(device->va.internal_surface_state_pool.addr, 2 * _1Gb));
+      /* Scratch surface state overlaps with the internal surface state */
+      va_at(&device->va.scratch_surface_state_pool,
+            device->va.internal_surface_state_pool.addr,
+            8 * _1Mb);
+      address = va_add(&device->va.bindless_surface_state_pool, address, 2 * _1Gb);
+
       /* With indirect descriptors, descriptor buffers can go anywhere, they
        * just need to be in a 4Gb aligned range, so all shader accesses can
        * use a relocatable upper dword for the 64bit address.
@@ -128,26 +176,23 @@ anv_physical_device_init_va_ranges(struct anv_physical_device *device)
       address = align64(address, _4Gb);
       address = va_add(&device->va.indirect_descriptor_pool, address, 3 * _1Gb);
       address = va_add(&device->va.indirect_push_descriptor_pool, address, _1Gb);
+
+      /* We use a trick to compute constant data offsets in the shaders to avoid
+       * unnecessary 64bit address computations (see lower_load_constant() in
+       * anv_nir_apply_pipeline_layout.c). This assumes the shader heap is
+       * located at an address with the lower 32bits at 0.
+       */
+      address = align64(address, _4Gb);
+      address = va_add(&device->va.shader_heap, address, 3 * _1Gb);
+
+      address = va_add(&device->va.dynamic_state_pool, address, _1Gb);
+      address = va_add(&device->va.dynamic_visible_pool, address, 3 * _1Gb - 4096);
+      assert(device->va.dynamic_visible_pool.addr % _4Gb == 0);
+
+      address = align64(address, _1Gb);
+      address = va_add(&device->va.aux_tt_pool, address, 2 * _1Gb);
+      address = va_add(&device->va.null_initialized_heap, address, _1Gb * 8);
    }
-
-   /* We use a trick to compute constant data offsets in the shaders to avoid
-    * unnecessary 64bit address computations (see lower_load_constant() in
-    * anv_nir_apply_pipeline_layout.c). This assumes the shader heap is
-    * located at an address with the lower 32bits at 0.
-    */
-   address = align64(address, _4Gb);
-   address = va_add(&device->va.shader_heap, address, 3 * _1Gb);
-
-   address = va_add(&device->va.dynamic_state_pool, address, _1Gb);
-   address = va_add(&device->va.dynamic_visible_pool, address,
-                    device->info.verx10 >= 125 ? (2 * _1Gb) : (3 * _1Gb - 4096));
-   assert(device->va.dynamic_visible_pool.addr % _4Gb == 0);
-   if (device->info.verx10 >= 125)
-      address = va_add(&device->va.push_descriptor_buffer_pool, address, _1Gb - 4096);
-
-   address = align64(address, _1Gb);
-   address = va_add(&device->va.aux_tt_pool, address, 2 * _1Gb);
-   address = va_add(&device->va.null_initialized_heap, address, _1Gb * 8);
 
    /* What's left to do for us is to set va.high_heap and va.trtt without
     * overlap, but there are a few things to be considered:

@@ -277,12 +277,14 @@ blorp_surface_info_init(struct blorp_batch *batch,
 
 
 void
-blorp_params_init(struct blorp_params *params)
+blorp_params_init(struct blorp_params *params,
+                  struct blorp_context *blorp)
 {
    memset(params, 0, sizeof(*params));
    params->num_samples = 1;
    params->num_draw_buffers = 1;
    params->num_layers = 1;
+   params->use_efficient_64bit = blorp->config.use_efficient_64bit;
 }
 
 void
@@ -293,7 +295,7 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
    const struct intel_device_info *devinfo = batch->blorp->isl_dev->info;
 
    struct blorp_params params;
-   blorp_params_init(&params);
+   blorp_params_init(&params, batch->blorp);
 
    params.hiz_op = op;
    params.full_surface_hiz_op = true;

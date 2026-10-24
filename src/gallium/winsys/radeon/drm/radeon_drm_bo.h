@@ -37,6 +37,7 @@ struct radeon_bo {
    void *user_ptr; /* from buffer_from_ptr */
 
    uint32_t handle; /* 0 for slab entries */
+   uint32_t display_handle; /* GEM handle valid for rws->fd when it differs. */
    uint32_t flink_name;
    uint64_t va;
    uint32_t hash;

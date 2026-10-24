@@ -220,10 +220,12 @@ can_sink_instr(nir_instr *instr, nir_move_options options, bool *can_mov_out_of_
 
       case nir_intrinsic_load_input:
       case nir_intrinsic_load_interpolated_input:
+      case nir_intrinsic_load_interpolated_input_amd:
       case nir_intrinsic_load_input_vertex:
+      case nir_intrinsic_load_input_vertex_amd:
       case nir_intrinsic_load_per_vertex_input:
       case nir_intrinsic_load_per_primitive_input:
-      case nir_intrinsic_load_attribute_pan:
+      case nir_intrinsic_load_attr_pan:
       case nir_intrinsic_load_var_pan:
       case nir_intrinsic_load_var_buf_pan:
       case nir_intrinsic_load_var_flat_pan:

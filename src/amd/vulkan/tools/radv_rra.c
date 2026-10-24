@@ -12,6 +12,7 @@
 #include "util/macros.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
+#include "ac_rdf.h"
 #include "amd_family.h"
 #include "radv_debug.h"
 #include "radv_device.h"
@@ -21,18 +22,6 @@
 #include "radv_physical_device.h"
 #include "vk_acceleration_structure.h"
 #include "vk_common_entrypoints.h"
-
-#define RRA_MAGIC 0x204644525F444D41
-
-struct rra_file_header {
-   uint64_t magic;
-   uint32_t version;
-   uint32_t unused;
-   uint64_t chunk_descriptions_offset;
-   uint64_t chunk_descriptions_size;
-};
-
-static_assert(sizeof(struct rra_file_header) == 32, "rra_file_header does not match RRA spec");
 
 enum rra_chunk_version {
    RADV_RRA_ASIC_API_INFO_CHUNK_VERSION = 0x1,
@@ -50,46 +39,6 @@ enum rra_file_api {
    RADV_RRA_API_MANTLE,
    RADV_RRA_API_GENERIC,
 };
-
-struct rra_file_chunk_description {
-   char name[16];
-   uint32_t is_zstd_compressed;
-   enum rra_chunk_version version;
-   uint64_t header_offset;
-   uint64_t header_size;
-   uint64_t data_offset;
-   uint64_t data_size;
-   uint64_t unused;
-};
-
-static_assert(sizeof(struct rra_file_chunk_description) == 64, "rra_file_chunk_description does not match RRA spec");
-
-static void
-rra_dump_header(FILE *output, uint64_t chunk_descriptions_offset, uint64_t chunk_descriptions_size)
-{
-   struct rra_file_header header = {
-      .magic = RRA_MAGIC,
-      .version = 3,
-      .chunk_descriptions_offset = chunk_descriptions_offset,
-      .chunk_descriptions_size = chunk_descriptions_size,
-   };
-   fwrite(&header, sizeof(header), 1, output);
-}
-
-static void
-rra_dump_chunk_description(uint64_t offset, uint64_t header_size, uint64_t data_size, const char *name,
-                           enum rra_chunk_version version, FILE *output)
-{
-   struct rra_file_chunk_description chunk = {
-      .version = version,
-      .header_offset = offset,
-      .header_size = header_size,
-      .data_offset = offset + header_size,
-      .data_size = data_size,
-   };
-   memcpy(chunk.name, name, strnlen(name, sizeof(chunk.name)));
-   fwrite(&chunk, sizeof(struct rra_file_chunk_description), 1, output);
-}
 
 enum rra_memory_type {
    RRA_MEMORY_TYPE_UNKNOWN,
@@ -167,7 +116,7 @@ amdgpu_vram_type_to_rra(uint32_t type)
 }
 
 static void
-rra_dump_asic_info(const struct radeon_info *gpu_info, FILE *output)
+rra_dump_asic_info(const struct radeon_info *gpu_info, struct ac_rdf_writer *rdf_writer)
 {
    struct rra_asic_info asic_info = {
       /* All frequencies are in Hz */
@@ -188,7 +137,13 @@ rra_dump_asic_info(const struct radeon_info *gpu_info, FILE *output)
 
    strncpy(asic_info.device_name, gpu_info->marketing_name, RRA_FILE_DEVICE_NAME_MAX_SIZE - 1);
 
-   fwrite(&asic_info, sizeof(struct rra_asic_info), 1, output);
+   const struct ac_rdf_chunk_info asic_info_chunk = {
+      .identifier = "AsicInfo",
+      .version = RADV_RRA_ASIC_API_INFO_CHUNK_VERSION,
+      .data = &asic_info,
+      .data_size = sizeof(asic_info),
+   };
+   ac_rdf_chunk_write(rdf_writer, &asic_info_chunk);
 }
 
 static struct rra_accel_struct_header
@@ -237,27 +192,28 @@ rra_fill_accel_struct_header_common(const struct radv_physical_device *pdev, str
 
 static void
 rra_dump_tlas_header(const struct radv_physical_device *pdev, struct radv_accel_struct_header *header,
-                     size_t parent_id_table_size, struct rra_bvh_info *bvh_info, uint64_t primitive_count, FILE *output)
+                     size_t parent_id_table_size, struct rra_bvh_info *bvh_info, uint64_t primitive_count,
+                     struct ac_rdf_writer *rdf_writer)
 {
    struct rra_accel_struct_header file_header =
       rra_fill_accel_struct_header_common(pdev, header, parent_id_table_size, bvh_info, primitive_count);
    file_header.post_build_info.bvh_type = RRA_BVH_TYPE_TLAS;
    file_header.geometry_type = VK_GEOMETRY_TYPE_INSTANCES_KHR;
 
-   fwrite(&file_header, sizeof(struct rra_accel_struct_header), 1, output);
+   ac_rdf_chunk_append(rdf_writer, &file_header, sizeof(struct rra_accel_struct_header));
 }
 
 static void
 rra_dump_blas_header(const struct radv_physical_device *pdev, struct radv_accel_struct_header *header,
                      size_t parent_id_table_size, struct radv_accel_struct_geometry_info *geometry_infos,
-                     struct rra_bvh_info *bvh_info, uint64_t primitive_count, FILE *output)
+                     struct rra_bvh_info *bvh_info, uint64_t primitive_count, struct ac_rdf_writer *rdf_writer)
 {
    struct rra_accel_struct_header file_header =
       rra_fill_accel_struct_header_common(pdev, header, parent_id_table_size, bvh_info, primitive_count);
    file_header.post_build_info.bvh_type = RRA_BVH_TYPE_BLAS;
    file_header.geometry_type = header->geometry_count ? geometry_infos->type : VK_GEOMETRY_TYPE_TRIANGLES_KHR;
 
-   fwrite(&file_header, sizeof(struct rra_accel_struct_header), 1, output);
+   ac_rdf_chunk_append(rdf_writer, &file_header, sizeof(struct rra_accel_struct_header));
 }
 
 void PRINTFLIKE(2, 3) rra_validation_fail(struct rra_validation_context *ctx, const char *message, ...)
@@ -298,7 +254,7 @@ static VkResult
 rra_dump_acceleration_structure(const struct radv_physical_device *pdev,
                                 struct radv_rra_accel_struct_data *accel_struct, uint8_t *data,
                                 struct hash_table_u64 *accel_struct_vas, struct set *used_blas, bool should_validate,
-                                FILE *output)
+                                struct ac_rdf_writer *rdf_writer)
 {
    struct radv_accel_struct_header *header = (struct radv_accel_struct_header *)data;
 
@@ -447,27 +403,43 @@ rra_dump_acceleration_structure(const struct radv_physical_device *pdev,
       .byte_size = bvh_info.leaf_nodes_size + bvh_info.internal_nodes_size + sizeof(struct rra_accel_struct_header),
    };
 
-   fwrite(&chunk_header, sizeof(struct rra_accel_struct_chunk_header), 1, output);
-   fwrite(&rra_metadata, sizeof(struct rra_accel_struct_metadata), 1, output);
+   /* The chunk header is the chunk's header region; everything else (tlas, blas, etc.) is chunk data,
+    * appended in order. */
+   struct ac_rdf_chunk_info chunk_info = {
+      .identifier = "RawAccelStruct",
+      .version = RADV_RRA_ACCEL_STRUCT_CHUNK_VERSION,
+      .header = &chunk_header,
+      .header_size = sizeof(struct rra_accel_struct_chunk_header),
+   };
+   if (!ac_rdf_chunk_begin(rdf_writer, &chunk_info)) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto exit;
+   }
+
+   ac_rdf_chunk_append(rdf_writer, &rra_metadata, sizeof(struct rra_accel_struct_metadata));
 
    /* Write node parent id data */
-   fwrite(node_parent_table, 1, node_parent_table_size, output);
+   ac_rdf_chunk_append(rdf_writer, node_parent_table, node_parent_table_size);
 
    if (is_tlas)
-      rra_dump_tlas_header(pdev, header, node_parent_table_size, &bvh_info, primitive_count, output);
+      rra_dump_tlas_header(pdev, header, node_parent_table_size, &bvh_info, primitive_count, rdf_writer);
    else
-      rra_dump_blas_header(pdev, header, node_parent_table_size, geometry_infos, &bvh_info, primitive_count, output);
+      rra_dump_blas_header(pdev, header, node_parent_table_size, geometry_infos, &bvh_info, primitive_count,
+                           rdf_writer);
 
    /* Write acceleration structure data  */
-   fwrite(dst_structure_data + RRA_ROOT_NODE_OFFSET, 1,
-          bvh_info.internal_nodes_size + bvh_info.leaf_nodes_size + bvh_info.instance_sideband_data_size, output);
+   ac_rdf_chunk_append(rdf_writer, dst_structure_data + RRA_ROOT_NODE_OFFSET,
+                       bvh_info.internal_nodes_size + bvh_info.leaf_nodes_size + bvh_info.instance_sideband_data_size);
 
    if (!is_tlas)
-      fwrite(rra_geometry_infos, sizeof(struct rra_geometry_info), header->geometry_count, output);
+      ac_rdf_chunk_append(rdf_writer, rra_geometry_infos, sizeof(struct rra_geometry_info) * header->geometry_count);
 
    /* Write leaf node ids */
    uint32_t leaf_node_list_size = primitive_count * sizeof(uint32_t);
-   fwrite(leaf_node_ids, 1, leaf_node_list_size, output);
+   ac_rdf_chunk_append(rdf_writer, leaf_node_ids, leaf_node_list_size);
+
+   if (!ac_rdf_chunk_end(rdf_writer))
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
 
 exit:
    free(rra_geometry_infos);
@@ -881,30 +853,19 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
    if (result != VK_SUCCESS)
       return result;
 
-   uint64_t *accel_struct_offsets = NULL;
-   uint64_t *ray_history_offsets = NULL;
-   uint64_t *ray_history_sizes = NULL;
+   bool *ray_history_emitted = NULL;
    struct hash_entry **hash_entries = NULL;
-   FILE *file = NULL;
+   struct ac_rdf_writer *rdf_writer = NULL;
    struct set *used_blas = NULL;
 
    uint32_t struct_count = _mesa_hash_table_num_entries(device->rra_trace.accel_structs);
-   accel_struct_offsets = calloc(struct_count, sizeof(uint64_t));
-   if (!accel_struct_offsets)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    uint32_t dispatch_count =
       util_dynarray_num_elements(&device->rra_trace.ray_history, struct radv_rra_ray_history_data *);
-   ray_history_offsets = calloc(dispatch_count, sizeof(uint64_t));
-   if (!ray_history_offsets) {
-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
-      goto cleanup;
-   }
-
-   ray_history_sizes = calloc(dispatch_count, sizeof(uint64_t));
-   if (!ray_history_sizes) {
-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
-      goto cleanup;
+   if (dispatch_count) {
+      ray_history_emitted = calloc(dispatch_count, sizeof(bool));
+      if (!ray_history_emitted)
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
    hash_entries = malloc(sizeof(*hash_entries) * struct_count);
@@ -913,28 +874,24 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
       goto cleanup;
    }
 
-   file = fopen(filename, "w");
-   if (!file) {
+   rdf_writer = ac_rdf_writer_init_file(filename);
+   if (!rdf_writer) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto cleanup;
    }
 
-   /*
-    * The header contents can only be determined after all acceleration
-    * structures have been dumped. An empty struct is written instead
-    * to keep offsets intact.
-    */
-   struct rra_file_header header = {0};
-   fwrite(&header, sizeof(struct rra_file_header), 1, file);
-
-   uint64_t api_info_offset = (uint64_t)ftell(file);
+   /* ApiInfo chunk */
    uint64_t api = RADV_RRA_API_VULKAN;
-   fwrite(&api, sizeof(uint64_t), 1, file);
+   const struct ac_rdf_chunk_info api_info_chunk = {
+      .identifier = "ApiInfo",
+      .version = RADV_RRA_ASIC_API_INFO_CHUNK_VERSION,
+      .data = &api,
+      .data_size = sizeof(api),
+   };
+   ac_rdf_chunk_write(rdf_writer, &api_info_chunk);
 
-   uint64_t asic_info_offset = (uint64_t)ftell(file);
-   rra_dump_asic_info(&pdev->info, file);
-
-   uint64_t written_accel_struct_count = 0;
+   /* AsicInfo chunk */
+   rra_dump_asic_info(&pdev->info, rdf_writer);
 
    struct hash_entry *last_entry = NULL;
    for (unsigned i = 0; (last_entry = _mesa_hash_table_next_entry(device->rra_trace.accel_structs, last_entry)); ++i)
@@ -967,14 +924,10 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
       if (!mapped_data)
          continue;
 
-      accel_struct_offsets[written_accel_struct_count] = (uint64_t)ftell(file);
-      result = rra_dump_acceleration_structure(pdev, data, mapped_data, device->rra_trace.accel_struct_vas, used_blas,
-                                               device->rra_trace.validate_as, file);
+      rra_dump_acceleration_structure(pdev, data, mapped_data, device->rra_trace.accel_struct_vas, used_blas,
+                                      device->rra_trace.validate_as, rdf_writer);
 
       rra_unmap_accel_struct_data(&copy_ctx, i);
-
-      if (result == VK_SUCCESS)
-         written_accel_struct_count++;
    }
 
    for (unsigned i = 0; i < struct_count; i++) {
@@ -989,21 +942,27 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
       if (!mapped_data)
          continue;
 
-      accel_struct_offsets[written_accel_struct_count] = (uint64_t)ftell(file);
-      result = rra_dump_acceleration_structure(pdev, data, mapped_data, device->rra_trace.accel_struct_vas, used_blas,
-                                               device->rra_trace.validate_as, file);
+      rra_dump_acceleration_structure(pdev, data, mapped_data, device->rra_trace.accel_struct_vas, used_blas,
+                                      device->rra_trace.validate_as, rdf_writer);
 
       rra_unmap_accel_struct_data(&copy_ctx, i);
-
-      if (result == VK_SUCCESS)
-         written_accel_struct_count++;
    }
-
-   uint64_t ray_history_offset = (uint64_t)ftell(file);
 
    if (dispatch_count) {
       uint32_t ray_history_index = 0xFFFFFFFF;
       struct radv_rra_ray_history_data *ray_history = NULL;
+      bool tokens_chunk_begun = false;
+
+      /* Struct reused per dispatch with its own data set before each write. */
+      struct ac_rdf_chunk_info metadata_chunk = {
+         .identifier = "HistoryMetadata",
+         .version = RADV_RRA_RAY_HISTORY_CHUNK_VERSION,
+         .data_size = sizeof(struct radv_rra_ray_history_metadata),
+      };
+      const struct ac_rdf_chunk_info tokens_chunk = {
+         .identifier = "HistoryTokensRaw",
+         .version = RADV_RRA_RAY_HISTORY_CHUNK_VERSION,
+      };
 
       uint8_t *history = device->rra_trace.ray_history_buffer.map;
       struct radv_ray_history_header *history_header = (void *)history;
@@ -1031,14 +990,25 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
             token_size = sizeof(struct radv_packed_trace_ray_token);
 
             if (src->dispatch_index != ray_history_index) {
+               if (tokens_chunk_begun) {
+                  ac_rdf_chunk_end(rdf_writer);
+                  tokens_chunk_begun = false;
+               }
+
                ray_history_index = src->dispatch_index;
                assert(ray_history_index < dispatch_count);
                ray_history = *util_dynarray_element(&device->rra_trace.ray_history, struct radv_rra_ray_history_data *,
                                                     ray_history_index);
 
-               assert(!ray_history_offsets[ray_history_index]);
-               ray_history_offsets[ray_history_index] = (uint64_t)ftell(file);
-               fwrite(&ray_history->metadata, sizeof(struct radv_rra_ray_history_metadata), 1, file);
+               assert(!ray_history_emitted[ray_history_index]);
+               ray_history_emitted[ray_history_index] = true;
+
+               /* HistoryMetadata chunk, immediately followed by this dispatch's
+                * (streamed) HistoryTokensRaw chunk. */
+               metadata_chunk.data = &ray_history->metadata;
+               ac_rdf_chunk_write(rdf_writer, &metadata_chunk);
+               ac_rdf_chunk_begin(rdf_writer, &tokens_chunk);
+               tokens_chunk_begun = true;
             }
 
             uint32_t *dispatch_size = ray_history->metadata.dispatch_size.size;
@@ -1074,10 +1044,9 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
                .direction[2] = src->direction[2],
                .tmax = src->tmax,
             };
-            fwrite(&begin_id, sizeof(begin_id), 1, file);
-            fwrite(&begin_control, sizeof(begin_control), 1, file);
-            fwrite(&begin, sizeof(begin), 1, file);
-            ray_history_sizes[ray_history_index] += sizeof(begin_id) + sizeof(begin_control) + sizeof(begin);
+            ac_rdf_chunk_append(rdf_writer, &begin_id, sizeof(begin_id));
+            ac_rdf_chunk_append(rdf_writer, &begin_control, sizeof(begin_control));
+            ac_rdf_chunk_append(rdf_writer, &begin, sizeof(begin));
          } else if (token_header->token_type == radv_packed_token_trace_ray_hit ||
                     token_header->token_type == radv_packed_token_trace_ray_miss) {
             struct radv_packed_trace_ray_end_token *src = (void *)(history + offset);
@@ -1095,9 +1064,8 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
                   .type = rra_ray_history_token_ahit_status,
                   .data = i == src->ahit_count - 1 ? 2 : 0,
                };
-               fwrite(&ahit_status_id, sizeof(ahit_status_id), 1, file);
-               fwrite(&ahit_status_control, sizeof(ahit_status_control), 1, file);
-               ray_history_sizes[ray_history_index] += sizeof(ahit_status_id) + sizeof(ahit_status_control);
+               ac_rdf_chunk_append(rdf_writer, &ahit_status_id, sizeof(ahit_status_id));
+               ac_rdf_chunk_append(rdf_writer, &ahit_status_control, sizeof(ahit_status_control));
             }
 
             for (uint32_t i = 0; i < src->isec_count; i++) {
@@ -1109,9 +1077,8 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
                   .type = rra_ray_history_token_isec_status,
                   .data = i == src->isec_count - 1 ? 2 : 0,
                };
-               fwrite(&isec_status_id, sizeof(isec_status_id), 1, file);
-               fwrite(&isec_status_control, sizeof(isec_status_control), 1, file);
-               ray_history_sizes[ray_history_index] += sizeof(isec_status_id) + sizeof(isec_status_control);
+               ac_rdf_chunk_append(rdf_writer, &isec_status_id, sizeof(isec_status_id));
+               ac_rdf_chunk_append(rdf_writer, &isec_status_control, sizeof(isec_status_control));
             }
 
             struct rra_ray_history_id_token end_id = {
@@ -1137,10 +1104,9 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
                end.t = src->t;
             }
 
-            fwrite(&end_id, sizeof(end_id), 1, file);
-            fwrite(&end_control, sizeof(end_control), 1, file);
-            fwrite(&end, sizeof(end), 1, file);
-            ray_history_sizes[ray_history_index] += sizeof(end_id) + sizeof(end_control) + sizeof(end);
+            ac_rdf_chunk_append(rdf_writer, &end_id, sizeof(end_id));
+            ac_rdf_chunk_append(rdf_writer, &end_control, sizeof(end_control));
+            ac_rdf_chunk_append(rdf_writer, &end, sizeof(end));
          } else if (token_header->token_type == radv_packed_token_iteration) {
             token_size = sizeof(struct radv_packed_iteration_token);
          } else if (token_header->token_type == radv_packed_token_accel_struct) {
@@ -1150,13 +1116,19 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
          }
       }
 
+      if (tokens_chunk_begun)
+         ac_rdf_chunk_end(rdf_writer);
+
+      /* Dispatches with no recorded tokens still need a HistoryMetadata chunk plus an
+       * empty HistoryTokensRaw chunk so every dispatch contributes the expected pair. */
       for (uint32_t i = 0; i < dispatch_count; i++) {
-         if (ray_history_offsets[i])
+         if (ray_history_emitted[i])
             continue;
 
          ray_history = *util_dynarray_element(&device->rra_trace.ray_history, struct radv_rra_ray_history_data *, i);
-         ray_history_offsets[i] = (uint64_t)ftell(file);
-         fwrite(&ray_history->metadata, sizeof(struct radv_rra_ray_history_metadata), 1, file);
+         metadata_chunk.data = &ray_history->metadata;
+         ac_rdf_chunk_write(rdf_writer, &metadata_chunk);
+         ac_rdf_chunk_write(rdf_writer, &tokens_chunk); /* It has no data */
       }
 
       history_header->offset = 1;
@@ -1164,45 +1136,21 @@ radv_rra_dump_trace(VkQueue vk_queue, char *filename)
 
    rra_copy_context_finish(&copy_ctx);
 
-   uint64_t chunk_info_offset = (uint64_t)ftell(file);
-   rra_dump_chunk_description(api_info_offset, 0, 8, "ApiInfo", RADV_RRA_ASIC_API_INFO_CHUNK_VERSION, file);
-   rra_dump_chunk_description(asic_info_offset, 0, sizeof(struct rra_asic_info), "AsicInfo",
-                              RADV_RRA_ASIC_API_INFO_CHUNK_VERSION, file);
-
-   for (uint32_t i = 0; i < dispatch_count; i++) {
-      rra_dump_chunk_description(ray_history_offsets[i], 0, sizeof(struct radv_rra_ray_history_metadata),
-                                 "HistoryMetadata", RADV_RRA_RAY_HISTORY_CHUNK_VERSION, file);
-      rra_dump_chunk_description(ray_history_offsets[i] + sizeof(struct radv_rra_ray_history_metadata), 0,
-                                 ray_history_sizes[i], "HistoryTokensRaw", RADV_RRA_RAY_HISTORY_CHUNK_VERSION, file);
+   /* Write the chunk index and back-patch the file header. */
+   if (!ac_rdf_finalize(rdf_writer)) {
+      fprintf(stderr, "radv: rra: Failed to finalize RRA file\n");
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto cleanup;
    }
-
-   for (uint32_t i = 0; i < written_accel_struct_count; ++i) {
-      uint64_t accel_struct_size;
-      if (i == written_accel_struct_count - 1)
-         accel_struct_size = (uint64_t)(ray_history_offset - accel_struct_offsets[i]);
-      else
-         accel_struct_size = (uint64_t)(accel_struct_offsets[i + 1] - accel_struct_offsets[i]);
-
-      rra_dump_chunk_description(accel_struct_offsets[i], sizeof(struct rra_accel_struct_chunk_header),
-                                 accel_struct_size, "RawAccelStruct", RADV_RRA_ACCEL_STRUCT_CHUNK_VERSION, file);
-   }
-
-   uint64_t file_end = (uint64_t)ftell(file);
-
-   /* All info is available, dump header now */
-   fseek(file, 0, SEEK_SET);
-   rra_dump_header(file, chunk_info_offset, file_end - chunk_info_offset);
 
    result = VK_SUCCESS;
 cleanup:
-   if (file)
-      fclose(file);
+   if (rdf_writer)
+      ac_rdf_writer_destroy(rdf_writer);
 
    _mesa_set_destroy(used_blas, NULL);
    free(hash_entries);
-   free(ray_history_sizes);
-   free(ray_history_offsets);
-   free(accel_struct_offsets);
+   free(ray_history_emitted);
    return result;
 }
 
@@ -1238,7 +1186,7 @@ gamma_dump_acceleration_structure(const struct radv_physical_device *pdev,
 
    struct radv_accel_struct_geometry_info *geometry_infos = (void *)(data + sizeof(struct radv_accel_struct_header));
    for (uint32_t i = 0; i < radv_header->geometry_count; i++)
-      fwrite(&geometry_infos->primitive_count, sizeof(geometry_infos->primitive_count), 1, output);
+      fwrite(&geometry_infos[i].primitive_count, sizeof(geometry_infos[i].primitive_count), 1, output);
 
    fwrite(name, strlen(name), 1, output);
 

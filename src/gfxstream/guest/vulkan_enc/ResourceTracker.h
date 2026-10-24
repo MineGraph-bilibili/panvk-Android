@@ -196,6 +196,10 @@ class ResourceTracker {
                             VkMemoryMapFlags, void** ppData);
 
     void on_vkUnmapMemory(void* context, VkDevice device, VkDeviceMemory memory);
+    VkResult on_vkMapMemory2(void* context, VkResult input_result, VkDevice device,
+                             const VkMemoryMapInfo* pMemoryMapInfo, void** ppData);
+    VkResult on_vkUnmapMemory2(void* context, VkResult input_result, VkDevice device,
+                               const VkMemoryUnmapInfo* pMemoryUnmapInfo);
 
     VkResult on_vkCreateImage(void* context, VkResult input_result, VkDevice device,
                               const VkImageCreateInfo* pCreateInfo,

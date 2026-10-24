@@ -83,6 +83,27 @@ struct tu_bo_array {
 struct tu_pkt;
 struct tu_crb;
 
+/* Temporary struct for tracking a register state to be written, used by
+ * a6xx-pack.h and tu_cs_emit_regs()
+ */
+struct tu_reg_value {
+   uint32_t reg;
+   uint64_t value;
+   bool is_address;
+};
+
+#define fd_reg_pair tu_reg_value
+
+struct tu_scratch_slot {
+   unsigned slot;
+};
+
+/** Boxed type for GPU virtual addresses, to disambiguate vs. uint32_t immed. */
+struct tu_gpuva {
+   uint64_t gpuva;
+   tu_gpuva(uint64_t arg) : gpuva(arg) {}
+};
+
 struct tu_cs
 {
    uint32_t *start;
@@ -118,7 +139,96 @@ struct tu_cs
 
    tu_pkt *pkt;
 
+   /*
+    * Helpers for various pm4 pkt building:
+    */
+
    tu_crb crb(uint32_t nregs);
+
+   void scratch_to_reg(struct fd_reg_pair reg, struct tu_scratch_slot scratch, unsigned cnt);
+   void reg_to_scratch(struct tu_scratch_slot scratch, struct fd_reg_pair reg, unsigned cnt);
+   void scratch_write(struct tu_scratch_slot scratch, uint32_t *val, unsigned cnt);
+   void scratch_write(struct tu_scratch_slot scratch, uint32_t val) {
+      scratch_write(scratch, &val, 1);
+   }
+
+   /**
+    * A flexible src/dst type for pm4 pkt helpers, which can be register/scratch/immediate
+    * (the latter for src args only).  The actual types supported depend on the pm4 pkt.  If
+    * there is only one possible type, use the underlying type directly (ie fd_reg_pair, etc)
+    */
+   struct tu_pm4_arg {
+      enum {
+         TU_PM4_IMMED,
+         TU_PM4_GPUVA,
+         TU_PM4_REG,
+         TU_PM4_SCRATCH,
+      } type;
+
+      union {
+         uint32_t imm;
+         struct tu_gpuva gpuva;
+         struct fd_reg_pair reg;
+         struct tu_scratch_slot scratch;
+      };
+
+      tu_pm4_arg(uint32_t arg) : type(TU_PM4_IMMED), imm(arg) {}
+      tu_pm4_arg(struct tu_gpuva arg) : type(TU_PM4_GPUVA), gpuva(arg) {}
+      tu_pm4_arg(struct fd_reg_pair arg) : type(TU_PM4_REG), reg(arg) {}
+      tu_pm4_arg(struct tu_scratch_slot arg) : type(TU_PM4_SCRATCH), scratch(arg) {}
+
+      operator uint32_t() const {
+         if (type == TU_PM4_IMMED)
+            return imm;
+         else if (type == TU_PM4_REG)
+            return reg.reg;
+         else if (type == TU_PM4_SCRATCH)
+            return scratch.slot;
+         else
+            UNREACHABLE("bad type");
+      }
+   };
+
+   struct tu_rmw_args {
+      bool skip_wfm;
+      uint32_t rotate;
+      bool src1_add;
+      struct tu_pm4_arg src0, src1;
+   };
+
+   void rmw(struct tu_pm4_arg dst, struct tu_rmw_args args);
+
+   struct tu_reg_to_mem_args {
+      unsigned cnt;     /* value of 0 treated as 1 by sqe */
+      bool is_64b;
+      bool accumulate;
+   };
+
+   void reg_to_mem(uint64_t va, struct fd_reg_pair reg, struct tu_reg_to_mem_args args = {});
+
+   /* For reg64: */
+   void reg_to_mem(uint64_t va, struct fd_reg_pair reg_lo, struct fd_reg_pair reg_hi) {
+      reg_to_mem(va, reg_lo, { .cnt = 2, .is_64b = true });
+   }
+
+   struct tu_cond_write_args {
+      enum cp_cond_function function;
+      bool signed_compare;
+      uint32_t ref;
+      uint32_t mask = ~0;
+      uint32_t write_data;
+   };
+
+   void cond_write(struct tu_pm4_arg dst, struct tu_pm4_arg src, struct tu_cond_write_args args);
+
+   struct tu_mem_to_reg_args {
+      bool one_reg_wr;
+      unsigned cnt;     /* value of 0 treated as 1 by sqe */
+      bool shift_by_2;
+      bool wait_cache_flush;
+   };
+
+   void mem_to_reg(struct fd_reg_pair reg, uint64_t va, struct tu_mem_to_reg_args args = {});
 };
 
 void
@@ -629,17 +739,6 @@ tu_cs_emit_data_nop(struct tu_cs *cs,
                     uint32_t size,
                     uint32_t align);
 
-/* Temporary struct for tracking a register state to be written, used by
- * a6xx-pack.h and tu_cs_emit_regs()
- */
-struct tu_reg_value {
-   uint32_t reg;
-   uint64_t value;
-   bool is_address;
-};
-
-#define fd_reg_pair tu_reg_value
-
 #include "a6xx-pack.xml.h"
 #include "adreno-pm4-pack.xml.h"
 
@@ -837,6 +936,152 @@ private:
 
 #define with_crb(...) \
    for (tu_crb crb(__VA_ARGS__); crb.first; crb.first = false)
+
+
+/**
+ * A builder for an arbitrary PKT7 (for CRB, use fd_crb instead)
+ */
+class tu_pkt7 final : public tu_pkt {
+public:
+   tu_pkt7(tu_cs *cs, enum adreno_pm4_type3_packets pkt, unsigned ndwords) :
+      tu_pkt(cs, pkt, ndwords)
+   {
+   }
+
+   /* Allow appending a "naked" dwords: */
+   tu_pkt7& add(uint32_t val) {
+      append(val);
+      off_++;
+      return *this;
+   }
+
+   tu_pkt7& add(struct fd_reg_pair reg) {
+      __assert_eq(off_, reg.reg);
+      off_ = reg.reg + 1;
+      append(reg.value);
+      return *this;
+   }
+
+   tu_pkt7& add(struct fd_reg_pair reg_lo, struct fd_reg_pair reg_hi) {
+      __assert_eq(reg_hi.reg, 0);
+      __assert_eq(off_, reg_lo.reg);
+      off_ = reg_lo.reg + 2;
+      uint64_t val = reg_lo.value;
+      append(val);
+      append(val >> 32);
+      return *this;
+   }
+
+private:
+   /* Disallow copy constructor to prevent mistakes with using fd_pkt7 instead
+    * of fd_pkt7& as function param:
+    */
+   tu_pkt7(const tu_pkt7 &);
+
+   /* for debugging: */
+   unsigned off_ = 0;
+};
+
+inline void
+tu_cs::rmw(struct tu_pm4_arg dst, struct tu_rmw_args args)
+{
+   assert((dst.type == tu_pm4_arg::TU_PM4_REG) || (dst.type == tu_pm4_arg::TU_PM4_SCRATCH));
+   assert((args.src0.type == tu_pm4_arg::TU_PM4_REG) || (args.src0.type == tu_pm4_arg::TU_PM4_IMMED));
+   assert((args.src1.type == tu_pm4_arg::TU_PM4_REG) || (args.src1.type == tu_pm4_arg::TU_PM4_IMMED));
+
+   tu_pkt7(this, CP_REG_RMW, 3)
+      .add(CP_REG_RMW_0(
+         .dst_reg = dst,
+         .dst_scratch = dst.type == tu_pm4_arg::TU_PM4_SCRATCH,
+         .skip_wait_for_me = args.skip_wfm,
+         .rotate = args.rotate,
+         .src1_add = args.src1_add,
+         .src1_is_reg = args.src1.type == tu_pm4_arg::TU_PM4_REG,
+         .src0_is_reg = args.src0.type == tu_pm4_arg::TU_PM4_REG,
+      ))
+      .add(args.src0)
+      .add(args.src1);
+}
+
+inline void
+tu_cs::cond_write(struct tu_pm4_arg dst, struct tu_pm4_arg src, struct tu_cond_write_args args)
+{
+   assert((dst.type == tu_pm4_arg::TU_PM4_REG) || (dst.type == tu_pm4_arg::TU_PM4_GPUVA));
+
+   enum poll_memory_type poll;
+
+   if (src.type == tu_pm4_arg::TU_PM4_REG)
+      poll = POLL_REGISTER;
+   else if (src.type == tu_pm4_arg::TU_PM4_GPUVA)
+      poll = POLL_MEMORY;
+   else if (src.type == tu_pm4_arg::TU_PM4_SCRATCH)
+      poll = POLL_SCRATCH;
+   else
+      UNREACHABLE("invalid src type");
+
+   assert((src.type == tu_pm4_arg::TU_PM4_REG) ||
+          (src.type == tu_pm4_arg::TU_PM4_GPUVA) ||
+          (src.type == tu_pm4_arg::TU_PM4_SCRATCH));
+
+   tu_pkt7 pkt(this, CP_COND_WRITE5, 8);
+
+   pkt.add(CP_COND_WRITE5_0(
+      .function = args.function,
+      .signed_compare = args.signed_compare,
+      .poll = poll,
+      .write_memory = dst.type == tu_pm4_arg::TU_PM4_GPUVA,
+   ));
+
+   if (src.type == tu_pm4_arg::TU_PM4_GPUVA) {
+      pkt.add(src.gpuva.gpuva);
+      pkt.add(src.gpuva.gpuva >> 32);
+   } else {
+      pkt.add(src);
+      pkt.add(0);
+   }
+
+   pkt.add(CP_COND_WRITE5_3(.ref = args.ref));
+   pkt.add(CP_COND_WRITE5_4(.mask = args.mask));
+
+   if (dst.type == tu_pm4_arg::TU_PM4_GPUVA) {
+      pkt.add(dst.gpuva.gpuva);
+      pkt.add(dst.gpuva.gpuva >> 32);
+   } else {
+      pkt.add(dst);
+      pkt.add(0);
+   }
+
+   pkt.add(CP_COND_WRITE5_7(.write_data = args.write_data));
+}
+
+inline void
+tu_cs::reg_to_mem(uint64_t va, struct fd_reg_pair reg, struct tu_reg_to_mem_args args)
+{
+   tu_pkt7(this, CP_REG_TO_MEM, 3)
+      .add(CP_REG_TO_MEM_0(
+         .reg = reg.reg,
+         .cnt = args.cnt,
+         .is_64b = args.is_64b,
+         .accumulate = args.accumulate,
+      ))
+      .add(va)
+      .add(va >> 32);
+}
+
+inline void
+tu_cs::mem_to_reg(struct fd_reg_pair reg, uint64_t va, struct tu_mem_to_reg_args args)
+{
+   tu_pkt7(this, CP_MEM_TO_REG, 3)
+      .add(CP_MEM_TO_REG_0(
+         .reg = reg.reg,
+         .one_reg_wr = args.one_reg_wr,
+         .cnt = args.cnt,
+         .shift_by_2 = args.shift_by_2,
+         .wait_cache_flush = args.wait_cache_flush,
+      ))
+      .add(va)
+      .add(va >> 32);
+}
 
 template <chip CHIP>
 static inline fd_reg_pair

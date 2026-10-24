@@ -28,6 +28,10 @@
 
 #include "pipe/p_state.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 unsigned
 util_resource_size(const struct pipe_resource *res);
 
@@ -54,5 +58,9 @@ util_texture_is_array(enum pipe_texture_target target)
       return false;
    }
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

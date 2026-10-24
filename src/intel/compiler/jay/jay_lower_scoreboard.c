@@ -46,6 +46,7 @@ struct swsb_sbid_edge {
    struct swsb_sbid_state *ctx;
    uint32_t tokens_busy[MAX_SBID_DEP_TYPES];
    BITSET_WORD *tokens_bitset[NUM_TOKENS];
+   bool tdr_state;
 };
 
 /** SBID scoreboarding */
@@ -76,7 +77,7 @@ init_sbid_state(struct swsb_sbid_state *sbid_state,
                 uint32_t nr_sbid_keys,
                 unsigned max_sbids)
 {
-   *sbid_state = (struct swsb_sbid_state) {
+   *sbid_state = (struct swsb_sbid_state){
       .words = BITSET_WORDS(nr_sbid_keys),
       .max_sbids = max_sbids,
       .mem_ctx = ralloc_context(NULL),
@@ -183,6 +184,8 @@ store_sbid_edge(struct swsb_sbid_edge *dst, const struct swsb_sbid_edge *src)
       release_sbid_bitset(dst->ctx, &dst->tokens_bitset[sbid]);
    }
 
+   dst->tdr_state = src ? src->tdr_state : false;
+
    validate_edge(dst);
 }
 
@@ -211,10 +214,8 @@ merge_sbid_edges(const struct swsb_sbid_edge *a,
       uint32_t dst_has = out->tokens_busy[type];
 
       u_foreach_bit(sbid, a_has & b_has) {
-         __bitset_or(bitset_for(out, sbid, type),
-                     bitset_for(a, sbid, type),
-                     bitset_for(b, sbid, type),
-                     out->ctx->words);
+         __bitset_or(bitset_for(out, sbid, type), bitset_for(a, sbid, type),
+                     bitset_for(b, sbid, type), out->ctx->words);
       }
 
       u_foreach_bit(sbid, a_has ^ b_has) {
@@ -234,6 +235,8 @@ merge_sbid_edges(const struct swsb_sbid_edge *a,
    u_foreach_bit(sbid, dst_alloced & ~src_alloced) {
       release_sbid_bitset(out->ctx, &out->tokens_bitset[sbid]);
    }
+
+   out->tdr_state = a->tdr_state | b->tdr_state;
 
    validate_edge(out);
 }
@@ -288,25 +291,10 @@ sync_sbids(jay_builder *b, uint32_t mask, gen_sbid_mode mode)
 }
 
 static inline bool
-jay_inst_has_sbid(const jay_inst *I)
+jay_inst_has_sbid(const struct intel_device_info *devinfo, const jay_inst *I)
 {
-   return jay_inst_is_unordered(I) &&
+   return jay_inst_is_unordered(devinfo, I) &&
           !(I->op == JAY_OPCODE_SEND && jay_send_eot(I));
-}
-
-static inline unsigned
-jay_inst_sbid(const jay_inst *I)
-{
-   return I->op == JAY_OPCODE_SEND ? jay_send_sbid(I) : jay_dpas_sbid(I);
-}
-
-static inline void
-jay_inst_set_sbid(jay_inst *I, unsigned sbid)
-{
-   if (I->op == JAY_OPCODE_SEND)
-      jay_set_send_sbid(I, sbid);
-   else
-      jay_set_dpas_sbid(I, sbid);
 }
 
 /**
@@ -337,6 +325,7 @@ lower_sbid_local(jay_function *func,
 
    uint32_t busy_src = edge->tokens_busy[SRC];
    uint32_t busy_dst = edge->tokens_busy[DST];
+   bool tdr_state = edge->tdr_state;
 
    unsigned roundrobin = 0;
 
@@ -385,11 +374,11 @@ lower_sbid_local(jay_function *func,
          }
       }
 
-      if (jay_inst_has_sbid(I)) {
+      if (jay_inst_has_sbid(func->shader->devinfo, I)) {
          unsigned sbid;
 
          if (commit) {
-            sbid = jay_inst_sbid(I);
+            sbid = I->dep.sbid;
          } else {
             if (sync_dst) {
                /* If we depend on $N.dst, there's no extra cost to $N.set */
@@ -406,7 +395,7 @@ lower_sbid_local(jay_function *func,
                }
             }
 
-            jay_inst_set_sbid(I, sbid);
+            I->dep.sbid = sbid;
          }
 
          if (edge->tokens_bitset[sbid] == NULL) {
@@ -448,6 +437,8 @@ lower_sbid_local(jay_function *func,
          sync_src |= busy_src & ~busy_dst;
          busy_dst = 0;
          busy_src = 0;
+      } else if (I->op == JAY_OPCODE_CHECK_TDR) {
+         tdr_state = true;
       }
 
       /* Dispose of the bitsets for any synced sbids */
@@ -470,7 +461,18 @@ lower_sbid_local(jay_function *func,
       sync_sbids(&b, sync_dst, GEN_SBID_DST);
       sync_sbids(&b, sync_src, GEN_SBID_SRC);
 
-      if (I->op == JAY_OPCODE_SCHEDULE_BARRIER) {
+      /* Convert all memory volatile SENDs to SENDCs if we have a pending thread
+       * dependency check. This can lead to some unnecessary SENDCs, but it
+       * shouldn't matter for performance unless apps abuse interlocks. SENDC
+       * does not stall the EU on its own, so we would also have to track when
+       * its SBID has cleared if we ever wanted to implement proper elision.
+       */
+      if (tdr_state && I->op == JAY_OPCODE_SEND && !jay_send_pure(I)) {
+         jay_set_send_check_tdr(I, true);
+      }
+
+      if (I->op == JAY_OPCODE_SCHEDULE_BARRIER ||
+          I->op == JAY_OPCODE_CHECK_TDR) {
          /* Lowered above into a sync, but removed late to keep the cursor */
          jay_remove_instruction(I);
       }
@@ -478,6 +480,7 @@ lower_sbid_local(jay_function *func,
 
    edge->tokens_busy[SRC] = busy_src;
    edge->tokens_busy[DST] = busy_dst;
+   edge->tdr_state = tdr_state;
    validate_edge(edge);
 }
 
@@ -499,10 +502,8 @@ struct swsb_regdist_state {
    unsigned ip[GEN_NUM_PIPES];
    unsigned last_shape[GEN_NUM_PIPES];
 
-   /* finished_ip[X / GEN_NUM_PIPES + SBID][Y] = ip means from the perspective
-    * of pipe X or send SBID X, ip on pipe Y has already been waited on.
-    */
-   unsigned finished_ip[GEN_NUM_PIPES + NUM_TOKENS][GEN_NUM_PIPES];
+   /* finished_ip[X] = ip means ip on pipe X has already been waited on. */
+   unsigned finished_ip[GEN_NUM_PIPES];
    u32_per_pipe *access;
 
    jay_inst *last_sync;
@@ -562,36 +563,6 @@ depend_on_writer(struct swsb_regdist_state *state,
 static void
 lower_regdist(jay_function *func, jay_inst *I, struct swsb_regdist_state *ctx)
 {
-   if (I->op == JAY_OPCODE_SYNC) {
-      ctx->last_sync = I;
-      uint32_t sbid_mask = 0;
-      if (jay_sync_op(I) == TGL_SYNC_NOP) {
-         /* The SYNC.nops added by this function that are RegDist-only, are
-          * added *before* the instruction so are not seen here.
-          */
-         assert(I->dep.mode != GEN_SBID_NULL);
-         sbid_mask = BITFIELD_BIT(I->dep.sbid);
-      } else if (jay_sync_op(I) == TGL_SYNC_ALLRD ||
-                 jay_sync_op(I) == TGL_SYNC_ALLWR) {
-         sbid_mask = jay_as_uint(I->src[0]);
-      }
-
-      /* Syncs execute on all pipes, so any regdist that the synced SEND waited
-       * on gets cleared for all pipes. This reduces annotations.
-       */
-      u_foreach_bit(sbid, sbid_mask) {
-         jay_foreach_pipe(p) {
-            jay_foreach_pipe(q) {
-               ctx->finished_ip[p][q] =
-                  MAX2(ctx->finished_ip[p][q],
-                       ctx->finished_ip[GEN_NUM_PIPES + sbid][q]);
-            }
-         }
-      }
-
-      return;
-   }
-
    gen_pipe exec_pipe = jay_inst_exec_pipe(func->shader->devinfo, I);
    unsigned dep[GEN_NUM_PIPES] = { 0 };
    jay_def dsts[3] = { I->dst, I->cond_flag };
@@ -630,42 +601,19 @@ lower_regdist(jay_function *func, jay_inst *I, struct swsb_regdist_state *ctx)
                        exec_pipe, except_pipe);
    }
 
-   /* If dependency P implies dependency Q, drop dependency Q to avoid
-    * unnecessary annotations.
-    */
-   jay_foreach_pipe(p) {
-      if (dep[p]) {
-         jay_foreach_pipe(q) {
-            if (p != q && dep[q] && ctx->finished_ip[p][q] >= dep[q]) {
-               dep[q] = 0;
-            }
-         }
-      }
-   }
-
    uint32_t wait_pipes = 0;
    unsigned min_delta = 7;
 
    jay_foreach_pipe(p) {
-      if (dep[p] && (exec_pipe == GEN_PIPE_NONE ||
-                     dep[p] > ctx->finished_ip[exec_pipe][p])) {
-
+      if (dep[p] && dep[p] > ctx->finished_ip[p]) {
          min_delta = MIN2(min_delta, ctx->ip[p] - dep[p] + 1);
          wait_pipes |= BITFIELD_BIT(p);
       }
    }
 
-   /* Unordered instructions are modelled as a pipe per SBID for
-    * finished_ip purposes.
-    */
-   unsigned generalized_pipe = exec_pipe;
-   if (jay_inst_is_unordered(I)) {
-      generalized_pipe = GEN_NUM_PIPES + jay_inst_sbid(I);
-   }
-
    /* We'll wait on the unioned dependency. Update the tracking for that. */
    u_foreach_bit(p, wait_pipes) {
-      ctx->finished_ip[generalized_pipe][p] = ctx->ip[p] + 1 - min_delta;
+      ctx->finished_ip[p] = ctx->ip[p] + 1 - min_delta;
    }
 
    uint32_t last_pipe = util_logbase2(wait_pipes);
@@ -685,9 +633,9 @@ lower_regdist(jay_function *func, jay_inst *I, struct swsb_regdist_state *ctx)
       I->decrement_dep = last_pipe != exec_pipe;
    }
 
-   bool has_sbid = jay_inst_has_sbid(I);
-   I->dep = (gen_swsb) {
-      .sbid = has_sbid ? jay_inst_sbid(I) : 0,
+   bool has_sbid = jay_inst_has_sbid(func->shader->devinfo, I);
+   I->dep = (gen_swsb){
+      .sbid = I->dep.sbid,
       .mode = has_sbid ? GEN_SBID_SET : GEN_SBID_NULL,
       .regdist = wait_pipes ? min_delta : 0,
       .pipe = single_wait && (!has_sbid ||
@@ -774,8 +722,9 @@ lower_regdist(jay_function *func, jay_inst *I, struct swsb_regdist_state *ctx)
 void
 jay_lower_scoreboard_trivial(jay_shader *shader)
 {
+   bool any_check_tdr = false;
    jay_foreach_inst_in_shader_safe(shader, func, I) {
-      if (jay_inst_has_sbid(I)) {
+      if (jay_inst_has_sbid(shader->devinfo, I)) {
          /* DPAS can't have an A@1, so insert an extra SYNC.nop. */
          jay_builder before = jay_init_builder(func, jay_before_inst(I));
          jay_SYNC(&before, jay_null(), TGL_SYNC_NOP)->dep = gen_swsb_regdist(1);
@@ -790,10 +739,20 @@ jay_lower_scoreboard_trivial(jay_shader *shader)
             b.cursor = jay_after_inst(I);
             jay_SYNC(&b, jay_null(), TGL_SYNC_BAR);
          }
+
+      } else if (I->op == JAY_OPCODE_CHECK_TDR) {
+         any_check_tdr = true;
+         jay_remove_instruction(I);
       } else if (I->op == JAY_OPCODE_SCHEDULE_BARRIER) {
          jay_remove_instruction(I);
       } else {
          I->dep = gen_swsb_regdist(1);
+      }
+   }
+
+   jay_foreach_inst_in_shader(shader, func, I) {
+      if (I->op == JAY_OPCODE_SEND) {
+         jay_set_send_check_tdr(I, any_check_tdr);
       }
    }
 }
@@ -847,27 +806,30 @@ jay_lower_scoreboard(jay_shader *shader)
        * implement that backwards: state is preserved (correctness), except we
        * clear regdists[] when entering blocks that are unreachable by falling
        * through from the previous source-order block and hence must be branch
-       * targets coming in with a clear scoreboard. next[] tracks the
-       * fallthrough block for the logical & physical CFGs respectively.
+       * targets coming in with a clear scoreboard.
        */
-      jay_block *next[UGPR + 1] = { NULL };
+      jay_block *next = NULL;
 
       jay_foreach_block(f, block) {
-         /* Clear regdists[] for GPRs according to the logical CFG and for UGPRs
-          * according to the physical CFG. This is a bit pedantic but it ensures
-          * we keep the dependencies for UGPRs across halves of if-else.
-          */
-         for (unsigned f = GPR; f <= UGPR; f++) {
-            if (!list_is_empty(&block->instructions) && next[f] != block) {
-               memset(regdists + (f ? shader->num_regs[GPR] : 0), 0,
-                      sizeof(regdists[0]) * shader->num_regs[f]);
-            }
-
-            next[f] = jay_successors(block, f)[0];
+         if (!list_is_empty(&block->instructions) && next != block) {
+            memset(regdists, 0,
+                   sizeof(*regdists) * jay_range_base(shader, ~0));
          }
 
+         next = jay_first_successor(block, UGPR);
+
          jay_foreach_inst_in_block_safe(block, I) {
-            lower_regdist(f, I, &regdist_state);
+            if (I->op == JAY_OPCODE_SYNC) {
+               regdist_state.last_sync = I;
+
+               /* RegDist-only syncs are added only by lower_regdist, before
+                * the instruction, so are not seen here.
+                */
+               assert(jay_sync_op(I) != TGL_SYNC_NOP ||
+                      I->dep.mode != GEN_SBID_NULL);
+            } else {
+               lower_regdist(f, I, &regdist_state);
+            }
          }
       }
    }

@@ -738,7 +738,13 @@ static struct ac_pc_block_base gfx12_GCEA_SE = {
 
    .num_spm_modules = 1,
    .num_spm_wires = 2,
-   .spm_block_select = AC_SPM_GLOBAL_BLOCK_GCEA_SE,
+   /* On GFX12 the EA is split into two SPM sources that share the global EA
+    * muxsel block: CPWD uses the global EA select while the SE-facing EA uses
+    * the per-SE EA select. Aliasing both to AC_SPM_GLOBAL_BLOCK_GCEA made the
+    * SE counters read the CPWD source (e.g. "PCIe bytes" == "Local video
+    * memory bytes"). Select the per-SE EA source here instead.
+    */
+   .spm_block_select = AC_SPM_SE_BLOCK_EA,
 };
 
 /* DMA */

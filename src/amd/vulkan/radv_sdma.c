@@ -178,7 +178,7 @@ radv_sdma_get_surf(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *
       info.pitch = surf->u.gfx9.pitch[subresource.mipLevel] / blk_w;
       info.slice_pitch = surf->u.gfx9.surf_slice_size / bpe;
    } else {
-      const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf, cmd_buffer->qf);
+      const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf);
       const bool htile_compressed =
          radv_layout_is_htile_compressed(device, image, subresource.mipLevel, image_layout, queue_mask);
       const bool dcc_compressed =

@@ -111,24 +111,32 @@ brw_shader::emit_cs_terminate()
       retype(brw_allocate_vgrf_units(*this, reg_unit(devinfo)), BRW_TYPE_UD);
    ubld.group(8 * reg_unit(devinfo), 0).MOV(payload, g0);
 
-   /* Set the descriptor to "Dereference Resource" and "Root Thread" */
-   unsigned desc = 0;
-
-   /* Set Resource Select to "Do not dereference URB" on Gfx < 11.
-    *
-    * Note that even though the thread has a URB resource associated with it,
-    * we set the "do not dereference URB" bit, because the URB resource is
-    * managed by the fixed-function unit, so it will free it automatically.
-    */
-   if (devinfo->ver < 11)
-      desc |= (1 << 4); /* Do not dereference URB */
-
    brw_send_inst *send = ubld.SEND();
    send->dst = reg_undef;
-   send->src[SEND_SRC_DESC]     = brw_imm_ud(desc);
-   send->src[SEND_SRC_EX_DESC]  = brw_imm_ud(0);
    send->src[SEND_SRC_PAYLOAD1] = payload;
    send->src[SEND_SRC_PAYLOAD2] = brw_reg();
+
+   if (key->use_efficient_64bit) {
+      send->efficient_64bit = true;
+      send->combined_desc = GEN_MESSAGE_GATEWAY_64BIT_SFID_SIGNAL_EOT;
+      send->src[SENDG_SRC_IND_0_DESC] = brw_reg();
+      send->src[SENDG_SRC_IND_1_DESC] = brw_reg();
+   } else {
+      /* Set the descriptor to "Dereference Resource" and "Root Thread" */
+      unsigned desc = 0;
+
+      /* Set Resource Select to "Do not dereference URB" on Gfx < 11.
+       *
+       * Note that even though the thread has a URB resource associated with it,
+       * we set the "do not dereference URB" bit, because the URB resource is
+       * managed by the fixed-function unit, so it will free it automatically.
+       */
+      if (devinfo->ver < 11)
+         desc |= (1 << 4); /* Do not dereference URB */
+
+      send->src[SEND_SRC_DESC]     = brw_imm_ud(desc);
+      send->src[SEND_SRC_EX_DESC]  = brw_imm_ud(0);
+   }
 
    /* On Alchemist and later, send an EOT message to the message gateway to
     * terminate a compute shader.  For older GPUs, send to the thread spawner.
@@ -178,6 +186,7 @@ brw_shader::brw_shader(const brw_shader_params *params)
 
    memset(&this->shader_stats, 0, sizeof(this->shader_stats));
 
+   this->seen_rt_write = false;
    this->grf_used = 0;
    this->spilled_any_registers = false;
    this->start_offset = 0;
@@ -319,7 +328,7 @@ brw_shader::assign_curb_setup()
    uint64_t used = 0;
    foreach_block_and_inst(block, brw_inst, inst, cfg) {
       for (unsigned int i = 0; i < inst->sources; i++) {
-	 if (inst->src[i].file != UNIFORM)
+         if (inst->src[i].file != UNIFORM)
             continue;
 
          struct brw_reg brw_reg;
@@ -394,7 +403,11 @@ brw_shader::assign_curb_setup()
 
             /* Prepare section of mask, at 1/4 size */
             brw_builder ubld_mask = ubld.group(simd_width_mask, 0);
-            brw_reg offset_reg = ubld_mask.vgrf(BRW_TYPE_UW);
+            /* For the CMP below, on Xe3P the byte stride of dst (mask_reg)
+             * and src1 (offset_reg) must match.
+             */
+            brw_reg offset_reg =
+               ubld_mask.vgrf(devinfo->ver < 35 ? BRW_TYPE_UW : BRW_TYPE_UD);
             unsigned mask_start = grf, mask_end = grf + mask_length;
             ubld_mask.ADD(offset_reg, offset_base, brw_imm_uw((mask_start - grf_start) * 2));
             /* Compare the 16B increments with the value coming from push
@@ -715,10 +728,9 @@ brw_allocate_registers(brw_shader &s, bool allow_spilling)
       if (devinfo->ver < 30 && sched_mode != BRW_SCHEDULE_PRE)
          continue;
 
-      /* These don't appear to provide much benefit on xe3+.
+      /* This one doesn't appear to provide much benefit on xe3+.
        */
-      if (devinfo->ver >= 30 && (sched_mode == BRW_SCHEDULE_PRE_LIFO ||
-                                 sched_mode == BRW_SCHEDULE_NONE))
+      if (devinfo->ver >= 30 && sched_mode == BRW_SCHEDULE_PRE_LIFO)
          continue;
 
       brw_schedule_instructions_pre_ra(s, sched, sched_mode);
@@ -914,6 +926,9 @@ brw_allocate_registers(brw_shader &s, bool allow_spilling)
       OPT(brw_opt_cmod_propagation);
    }
 
+   if (s.key->use_efficient_64bit)
+      brw_lower_sendg_ind_desc_to_arf(s);
+
    if (s.devinfo->ver >= 30)
       OPT(brw_lower_send_gather);
 
@@ -1022,7 +1037,7 @@ brw_shader_phase_update(brw_shader &s, enum brw_shader_phase phase)
    brw_validate(s);
 }
 
-bool brw_should_print_shader(const nir_shader *shader, uint64_t debug_flag, uint32_t source_hash)
+bool brw_should_print_shader(const nir_shader *shader, uint64_t debug_flag, uint64_t source_hash)
 {
    if (intel_shader_dump_filter && intel_shader_dump_filter != source_hash) {
       return false;
@@ -1111,7 +1126,6 @@ void brw_prog_data_init(struct brw_stage_prog_data *prog_data,
     */
    prog_data->ray_queries = params->nir->info.ray_queries;
    prog_data->stage = params->nir->info.stage;
-   prog_data->source_hash = params->source_hash;
    prog_data->total_scratch = 0;
    prog_data->total_shared = params->nir->info.shared_size;
 }

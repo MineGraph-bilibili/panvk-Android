@@ -239,6 +239,8 @@ enum tu_cmd_flush_bits {
    TU_CMD_FLAG_BLIT_CACHE_CLEAN = 1 << 11,
    TU_CMD_FLAG_RTU_INVALIDATE = 1 << 12,
    TU_CMD_FLAG_WAIT_FOR_BR = 1 << 13,
+   TU_CMD_FLAG_CACHE_INVALIDATE_GMEM = 1 << 14,
+   TU_CMD_FLAG_SUBPASS_SLICE_FENCE = 1 << 15,
 
    TU_CMD_FLAG_ALL_CLEAN =
       TU_CMD_FLAG_CCU_CLEAN_DEPTH |
@@ -253,6 +255,7 @@ enum tu_cmd_flush_bits {
       TU_CMD_FLAG_CCU_INVALIDATE_DEPTH |
       TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
       TU_CMD_FLAG_CACHE_INVALIDATE |
+      TU_CMD_FLAG_CACHE_INVALIDATE_GMEM |
       TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE |
       TU_CMD_FLAG_CCHE_INVALIDATE |
       /* Treat CP_WAIT_FOR_ME as a "cache" that needs to be invalidated when a
@@ -314,6 +317,7 @@ struct tu_render_pass_state
    bool has_zpass_done_sample_count_write_in_rp;
    bool disable_gmem;
    bool sysmem_single_prim_mode;
+   bool lrz_disable_for_next_rp;
 
    /* This is set if, at any point in the render pass, we were not able to
     * duplicate the viewport per-view due to the user using multiple viewports
@@ -325,6 +329,16 @@ struct tu_render_pass_state
 
    /* Track whether conditional predicate for COND_REG_EXEC is changed in draw_cs */
    bool draw_cs_writes_to_cond_pred;
+
+   /* Track whether there has been a pipeline barrier in the subpass with an
+    * INPUT_ATTACHMENT_READ destination access.
+    */
+   bool input_attachment_read_barrier;
+
+   /* Track whether any FS have used dynamic rendering with read-only input
+    * attachments.
+    */
+   bool read_only_input_attachments;
 
    uint32_t drawcall_count;
 
@@ -357,7 +371,11 @@ struct tu_render_pass_state
    const char *lrz_write_disable_reason;
    uint32_t lrz_write_disabled_at_draw;
 
-   const char *gmem_disable_reason;
+   /* Which check took the SYSMEM/GMEM decision away from the autotuner, or NULL
+    * if the autotuner was free to choose.
+    */
+   const char *force_render_mode_reason;
+
    const char *cb_disable_reason;
 };
 
@@ -562,7 +580,8 @@ struct tu_cmd_state
       struct tu_framebuffer *framebuffer;
       VkRect2D render_areas[MAX_VIEWS];
       bool per_layer_render_area;
-      bool fdm_subsampled;
+      bool fdm_any_subsampled;
+      bool fdm_custom_resolve_subsampled;
       enum tu_gmem_layout gmem_layout;
       uint32_t gmem_layout_divisor;
 
@@ -573,7 +592,8 @@ struct tu_cmd_state
    } suspended_pass;
 
    bool fdm_enabled;
-   bool fdm_subsampled;
+   bool fdm_any_subsampled;
+   bool fdm_custom_resolve_subsampled;
 
    bool tessfactor_addr_set;
    bool predication_active;
@@ -696,6 +716,11 @@ struct tu_cmd_buffer
    struct tu_subpass_attachment dynamic_color_attachments[MAX_RTS];
    struct tu_subpass_attachment dynamic_input_attachments[MAX_RTS + 1];
    struct tu_subpass_attachment dynamic_resolve_attachments[MAX_RTS + 1];
+   /* The color attachments of the custom resolve subpass, which cannot share
+    * dynamic_resolve_attachments: the main subpass still needs its resolve
+    * list for any fixed-function resolves mixed into the pass.
+    */
+   struct tu_subpass_attachment dynamic_custom_resolve_attachments[MAX_RTS];
    struct tu_subpass_attachment dynamic_unresolve_attachments[MAX_RTS + 1];
    const struct tu_image_view *dynamic_attachments[3 * (MAX_RTS + 1) + 2];
    VkClearValue dynamic_clear_values[3 * (MAX_RTS + 1)];
@@ -842,6 +867,7 @@ tu_emit_event_write(struct tu_cmd_buffer *cmd,
                     struct tu_cs *cs,
                     enum fd_gpu_event event);
 
+template <chip CHIP>
 void
 tu_flush_for_access(struct tu_cache_state *cache,
                     enum tu_cmd_access_mask src_mask,

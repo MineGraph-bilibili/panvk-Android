@@ -11,25 +11,23 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <sched.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
-#include <sys/sysinfo.h>
+
+#if defined(HAVE_PAN_KMOD_KBASE)
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <unistd.h>
+#include <string.h>
 #include <sys/ioctl.h>
-#include <linux/sync_file.h>
+#include <unistd.h>
+#include "util/timespec.h"
+#endif
 
 #include "util/disk_cache.h"
-#include "util/cnd_monotonic.h"
-#include "util/log.h"
 #include "util/os_misc.h"
 #include "util/os_time.h"
-#include "util/timespec.h"
 #include "util/u_atomic.h"
+#include "util/u_debug.h"
 #include "git_sha1.h"
 
 #include "vk_android.h"
@@ -40,7 +38,6 @@
 #include "vk_log.h"
 #include "vk_physical_device.h"
 #include "vk_util.h"
-#include "vk_sync.h"
 
 #include "panvk_device.h"
 #include "panvk_entrypoints.h"
@@ -50,6 +47,7 @@
 #include "panvk_wsi.h"
 
 #include "pan_afbc.h"
+#include "pan_compiler.h"
 #include "pan_props.h"
 
 #include "genxml/gen_macros.h"
@@ -64,9 +62,6 @@
       const struct panvk_instance *instance,                                   \
       const struct panvk_physical_device *device,                              \
       struct vk_features *features);                                           \
-                                                                               \
-   void panvk_v##_ver##_log_texture_compression_summary(                       \
-      const struct panvk_physical_device *device);                             \
                                                                                \
    void panvk_v##_ver##_get_physical_device_properties(                        \
       const struct panvk_instance *instance,                                   \
@@ -83,6 +78,7 @@
 
 PER_ARCH_FUNCS(6);
 PER_ARCH_FUNCS(7);
+PER_ARCH_FUNCS(9);
 PER_ARCH_FUNCS(10);
 PER_ARCH_FUNCS(11);
 PER_ARCH_FUNCS(12);
@@ -447,16 +443,17 @@ init_shader_caches(struct panvk_physical_device *device,
    memcpy(device->cache_uuid, blake3, VK_UUID_SIZE);
 
 #ifdef ENABLE_SHADER_CACHE
+   const uint64_t gpu_id = device->kmod.dev->props.gpu_id;
+
    char renderer[25];
    ASSERTED int len =
-      snprintf(renderer, sizeof(renderer), "panvk_0x%016" PRIx64,
-               device->kmod.dev->props.gpu_id);
+      snprintf(renderer, sizeof(renderer), "panvk_0x%016" PRIx64, gpu_id);
    assert(len == sizeof(renderer) - 1);
 
    char timestamp[BLAKE3_HEX_LEN];
    _mesa_blake3_format(timestamp, instance->driver_build_sha);
 
-   const uint64_t driver_flags = 0;
+   const uint64_t driver_flags = pan_get_compiler_flags(pan_arch(gpu_id));
    device->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
 #endif
 }
@@ -550,6 +547,15 @@ get_device_heaps(struct panvk_physical_device *device,
       };
    }
 
+   assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
+   host_coherent_not_cached_idx = device->memory.type_count;
+   device->memory.types[device->memory.type_count++] = (VkMemoryType){
+      .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      .heapIndex = 0,
+   };
+
    if (!PANVK_DEBUG(NO_WB_MMAP) &&
        (device->kmod.dev->props.supported_bo_flags & PAN_KMOD_BO_FLAG_WB_MMAP)) {
       assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
@@ -562,26 +568,18 @@ get_device_heaps(struct panvk_physical_device *device,
       };
    }
 
-   assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
-   host_coherent_not_cached_idx = device->memory.type_count;
-   device->memory.types[device->memory.type_count++] = (VkMemoryType) {
-      .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      .heapIndex = 0,
-   };
-
    /* Ideally, we'd place HOST_CACHED first for perf reasons, but there's
     * so many broken CTS tests (missing or invalid flush/invalidate
     * calls), and so many added at each version that it gets impossible to
     * catch up. So, keep things ordered in a way that the first HOST_VISIBLE
     * type is also the one requiring no CPU cache maintenance if we're asked
-    * to.
+    * to. The cached_before_coherent debug option is left to help investigate
+    * cpu cache related perf issues.
     */
-   if (PANVK_DEBUG(COHERENT_BEFORE_CACHED) &&
+   if (PANVK_DEBUG(CACHED_BEFORE_COHERENT) &&
        host_cached_not_coherent_idx != -1 &&
        host_coherent_not_cached_idx != -1 &&
-       host_coherent_not_cached_idx > host_cached_not_coherent_idx) {
+       host_coherent_not_cached_idx < host_cached_not_coherent_idx) {
       VkMemoryType host_cached_not_coherent_type =
          device->memory.types[host_cached_not_coherent_idx];
 
@@ -652,8 +650,8 @@ struct kbase_cpu_sync {
    VkResult result;
    void *pending_data;
    panvk_kbase_sync_wait_func pending_wait;
-   panvk_kbase_sync_export_func pending_export;
    uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT];
+   uint64_t target_addrs[PANVK_KBASE_SYNC_TARGET_COUNT];
 };
 
 static VkResult
@@ -675,8 +673,8 @@ kbase_cpu_sync_init(struct vk_device *device, struct vk_sync *sync,
    ks->result = VK_SUCCESS;
    ks->pending_data = NULL;
    ks->pending_wait = NULL;
-   ks->pending_export = NULL;
    memset(ks->targets, 0, sizeof(ks->targets));
+   memset(ks->target_addrs, 0, sizeof(ks->target_addrs));
    return VK_SUCCESS;
 }
 
@@ -702,7 +700,6 @@ kbase_cpu_sync_signal(UNUSED struct vk_device *device, struct vk_sync *sync,
    ks->result = VK_SUCCESS;
    ks->pending_data = NULL;
    ks->pending_wait = NULL;
-   ks->pending_export = NULL;
    u_cnd_monotonic_broadcast(&ks->cond);
    mtx_unlock(&ks->mutex);
    return VK_SUCCESS;
@@ -713,14 +710,13 @@ kbase_cpu_sync_reset(UNUSED struct vk_device *device, struct vk_sync *sync)
 {
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
    mtx_lock(&ks->mutex);
-   kbase_sync_file_waiter_free(ks);
    assert(ks->state != KBASE_CPU_SYNC_WAITING);
    ks->state = KBASE_CPU_SYNC_RESET;
    ks->result = VK_SUCCESS;
    ks->pending_data = NULL;
    ks->pending_wait = NULL;
-   ks->pending_export = NULL;
    memset(ks->targets, 0, sizeof(ks->targets));
+   memset(ks->target_addrs, 0, sizeof(ks->target_addrs));
    mtx_unlock(&ks->mutex);
    return VK_SUCCESS;
 }
@@ -734,8 +730,8 @@ kbase_cpu_sync_wait_many(struct vk_device *device, uint32_t wait_count,
 void
 panvk_kbase_sync_set_pending(
    struct vk_sync *sync, void *data, panvk_kbase_sync_wait_func wait,
-   panvk_kbase_sync_export_func export_sync_file,
-   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT])
+   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
+   const uint64_t target_addrs[PANVK_KBASE_SYNC_TARGET_COUNT])
 {
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
 
@@ -746,11 +742,13 @@ panvk_kbase_sync_set_pending(
     * (e.g. a reused WSI semaphore that was CPU-waited) is legal.  Only an
     * in-progress wait on the old payload would be a genuine bug. */
    assert(ks->state != KBASE_CPU_SYNC_WAITING);
-   kbase_sync_file_waiter_free(ks);
    ks->pending_data = data;
    ks->pending_wait = wait;
-   ks->pending_export = export_sync_file;
    memcpy(ks->targets, targets, sizeof(ks->targets));
+   if (target_addrs)
+      memcpy(ks->target_addrs, target_addrs, sizeof(ks->target_addrs));
+   else
+      memset(ks->target_addrs, 0, sizeof(ks->target_addrs));
    ks->result = VK_SUCCESS;
    ks->state = KBASE_CPU_SYNC_PENDING;
    u_cnd_monotonic_broadcast(&ks->cond);
@@ -788,30 +786,34 @@ panvk_kbase_sync_peek(struct vk_sync *sync, void **data,
    return known;
 }
 
-bool
-panvk_kbase_sync_get_pending_payload(
-   struct vk_sync *sync,
-   struct panvk_kbase_sync_pending_payload *payload)
+int
+panvk_kbase_sync_gpu_wait_targets(
+   struct vk_sync *sync, uint64_t out[PANVK_KBASE_SYNC_TARGET_COUNT])
 {
-   if (!sync || !payload ||
-       sync->type->wait_many != kbase_cpu_sync_wait_many)
-      return false;
+   if (sync->type->wait_many != kbase_cpu_sync_wait_many)
+      return 0;
 
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+   int ret = 0;
 
    mtx_lock(&ks->mutex);
-   bool pending = ks->state == KBASE_CPU_SYNC_PENDING &&
-                  ks->pending_data != NULL &&
-                  ks->pending_wait != NULL;
-   if (pending) {
-      payload->data = ks->pending_data;
-      payload->wait = ks->pending_wait;
-      payload->export_sync_file = ks->pending_export;
-      memcpy(payload->targets, ks->targets, sizeof(payload->targets));
+   if (ks->state == KBASE_CPU_SYNC_SIGNALED) {
+      ret = 1;
+   } else if (ks->state == KBASE_CPU_SYNC_PENDING ||
+              ks->state == KBASE_CPU_SYNC_WAITING) {
+      bool any = false;
+      bool has_addrs = false;
+      for (unsigned i = 0; i < PANVK_KBASE_SYNC_TARGET_COUNT; i++) {
+         any |= ks->targets[i] != 0;
+         has_addrs |= ks->target_addrs[i] != 0;
+      }
+      if (any && !has_addrs) {
+         memcpy(out, ks->targets, sizeof(ks->targets));
+         ret = 2;
+      }
    }
    mtx_unlock(&ks->mutex);
-
-   return pending;
+   return ret;
 }
 
 static VkResult
@@ -850,11 +852,9 @@ kbase_cpu_sync_wait_one(struct vk_device *device, struct kbase_cpu_sync *ks,
 
          mtx_lock(&ks->mutex);
          if (result == VK_SUCCESS) {
-            kbase_sync_file_waiter_free(ks);
             ks->state = KBASE_CPU_SYNC_SIGNALED;
             ks->pending_data = NULL;
             ks->pending_wait = NULL;
-            ks->pending_export = NULL;
          } else if (result == VK_TIMEOUT) {
             ks->state = KBASE_CPU_SYNC_PENDING;
          } else {
@@ -944,21 +944,21 @@ kbase_cpu_sync_move(UNUSED struct vk_device *device, struct vk_sync *dst,
    mtx_lock(&second->mutex);
    assert(ks_src->state != KBASE_CPU_SYNC_WAITING);
    assert(ks_dst->state != KBASE_CPU_SYNC_WAITING);
-   kbase_sync_file_waiter_free(ks_dst);
 
    ks_dst->state = ks_src->state;
    ks_dst->result = ks_src->result;
    ks_dst->pending_data = ks_src->pending_data;
    ks_dst->pending_wait = ks_src->pending_wait;
-   ks_dst->pending_export = ks_src->pending_export;
    memcpy(ks_dst->targets, ks_src->targets, sizeof(ks_dst->targets));
+   memcpy(ks_dst->target_addrs, ks_src->target_addrs,
+          sizeof(ks_dst->target_addrs));
 
    ks_src->state = KBASE_CPU_SYNC_RESET;
    ks_src->result = VK_SUCCESS;
    ks_src->pending_data = NULL;
    ks_src->pending_wait = NULL;
-   ks_src->pending_export = NULL;
    memset(ks_src->targets, 0, sizeof(ks_src->targets));
+   memset(ks_src->target_addrs, 0, sizeof(ks_src->target_addrs));
    u_cnd_monotonic_broadcast(&ks_dst->cond);
    u_cnd_monotonic_broadcast(&ks_src->cond);
    mtx_unlock(&second->mutex);
@@ -1018,83 +1018,105 @@ kbase_sync_file_waiter_free(struct kbase_cpu_sync *ks)
       free(waiter);
       ks->pending_data = NULL;
       ks->pending_wait = NULL;
-      ks->pending_export = NULL;
    }
 }
 
 static VkResult
-kbase_sync_file_export_func(struct vk_device *device, void *data,
-   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT], int *sync_file);
-
-static VkResult
 kbase_cpu_sync_import_sync_file(struct vk_device *device,
-                                struct vk_sync *sync, int sync_file)
+                                struct vk_sync *sync,
+                                int sync_file)
 {
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
-   if (sync_file == -1) return kbase_cpu_sync_signal(device, sync, 0);
-   if (sync_file < -1) return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE, "Invalid sync_file fd: %d", sync_file);
-   int fd = fcntl(sync_file, F_DUPFD_CLOEXEC, 0);
-   if (fd < 0) return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "sync_file duplicate failed: %m");
+
+   if (sync_file < 0) {
+      return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                       "Invalid sync_file fd: %d", sync_file);
+   }
+
+   int fd = dup(sync_file);
+   if (fd < 0)
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "dup() failed: %m");
+
    struct kbase_sync_file_waiter *waiter = malloc(sizeof(*waiter));
-   if (!waiter) { close(fd); return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "sync_file waiter allocation failed"); }
-   waiter->fd = fd; uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
-   panvk_kbase_sync_set_pending(sync, waiter, kbase_sync_file_wait_func, kbase_sync_file_export_func, targets);
+   if (!waiter) {
+      close(fd);
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "allocation failed");
+   }
+   waiter->fd = fd;
+
+   uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
+
+   mtx_lock(&ks->mutex);
+   kbase_sync_file_waiter_free(ks);
+   mtx_unlock(&ks->mutex);
+
+   panvk_kbase_sync_set_pending(sync, waiter, kbase_sync_file_wait_func, targets,
+                                NULL);
+
    return VK_SUCCESS;
 }
 
 static VkResult
-kbase_sync_file_export_func(struct vk_device *device, void *data,
-   UNUSED const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT], int *sync_file)
-{
-   struct kbase_sync_file_waiter *waiter = data;
-   if (!waiter || waiter->fd < 0) return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE, "Invalid imported sync_file payload");
-   int fd = fcntl(waiter->fd, F_DUPFD_CLOEXEC, 0);
-   if (fd < 0) return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "sync_file re-export duplicate failed: %m");
-   *sync_file = fd; return VK_SUCCESS;
-}
-
-static VkResult
-kbase_cpu_sync_export_sync_file(struct vk_device *device, struct vk_sync *sync, int *sync_file)
+kbase_cpu_sync_export_sync_file(struct vk_device *device,
+                                struct vk_sync *sync,
+                                int *sync_file)
 {
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+   struct panvk_device *dev = to_panvk_device(device);
+   uint64_t addrs[PANVK_KBASE_SYNC_TARGET_COUNT];
+   uint64_t vals[PANVK_KBASE_SYNC_TARGET_COUNT];
+   unsigned count = 0;
+   int fd;
+
+   VkResult result =
+      kbase_cpu_sync_wait_one(device, ks, VK_SYNC_WAIT_PENDING, UINT64_MAX);
+   if (result != VK_SUCCESS)
+      return result;
+
    mtx_lock(&ks->mutex);
-   enum kbase_cpu_sync_state state = ks->state;
-   if (state == KBASE_CPU_SYNC_SIGNALED) {
-      mtx_unlock(&ks->mutex);
-#ifdef HAVE_PAN_KMOD_KBASE
-      struct panvk_device *panvk_dev = to_panvk_device(device);
-      struct panvk_physical_device *phys_dev =
-         to_panvk_physical_device(panvk_dev->vk.physical);
-
-      if (phys_dev->kbase_node_path[0] && panvk_dev->kmod.dev) {
-         if (kbase_kmod_csf_export_signaled_sync_file(panvk_dev->kmod.dev,
-                                                      sync_file) == 0)
-            return VK_SUCCESS;
-
-         int err = errno;
-         VkResult result =
-            err == ENOMEM ? VK_ERROR_OUT_OF_HOST_MEMORY :
-            (err == EMFILE || err == ENFILE) ? VK_ERROR_TOO_MANY_OBJECTS :
-                                               VK_ERROR_UNKNOWN;
-         return vk_errorf(device, result,
-                          "Kbase signaled sync_file compatibility export failed: %s",
-                          strerror(err));
+   if (ks->state == KBASE_CPU_SYNC_PENDING ||
+       ks->state == KBASE_CPU_SYNC_WAITING) {
+      if (ks->pending_wait == kbase_sync_file_wait_func) {
+         struct kbase_sync_file_waiter *waiter = ks->pending_data;
+         fd = dup(waiter->fd);
+         mtx_unlock(&ks->mutex);
+         goto out;
       }
-#endif
-      /* Panthor and non-Kbase paths keep the standard optional sentinel. */
-      *sync_file = -1;
-      return VK_SUCCESS;
-   }
-   if (state == KBASE_CPU_SYNC_FAILED) {
-      VkResult result = ks->result; mtx_unlock(&ks->mutex); return result;
-   }
-   if ((state == KBASE_CPU_SYNC_PENDING || state == KBASE_CPU_SYNC_WAITING) && ks->pending_export) {
-      uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT]; memcpy(targets, ks->targets, sizeof(targets));
-      VkResult result = ks->pending_export(device, ks->pending_data, targets, sync_file);
-      mtx_unlock(&ks->mutex); return result;
+      for (unsigned i = 0; i < PANVK_KBASE_SYNC_TARGET_COUNT; i++) {
+         if (!ks->targets[i])
+            continue;
+         if (!ks->target_addrs[i]) {
+            count = UINT32_MAX;
+            break;
+         }
+         addrs[count] = ks->target_addrs[i];
+         vals[count++] = ks->targets[i] - 1;
+      }
    }
    mtx_unlock(&ks->mutex);
-   return vk_errorf(device,VK_ERROR_UNKNOWN,"Kbase fence payload cannot be exported in state %d",state);
+
+   if (count == UINT32_MAX) {
+      result = kbase_cpu_sync_wait_one(device, ks, VK_SYNC_WAIT_COMPLETE,
+                                       UINT64_MAX);
+      if (result != VK_SUCCESS)
+         return result;
+      count = 0;
+   }
+
+   fd = kbase_kmod_csf_export_cqs64_fence(dev->kmod.dev, addrs, vals,
+                                          count);
+
+out:
+   if (fd < 0) {
+      if (errno == EMFILE || errno == ENFILE)
+         return vk_errorf(device, VK_ERROR_TOO_MANY_OBJECTS,
+                          "sync_file export failed: %m");
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                       "sync_file export failed: %m");
+   }
+
+   *sync_file = fd;
+   return VK_SUCCESS;
 }
 
 static const struct vk_sync_type kbase_cpu_sync_type = {
@@ -1129,6 +1151,8 @@ get_device_sync_types_kbase(struct panvk_physical_device *device,
    uint32_t sync_type_count = 0;
 
    device->drm_syncobj_type = kbase_cpu_sync_type;
+   if (pan_arch(device->kmod.dev->props.gpu_id) < 10)
+      device->drm_syncobj_type.export_sync_file = NULL;
 
    /* Binary CPU sync first (fences need a binary type with CPU_RESET),
     * software timeline emulation second (timeline semaphores).  Submitted
@@ -1169,32 +1193,26 @@ panvk_physical_device_finish(struct panvk_physical_device *device)
    vk_physical_device_finish(&device->vk);
 }
 
-/* Resolve the pan_model for a probed device.  GPUs missing from the model
- * table get conservative per-arch defaults instead of being rejected;
- * *unknown_gpu is set so callers can reflect that in the device name. */
-static VkResult
-get_gpu_model(struct panvk_physical_device *device,
-              const struct panvk_instance *instance, bool *unknown_gpu)
+/* Arm ships some GPUs of one product id under several names, picked by the
+ * shader core count (same split as panthor). Keep the "Mali-" prefix, as Arm
+ * does: apps and tests match on it. */
+static const char *
+panvk_marketing_name(const struct pan_model *model, unsigned core_count)
 {
-   const struct pan_kmod_dev_props *props = &device->kmod.dev->props;
-
-   *unknown_gpu = false;
-   device->model = pan_get_model(props->gpu_id, props->gpu_variant);
-   if (device->model)
-      return VK_SUCCESS;
-
-   device->model = pan_get_fallback_model(props->gpu_id);
-   if (!device->model) {
-      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "Unknown gpu_id (%#" PRIx64 ") or variant (%#x)",
-                          props->gpu_id, props->gpu_variant);
+   switch (model->gpu_prod_id) {
+   case PAN_PROD_ID(11, 8, 2):
+      return core_count >= 10 ? "Mali-G715-Immortalis" : model->name;
+   case PAN_PROD_ID(12, 8, 0):
+      return core_count >= 10 ? "Mali-G720-Immortalis"
+             : core_count >= 6 ? model->name
+                               : "Mali-G620";
+   case PAN_PROD_ID(13, 8, 0):
+      return core_count >= 10 ? "Mali-G925-Immortalis"
+             : core_count >= 6 ? model->name
+                               : "Mali-G625";
+   default:
+      return model->name;
    }
-
-   *unknown_gpu = true;
-   mesa_logw("panvk: unknown gpu_id (%#" PRIx64 ") or variant (%#x); "
-             "continuing with conservative \"%s\" defaults — expect issues",
-             props->gpu_id, props->gpu_variant, device->model->name);
-   return VK_SUCCESS;
 }
 
 VkResult
@@ -1203,21 +1221,28 @@ panvk_physical_device_init(struct panvk_physical_device *device,
                            drmDevicePtr drm_device)
 {
    VkResult result;
-   bool unknown_gpu;
 
    result = create_kmod_dev(device, instance, drm_device);
    if (result != VK_SUCCESS)
       return result;
 
+   device->model = pan_get_model(device->kmod.dev->props.gpu_id,
+                                 device->kmod.dev->props.gpu_variant);
+
    unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
 
-   result = get_gpu_model(device, instance, &unknown_gpu);
-   if (result != VK_SUCCESS)
+   if (!device->model) {
+      result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                            "Unknown gpu_id (%#" PRIx64 ") or variant (%#x)",
+                            device->kmod.dev->props.gpu_id,
+                            device->kmod.dev->props.gpu_variant);
       goto fail;
+   }
 
    switch (arch) {
    case 6:
    case 7:
+   case 11:
    case 14:
       if (!os_get_option("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
          result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
@@ -1250,20 +1275,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
       pan_query_core_count(&device->kmod.dev->props);
 
    memset(device->name, 0, sizeof(device->name));
-   if (unknown_gpu)
-      snprintf(device->name, sizeof(device->name),
-               "Mali unknown 0x%" PRIx64 " MC%u",
-               device->kmod.dev->props.gpu_id, core_count);
-   else
-      sprintf(device->name, "%s MC%u", device->model->name, core_count);
-
-   /* Self-report through Winlator Hub's wrapper ICD: without
-    * WRAPPER_DEVICE_NAME it prefixes our device name with "Wrapper(...)".
-    * The env is re-read on every GetPhysicalDeviceProperties() call, and
-    * overwrite=0 keeps a user-configured value winning. */
-   setenv("WRAPPER_DEVICE_NAME", device->name, 0);
-
-   panvk_arch_dispatch(arch, log_texture_compression_summary, device);
+   sprintf(device->name, "%s MC%u",
+           panvk_marketing_name(device->model, core_count), core_count);
 
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
@@ -1346,30 +1359,47 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
    if (result != VK_SUCCESS)
       return result;
 
+   device->model = pan_get_model(device->kmod.dev->props.gpu_id,
+                                 device->kmod.dev->props.gpu_variant);
+
    unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
 
-   bool unknown_gpu;
-   result = get_gpu_model(device, instance, &unknown_gpu);
-   if (result != VK_SUCCESS)
+   /* Release builds drop vk_errorf text without a debug messenger; log the
+    * device facts testers' uploads need straight to the Mesa log. */
+   mesa_logi("panvk: gpu_id %#" PRIx64 " variant %#x arch v%u model %s "
+             "texture_features %#x %#x %#x %#x",
+             device->kmod.dev->props.gpu_id,
+             device->kmod.dev->props.gpu_variant, arch,
+             device->model ? device->model->name : "unknown",
+             device->kmod.dev->props.texture_features[0],
+             device->kmod.dev->props.texture_features[1],
+             device->kmod.dev->props.texture_features[2],
+             device->kmod.dev->props.texture_features[3]);
+
+   if (!device->model) {
+      mesa_loge("panvk: Unknown gpu_id (%#" PRIx64 ") or variant (%#x)",
+                device->kmod.dev->props.gpu_id,
+                device->kmod.dev->props.gpu_variant);
+      result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                            "Unknown gpu_id (%#" PRIx64 ") or variant (%#x)",
+                            device->kmod.dev->props.gpu_id,
+                            device->kmod.dev->props.gpu_variant);
       goto fail_kbase;
+   }
 
    switch (arch) {
    case 6:
    case 7:
-   case 14:
-      if (!os_get_option("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
-         result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                               "WARNING: panvk is not well-tested on v%d, "
-                               "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 "
-                               "if you know what you're doing.", arch);
-         goto fail_kbase;
-      }
+      /* Bifrost over kbase JM (jm-v7 series): experimental, no gate. */
+      mesa_logw("panvk: v%u (Bifrost) support is experimental", arch);
       break;
 
+   case 9: /* Valhall JM over kbase job atoms (jm-v9 series) */
    case 10:
    case 11:
    case 12:
    case 13:
+   case 14:
       break;
 
    default:
@@ -1384,24 +1414,16 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
    device->formats.all = pan_format_table(arch);
    device->formats.blendable = pan_blendable_format_table(arch);
 
+   mesa_logi("panvk: BC emulation %s (mode: astc, native compressed mask %#x)",
+             panvk_bc_emul_enabled(device) ? "on" : "off",
+             pan_query_compressed_formats(&device->kmod.dev->props));
+
    unsigned core_count =
       pan_query_core_count(&device->kmod.dev->props);
 
    memset(device->name, 0, sizeof(device->name));
-   if (unknown_gpu)
-      snprintf(device->name, sizeof(device->name),
-               "Mali unknown 0x%" PRIx64 " MC%u",
-               device->kmod.dev->props.gpu_id, core_count);
-   else
-      sprintf(device->name, "%s MC%u", device->model->name, core_count);
-
-   /* Self-report through Winlator Hub's wrapper ICD: without
-    * WRAPPER_DEVICE_NAME it prefixes our device name with "Wrapper(...)".
-    * The env is re-read on every GetPhysicalDeviceProperties() call, and
-    * overwrite=0 keeps a user-configured value winning. */
-   setenv("WRAPPER_DEVICE_NAME", device->name, 0);
-
-   panvk_arch_dispatch(arch, log_texture_compression_summary, device);
+   sprintf(device->name, "%s MC%u",
+           panvk_marketing_name(device->model, core_count), core_count);
 
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
@@ -1423,18 +1445,23 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
        * lists are typically empty while gigabytes of order-0 pages remain.
        * 1 MiB chunks take the discontiguous small-page path, which only
        * needs order-0 pages; the GPU MMU provides the virtual contiguity.
-       * Chunk counts are doubled to keep the same byte budget. */
-      device->csf.tiler.chunk_size = 1024 * 1024;
-      device->csf.tiler.initial_chunks = 10;
-      /* beta.55: 400 -> 512.  On kbase the heap only grows between renewals
-       * (firmware chunk recycling is suppressed), and DX12-class geometry can
-       * outrun the 400-chunk budget: the firmware OOM then permanently
-       * deschedules the queue group and every subqueue freezes with active=0,
-       * error 0x0 and stream progress 0x0 ("tiler heap OOM notification",
-       * observed 2026-10-05 on MT6985 with winlator + vkd3d-proton).  512 MiB
-       * stays below the multi-GiB territory that can wake Android's global
-       * OOM killer. */
-      device->csf.tiler.max_chunks = 512;
+       * Chunk counts are doubled to keep the same byte budget.
+       *
+       * kbase never recycles chunks for us, so heavy frames regrow the heap
+       * through one firmware/kernel OOM round trip per chunk, which stalls
+       * the tiler (particle scenes ran 6-10x behind the stock driver on
+       * IDVS position-shading waits).  8 MiB chunks cut those round trips
+       * 8x.  kbase serves chunks of 2 MiB or more from its 2 MiB page pool
+       * when it can and falls back to 4 KiB pages otherwise.  The initial
+       * and maximum heap sizes are kept in bytes (about 10 MiB and 400 MiB),
+       * so RAM use does not change with the chunk size.
+       * PANVK_KBASE_TILER_CHUNK_KB=1024 restores the previous layout. */
+      const uint64_t chunk_kb =
+         CLAMP(debug_get_num_option("PANVK_KBASE_TILER_CHUNK_KB", 8192), 256,
+               8192);
+      device->csf.tiler.chunk_size = chunk_kb * 1024;
+      device->csf.tiler.initial_chunks = DIV_ROUND_UP(10 * 1024, chunk_kb);
+      device->csf.tiler.max_chunks = DIV_ROUND_UP(400 * 1024, chunk_kb);
    }
 
    if (arch != 10)
@@ -1577,6 +1604,131 @@ panvk_GetPhysicalDeviceQueueFamilyProperties2(
    }
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL
+panvk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
+   VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount,
+   VkCooperativeMatrixPropertiesKHR *pProperties)
+{
+   VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
+   VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties,
+                          pPropertyCount);
+
+   unsigned arch = pan_arch(physical_device->kmod.dev->props.gpu_id);
+
+   if (arch < 11)
+      return VK_SUCCESS;
+
+   vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+      *p = (VkCooperativeMatrixPropertiesKHR){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+         .MSize = 4,
+         .NSize = 4,
+         .KSize = 4,
+         .AType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .BType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .CType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .saturatingAccumulation = false,
+         .scope = VK_SCOPE_SUBGROUP_KHR,
+      };
+   }
+
+   vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+      *p = (VkCooperativeMatrixPropertiesKHR){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+         .MSize = 16,
+         .NSize = 16,
+         .KSize = 16,
+         .AType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .BType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .CType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .saturatingAccumulation = false,
+         .scope = VK_SCOPE_SUBGROUP_KHR,
+      };
+   }
+
+   vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+      *p = (VkCooperativeMatrixPropertiesKHR){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+         .MSize = 4,
+         .NSize = 8,
+         .KSize = 8,
+         .AType = VK_COMPONENT_TYPE_FLOAT16_KHR,
+         .BType = VK_COMPONENT_TYPE_FLOAT16_KHR,
+         .CType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .saturatingAccumulation = false,
+         .scope = VK_SCOPE_SUBGROUP_KHR,
+      };
+   }
+
+   vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+      *p = (VkCooperativeMatrixPropertiesKHR){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+         .MSize = 16,
+         .NSize = 32,
+         .KSize = 32,
+         .AType = VK_COMPONENT_TYPE_FLOAT16_KHR,
+         .BType = VK_COMPONENT_TYPE_FLOAT16_KHR,
+         .CType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+         .saturatingAccumulation = false,
+         .scope = VK_SCOPE_SUBGROUP_KHR,
+      };
+   }
+
+   vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+      *p = (VkCooperativeMatrixPropertiesKHR){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+         .MSize = 4,
+         .NSize = 16,
+         .KSize = 16,
+         .AType = VK_COMPONENT_TYPE_SINT8_KHR,
+         .BType = VK_COMPONENT_TYPE_SINT8_KHR,
+         .CType = VK_COMPONENT_TYPE_SINT32_KHR,
+         .ResultType = VK_COMPONENT_TYPE_SINT32_KHR,
+         .saturatingAccumulation = false,
+         .scope = VK_SCOPE_SUBGROUP_KHR,
+      };
+   }
+
+   vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+      *p = (VkCooperativeMatrixPropertiesKHR){
+         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+         .MSize = 4,
+         .NSize = 16,
+         .KSize = 16,
+         .AType = VK_COMPONENT_TYPE_UINT8_KHR,
+         .BType = VK_COMPONENT_TYPE_UINT8_KHR,
+         .CType = VK_COMPONENT_TYPE_UINT32_KHR,
+         .ResultType = VK_COMPONENT_TYPE_UINT32_KHR,
+         .saturatingAccumulation = false,
+         .scope = VK_SCOPE_SUBGROUP_KHR,
+      };
+   }
+
+   return vk_outarray_status(&out);
+}
+
+static uint64_t
+panvk_available_system_memory(struct panvk_physical_device *physical_device)
+{
+   uint64_t now = os_time_get_nano();
+   uint64_t last = p_atomic_read(&physical_device->memory.available_ns);
+
+   if (last && now - last < 100000000ull)
+      return p_atomic_read(&physical_device->memory.available);
+
+   uint64_t available;
+   if (!os_get_available_system_memory(&available))
+      return 0;
+
+   p_atomic_set(&physical_device->memory.available, available);
+   p_atomic_set(&physical_device->memory.available_ns, now);
+   return available;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_GetPhysicalDeviceMemoryProperties2(
    VkPhysicalDevice physicalDevice,
@@ -1598,10 +1750,10 @@ panvk_GetPhysicalDeviceMemoryProperties2(
           physical_device->memory.types[i];
    }
 
-   vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct(sType, ext, pMemoryProperties->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
-         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = (void *)ext;
+         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = ext;
 
          uint64_t used = p_atomic_read(&physical_device->memory.heap_used);
          uint64_t heap_size = physical_device->memory.heaps[0].size;
@@ -1616,8 +1768,9 @@ panvk_GetPhysicalDeviceMemoryProperties2(
          p->heapUsage[0] = used;
 
          /* Set the budget at 90% of available to avoid thrashing */
-         p->heapBudget[0] = vk_physical_device_heap_budget_from_system(
-            &physical_device->vk, 0.9f, heap_size, used);
+         p->heapBudget[0] = vk_physical_device_heap_budget(
+            panvk_available_system_memory(physical_device), 0.9f, heap_size,
+            used);
 
          /* From the Vulkan 1.3.278 spec:
           *
@@ -1634,7 +1787,7 @@ panvk_GetPhysicalDeviceMemoryProperties2(
          break;
       }
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1649,18 +1802,8 @@ panvk_CreateDevice(VkPhysicalDevice physicalDevice,
    unsigned arch = pan_arch(physical_device->kmod.dev->props.gpu_id);
    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
 
-   /* PANVK_DBG: temporary diagnostics, remove before release */
-   mesa_logi("panvk: CreateDevice enter (arch %u)", arch);
-
    panvk_arch_dispatch_ret(arch, create_device, result, physical_device,
                            pCreateInfo, pAllocator, pDevice);
-
-   /* PANVK_DBG: temporary diagnostics, remove before release */
-   if (result != VK_SUCCESS)
-      mesa_loge("panvk: CreateDevice failed: %s (%d)",
-                vk_Result_to_str(result), (int)result);
-   else
-      mesa_logi("panvk: CreateDevice success");
 
    return result;
 }
@@ -1720,33 +1863,32 @@ format_is_supported(struct panvk_physical_device *physical_device,
    return true;
 }
 
-/* A BC format needs emulation when the GPU does not report it in the
- * compressed-format bitmap; those formats are decoded on upload while the
- * natively supported ones keep using the hardware sampler. */
 bool
-panvk_bc_format_needs_emul(const struct panvk_physical_device *physical_device,
-                           VkFormat format)
+panvk_bc_emul_enabled(const struct panvk_physical_device *physical_device)
 {
    if (PANVK_DEBUG(NO_BC_EMUL))
       return false;
 
-   if (!panvk_format_is_bc(format))
-      return false;
-
-   const struct pan_format fmt =
-      physical_device->formats.all[vk_format_to_pipe_format(format)];
+   /* Emulate unless every BC format is native. Some v9/v10 kbase GPUs
+    * (G57, G610) report BC1 alone; keying off BC1 disabled emulation there
+    * and left textureCompressionBC false with no usable BC format. */
+   static const enum pipe_format bc_fmts[] = {
+      PIPE_FORMAT_DXT1_RGBA,       PIPE_FORMAT_DXT3_RGBA,
+      PIPE_FORMAT_DXT5_RGBA,       PIPE_FORMAT_RGTC1_UNORM,
+      PIPE_FORMAT_RGTC1_SNORM,     PIPE_FORMAT_RGTC2_UNORM,
+      PIPE_FORMAT_RGTC2_SNORM,     PIPE_FORMAT_BPTC_RGB_FLOAT,
+      PIPE_FORMAT_BPTC_RGB_UFLOAT, PIPE_FORMAT_BPTC_RGBA_UNORM,
+   };
    uint32_t supported_compr_fmts =
       pan_query_compressed_formats(&physical_device->kmod.dev->props);
 
-   return !(BITFIELD_BIT(fmt.texfeat_bit) & supported_compr_fmts);
-}
+   for (unsigned i = 0; i < ARRAY_SIZE(bc_fmts); i++) {
+      const struct pan_format fmt = physical_device->formats.all[bc_fmts[i]];
+      if (!fmt.hw || !(BITFIELD_BIT(fmt.texfeat_bit) & supported_compr_fmts))
+         return true;
+   }
 
-/* Emulation keeps textureCompressionBC honest: every BC format is usable,
- * either natively or through decode-on-upload. */
-bool
-panvk_bc_emul_enabled(const struct panvk_physical_device *physical_device)
-{
-   return !PANVK_DEBUG(NO_BC_EMUL);
+   return false;
 }
 
 static VkFormatFeatureFlags2
@@ -1758,18 +1900,8 @@ get_image_plane_format_features(struct panvk_physical_device *physical_device,
    const struct pan_format fmt = physical_device->formats.all[pfmt];
    unsigned arch = pan_arch(physical_device->kmod.dev->props.gpu_id);
 
-   if (panvk_format_is_bc(format)) {
-      /* Every BC format is usable: natively supported ones sample in
-       * hardware, the rest are decoded on upload (BC emulation). Only with
-       * emulation disabled (PANVK_DEBUG=no_bc_emul) are unsupported formats
-       * reported as such. vkd3d-proton requires
-       * TRANSFER_SRC|TRANSFER_DST|SAMPLED_IMAGE on every BC format it uses
-       * as a castable format, and D3D12 guarantees linear filtering on BC
-       * formats, so both paths report the same feature set. */
-      if (!panvk_bc_format_needs_emul(physical_device, format) &&
-          !format_is_supported(physical_device, fmt, pfmt))
-         return 0;
-
+   /* Without emulation, BC formats take the native per-format path below. */
+   if (panvk_format_is_bc(format) && panvk_bc_emul_enabled(physical_device)) {
       features = VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
                  VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
                  VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
@@ -2007,35 +2139,32 @@ get_buffer_format_features(struct panvk_physical_device *physical_device,
    return features;
 }
 
+static uint32_t
+panvk_get_mod_format_caps(const struct panvk_physical_device *pdev,
+                          enum pipe_format pfmt, uint64_t mod)
+{
+   const unsigned arch = pan_arch(pdev->kmod.dev->props.gpu_id);
+   const struct pan_mod_handler *mod_handler = pan_mod_get_handler(arch, mod);
+   if (!mod_handler)
+      return 0;
+
+   if (drm_is_afbc(mod) && PANVK_DEBUG(WSI_NO_AFBC))
+      return 0;
+
+   return mod_handler->get_format_caps(&pdev->kmod.dev->props, pfmt, mod);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
                                          VkFormat format,
                                          VkFormatProperties2 *pFormatProperties)
 {
    VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
-   const unsigned arch = pan_arch(physical_device->kmod.dev->props.gpu_id);
 
    VkFormatFeatureFlags2 tex =
       get_image_format_features(physical_device, format);
    VkFormatFeatureFlags2 buffer =
       get_buffer_format_features(physical_device, format);
-
-   /* Diagnostic for vkd3d-proton castable-format validation: a plain
-    * sampled D3D12 resource (Flags=0) requires TRANSFER_SRC|TRANSFER_DST|
-    * SAMPLED_IMAGE on the base format and on every castable format.
-    * Log any format we report that cannot satisfy this, so failing
-    * formats show up directly in the log. */
-   {
-      const VkFormatFeatureFlags2 sampled_req =
-         VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
-         VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
-         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
-
-      if ((tex & sampled_req) != sampled_req)
-         mesa_logi("panvk: format %s (vk %d) missing sampled features: 0x%llx",
-                   util_format_name(vk_format_to_pipe_format(format)),
-                   (int)format, (unsigned long long)tex);
-   }
 
    VkFormatFeatureFlags tex_legacy = vk_format_features2_to_features(tex);
    VkFormatFeatureFlags buffer_legacy =
@@ -2058,89 +2187,82 @@ panvk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
    }
 
    const uint32_t plane_count = vk_format_get_plane_count(format);
+   enum pipe_format pfmt = vk_format_to_pipe_format(format);
 
    PAN_SUPPORTED_MODIFIERS(supported);
-   uint64_t afbc_modifiers[ARRAY_SIZE(supported)];
-   uint32_t afbc_modifier_count = 0;
-   if (PANVK_DEBUG(WSI_AFBC) &&
-         pan_afbc_supports_format(arch, vk_format_to_pipe_format(format))) {
-      for (uint32_t mi = 0; mi < ARRAY_SIZE(supported); mi++) {
-         if (drm_is_afbc(supported[mi]))
-            afbc_modifiers[afbc_modifier_count++] = supported[mi];
-      }
-   }
    VkDrmFormatModifierPropertiesListEXT *list = vk_find_struct(
       pFormatProperties->pNext, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
    if (list) {
-      VkFormatFeatureFlags optimal_features =
-         pFormatProperties->formatProperties.optimalTilingFeatures;
-      VkFormatFeatureFlags linear_features =
-         pFormatProperties->formatProperties.linearTilingFeatures;
-
       VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                               list->pDrmFormatModifierProperties,
                               &list->drmFormatModifierCount);
 
-      if (optimal_features) {
-         /* Multi-planar AFBC is not supported. */
-         assert(!afbc_modifier_count || plane_count == 1);
+      if (tex && !optimal_only) {
+         for (uint32_t mi = 0; mi < ARRAY_SIZE(supported); mi++) {
+            uint64_t mod = supported[mi];
+            uint32_t caps =
+               panvk_get_mod_format_caps(physical_device, pfmt, mod);
 
-         for (uint32_t i = 0; i < afbc_modifier_count; i++) {
+            if (!(caps & PAN_MOD_FORMAT_CAP_WSI))
+               continue;
+
+            VkFormatFeatureFlags mod_features =
+               pFormatProperties->formatProperties.optimalTilingFeatures;
+            if (!(caps & PAN_MOD_FORMAT_CAP_DEPTH_STENCIL))
+               mod_features &= ~VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            if (!(caps & PAN_MOD_FORMAT_CAP_STORAGE_IMAGE))
+               mod_features &= ~VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+
             vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
                                        mod_props)
             {
-               mod_props->drmFormatModifier = afbc_modifiers[i];
+               mod_props->drmFormatModifier = mod;
                mod_props->drmFormatModifierPlaneCount = plane_count;
-               mod_props->drmFormatModifierTilingFeatures = optimal_features;
+               mod_props->drmFormatModifierTilingFeatures = mod_features;
             }
          }
       }
 
-      if (linear_features) {
-         vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
-                                    mod_props)
-         {
-            mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
-            mod_props->drmFormatModifierPlaneCount = plane_count;
-            mod_props->drmFormatModifierTilingFeatures = linear_features;
-         }
-      }
    }
    VkDrmFormatModifierPropertiesList2EXT *list2 = vk_find_struct(
       pFormatProperties->pNext, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT);
    if (list2) {
-      VkFormatFeatureFlags2 optimal_features2 = tex;
-      VkFormatFeatureFlags2 linear_features2 = optimal_only ? 0 : tex;
-
       VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierProperties2EXT, out,
                               list2->pDrmFormatModifierProperties,
                               &list2->drmFormatModifierCount);
 
-      if (optimal_features2) {
-         /* Multi-planar AFBC is not supported. */
-         assert(!afbc_modifier_count || plane_count == 1);
+      if (tex && !optimal_only) {
+         for (uint32_t mi = 0; mi < ARRAY_SIZE(supported); mi++) {
+            uint64_t mod = supported[mi];
+            uint32_t caps =
+               panvk_get_mod_format_caps(physical_device, pfmt, mod);
 
-         for (uint32_t i = 0; i < afbc_modifier_count; i++) {
+            if (!(caps & PAN_MOD_FORMAT_CAP_WSI))
+               continue;
+
+            VkFormatFeatureFlags2 mod_features = tex;
+            if (!(caps & PAN_MOD_FORMAT_CAP_DEPTH_STENCIL))
+               mod_features &= ~VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+            if (!(caps & PAN_MOD_FORMAT_CAP_HOST_COPY))
+               mod_features &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
+            if (!(caps & PAN_MOD_FORMAT_CAP_STORAGE_IMAGE)) {
+               mod_features &=
+                  ~(VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+                    VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                    VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
+                    VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT);
+            }
+
             vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out,
                                        mod_props)
             {
-               mod_props->drmFormatModifier = afbc_modifiers[i];
+               mod_props->drmFormatModifier = mod;
                mod_props->drmFormatModifierPlaneCount = plane_count;
-               mod_props->drmFormatModifierTilingFeatures =
-                  optimal_features2;
+               mod_props->drmFormatModifierTilingFeatures = mod_features;
             }
          }
       }
 
-      if (linear_features2) {
-         vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out,
-                                    mod_props)
-         {
-            mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
-            mod_props->drmFormatModifierPlaneCount = plane_count;
-            mod_props->drmFormatModifierTilingFeatures = linear_features2;
-         }
-      }
    }
 
    VkSubpassResolvePerformanceQueryEXT *subpass_resolve_perf = vk_find_struct(
@@ -2225,42 +2347,6 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
          goto unsupported;
    }
 
-   switch (info->tiling) {
-   case VK_IMAGE_TILING_LINEAR:
-   case VK_IMAGE_TILING_OPTIMAL:
-      break;
-   case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: {
-      const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info =
-         vk_find_struct_const(
-            info->pNext, PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
-
-      /* TODO: switch to using a more generic function for checking mod support here
-       * when adding new modifiers, so that this case doesn't become too big. */
-      const bool can_use_afbc =
-         PANVK_DEBUG(WSI_AFBC) &&
-         panvk_image_can_use_afbc(physical_device, info->format, info->usage,
-                                  info->type, info->tiling, 0);
-      const bool supported = (drm_is_afbc(mod_info->drmFormatModifier) && can_use_afbc) ||
-         mod_info->drmFormatModifier == DRM_FORMAT_MOD_LINEAR;
-      if (!supported)
-         goto unsupported;
-
-      /* The only difference between optimal and linear is currently whether
-       * depth/stencil attachments are allowed on depth/stencil formats.
-       * There's no reason to allow importing depth/stencil textures, so just
-       * disallow it and then this annoying edge case goes away.
-       */
-      if (util_format_is_depth_or_stencil(format))
-         goto unsupported;
-      break;
-   }
-   default:
-      /* VK_KHR_maintenance5: Physical-device-level functions can now be called
-       * with any value in the valid range for a type beyond the defined
-       * enumerants [...] */
-      goto unsupported;
-   }
-
    /* For the purposes of these checks, we don't care about all the extra
     * YCbCr features and we just want the intersection of features available
     * to all planes of the given format.
@@ -2280,6 +2366,61 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
 
    if (format_feature_flags == 0)
       goto unsupported;
+
+   switch (info->tiling) {
+   case VK_IMAGE_TILING_LINEAR:
+   case VK_IMAGE_TILING_OPTIMAL:
+      break;
+   case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: {
+      const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info =
+         vk_find_struct_const(
+            info->pNext, PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+      if (!mod_info)
+         goto unsupported;
+
+      uint32_t caps = panvk_get_mod_format_caps(
+         physical_device, format, mod_info->drmFormatModifier);
+      if (!(caps & PAN_MOD_FORMAT_CAP_WSI))
+         goto unsupported;
+
+      /* An AFBC modifier can't honor a request for an uncompressed image. */
+      const VkImageCompressionControlEXT *compr_info =
+         vk_find_struct_const(info->pNext, IMAGE_COMPRESSION_CONTROL_EXT);
+      if (compr_info &&
+          (compr_info->flags & VK_IMAGE_COMPRESSION_DISABLED_EXT) &&
+          drm_is_afbc(mod_info->drmFormatModifier))
+         goto unsupported;
+
+      if (info->type == VK_IMAGE_TYPE_1D && !(caps & PAN_MOD_FORMAT_CAP_DIM_1D))
+         goto unsupported;
+      if (info->type == VK_IMAGE_TYPE_2D && !(caps & PAN_MOD_FORMAT_CAP_DIM_2D))
+         goto unsupported;
+      if (info->type == VK_IMAGE_TYPE_3D && !(caps & PAN_MOD_FORMAT_CAP_DIM_3D))
+         goto unsupported;
+
+      /* Depth/stencil formats are not supported for DRM format modifier tiling. */
+      if (util_format_is_depth_or_stencil(format))
+         goto unsupported;
+
+      if (!(caps & PAN_MOD_FORMAT_CAP_DEPTH_STENCIL))
+         format_feature_flags &= ~VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+      if (!(caps & PAN_MOD_FORMAT_CAP_HOST_COPY))
+         format_feature_flags &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
+      if (!(caps & PAN_MOD_FORMAT_CAP_STORAGE_IMAGE)) {
+         format_feature_flags &=
+            ~(VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+              VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
+              VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT);
+      }
+      break;
+   }
+   default:
+      /* VK_KHR_maintenance5: Physical-device-level functions can now be called
+       * with any value in the valid range for a type beyond the defined
+       * enumerants [...] */
+      goto unsupported;
+   }
 
    if (panvk_format_is_bc(info->format) &&
        (info->tiling != VK_IMAGE_TILING_OPTIMAL ||
@@ -2326,8 +2467,11 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
       goto unsupported;
    }
 
-   if (ycbcr_info)
+   if (ycbcr_info || info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
       maxMipLevels = 1;
+
+   if (info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+      maxArraySize = 1;
 
    if (info->tiling == VK_IMAGE_TILING_OPTIMAL &&
        info->type == VK_IMAGE_TYPE_2D && ycbcr_info == NULL &&
@@ -2463,6 +2607,37 @@ panvk_get_external_image_format_properties(
    return VK_SUCCESS;
 }
 
+/* Whether an image with this configuration may end up AFBC. The queries have
+ * no image, so a true result is only an upper bound: the usage, create flags
+ * and extent checks happen at image creation.
+ */
+static bool
+panvk_physical_device_can_use_afbc(const struct panvk_physical_device *pdev,
+                                   VkFormat format, VkImageType type,
+                                   VkImageTiling tiling,
+                                   VkImageCompressionFlagsEXT compr_flags)
+{
+   enum pipe_format pfmt = vk_format_to_pipe_format(format);
+
+   /* The application asked for an uncompressed image. */
+   if (compr_flags & VK_IMAGE_COMPRESSION_DISABLED_EXT)
+      return false;
+
+   if (PANVK_DEBUG(NO_AFBC) || tiling == VK_IMAGE_TILING_LINEAR ||
+       type == VK_IMAGE_TYPE_1D || !pan_query_afbc(&pdev->kmod.dev->props))
+      return false;
+
+   PAN_SUPPORTED_MODIFIERS(supported);
+   for (unsigned i = 0; i < ARRAY_SIZE(supported); i++) {
+      if (drm_is_afbc(supported[i]) &&
+          pan_image_test_modifier_with_format(&pdev->kmod.dev->props,
+                                              supported[i], pfmt))
+         return true;
+   }
+
+   return false;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 panvk_GetPhysicalDeviceImageFormatProperties2(
    VkPhysicalDevice physicalDevice,
@@ -2470,13 +2645,15 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
    VkImageFormatProperties2 *base_props)
 {
    VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
-   const VkImageStencilUsageCreateInfo *stencil_usage_info = NULL;
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
    const VkPhysicalDeviceImageViewImageFormatInfoEXT *image_view_info = NULL;
+   const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *drm_info = NULL;
+   const VkImageCompressionControlEXT *compr_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
    VkFilterCubicImageViewImageFormatPropertiesEXT *cubic_props = NULL;
    VkFormatFeatureFlags2 format_feature_flags;
    VkHostImageCopyDevicePerformanceQuery *hic_props = NULL;
+   VkImageCompressionPropertiesEXT *compression_props = NULL;
    VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkResult result;
 
@@ -2487,16 +2664,19 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
       return result;
 
    /* Extract input structs */
-   vk_foreach_struct_const(s, base_info->pNext) {
-      switch (s->sType) {
-      case VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO:
-         stencil_usage_info = (const void*)s;
-         break;
+   vk_foreach_struct_const(sType, s, base_info->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
-         external_info = (const void *)s;
+         external_info = s;
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_IMAGE_FORMAT_INFO_EXT:
-         image_view_info = (const void *)s;
+         image_view_info = s;
+         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT:
+         drm_info = s;
+         break;
+      case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT:
+         compr_info = s;
          break;
       default:
          break;
@@ -2504,19 +2684,22 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
    }
 
    /* Extract output structs */
-   vk_foreach_struct(s, base_props->pNext) {
-      switch (s->sType) {
+   vk_foreach_struct(sType, s, base_props->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
-         external_props = (void *)s;
+         external_props = s;
          break;
       case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT:
-         cubic_props = (void *)s;
+         cubic_props = s;
          break;
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY:
-         hic_props = (void *)s;
+         hic_props = s;
+         break;
+      case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT:
+         compression_props = s;
          break;
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
-         ycbcr_props = (void *)s;
+         ycbcr_props = s;
          break;
       default:
          break;
@@ -2571,19 +2754,16 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
       }
    }
 
-   if (hic_props) {
-      VkImageUsageFlags stencil_usage = stencil_usage_info ?
-         stencil_usage_info->stencilUsage : base_info->usage;
+   const VkImageCompressionFlagsEXT compr_flags =
+      compr_info ? compr_info->flags : 0;
 
+   if (hic_props) {
       /* We don't support AFBC for images used for host transfer. So, if an
        * image could have been tiled as AFBC if it weren't for host transfer,
        * report suboptimal access. */
-      VkImageUsageFlags usage = base_info->usage | stencil_usage;
-      usage &= ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT;
-      bool can_use_afbc = panvk_image_can_use_afbc(
-         physical_device, base_info->format, usage, base_info->type,
-         base_info->tiling, base_info->flags);
-      hic_props->optimalDeviceAccess = !can_use_afbc;
+      hic_props->optimalDeviceAccess = !panvk_physical_device_can_use_afbc(
+         physical_device, base_info->format, base_info->type,
+         base_info->tiling, compr_flags);
 
       /* FIXME: we only support host transfer with certain modifiers and for now
        * there's no easy way to know whether the presence of HOST_TRANSFER will
@@ -2594,6 +2774,25 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
        * details.
        */
       hic_props->identicalMemoryLayout = false;
+   }
+
+   if (compression_props) {
+      /* When the application asks about a specific modifier, that modifier
+       * already tells us whether the image is compressed. Otherwise we can
+       * only give the upper bound panvk_physical_device_can_use_afbc()
+       * computes.
+       */
+      bool compressed;
+
+      if (base_info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+         compressed = drm_info && drm_is_afbc(drm_info->drmFormatModifier);
+      } else {
+         compressed = panvk_physical_device_can_use_afbc(
+            physical_device, base_info->format, base_info->type,
+            base_info->tiling, compr_flags);
+      }
+
+      panvk_image_set_compression_props(compression_props, compressed);
    }
 
    const struct vk_format_ycbcr_info *ycbcr_info =

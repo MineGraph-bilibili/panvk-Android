@@ -269,6 +269,10 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    P_IMMD(p, NV9097, SET_RENDER_ENABLE_C, MODE_TRUE);
 
    P_IMMD(p, NV9097, SET_Z_COMPRESSION, ENABLE_TRUE);
+   if (pdev->info.cls_eng3d >= MAXWELL_B) {
+      P_IMMD(p, NVB197, SET_STENCIL_COMPRESSION, ENABLE_TRUE);
+   }
+
    P_MTHD(p, NV9097, SET_COLOR_COMPRESSION(0));
    for (unsigned i = 0; i < 8; i++)
       P_NV9097_SET_COLOR_COMPRESSION(p, i, ENABLE_TRUE);
@@ -1224,7 +1228,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    const size_t zcull_count = 47;
    struct nv_push *p = nvk_cmd_buffer_push(
-      cmd, NVK_MAX_RTS * 12 + 44 + zcull_count
+      cmd, NVK_MAX_RTS * 12 + 46 + zcull_count
    );
 
    P_IMMD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_VIEW_MASK),
@@ -1453,6 +1457,9 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_IMMD(p, NV9097, SET_ZT_LAYER, base_array_layer);
 
       P_IMMD(p, NV9097, SET_Z_COMPRESSION, image->is_compressed);
+      if (nvk_cmd_buffer_3d_cls(cmd) >= MAXWELL_B) {
+         P_IMMD(p, NVB197, SET_STENCIL_COMPRESSION, image->is_compressed);
+      }
 
       if (nvk_cmd_buffer_3d_cls(cmd) >= MAXWELL_B) {
          P_IMMD(p, NVC597, SET_ZT_SPARSE, {

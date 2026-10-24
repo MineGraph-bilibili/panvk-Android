@@ -80,7 +80,7 @@ make_vector_matrix_type(linear_ctx *lin_ctx, uint32_t gl_type,
    t->matrix_columns = matrix_columns;
    t->explicit_stride = explicit_stride;
    t->explicit_alignment = explicit_alignment;
-   t->name_id = (uintptr_t)linear_strdup(lin_ctx, name);
+   t->name_ptr = linear_strdup(lin_ctx, name);
 
    return t;
 }
@@ -94,7 +94,7 @@ fill_struct_type(glsl_type *t, const glsl_struct_field *fields, unsigned num_fie
    t->sampled_type = GLSL_TYPE_VOID;
    t->packed = packed;
    t->length = num_fields;
-   t->name_id = (uintptr_t)name;
+   t->name_ptr = name;
    t->explicit_alignment = explicit_alignment;
    t->fields.structure = fields;
 }
@@ -133,7 +133,7 @@ fill_interface_type(glsl_type *t, const glsl_struct_field *fields, unsigned num_
    t->interface_packing = (unsigned)packing;
    t->interface_row_major = (unsigned)row_major;
    t->length = num_fields;
-   t->name_id = (uintptr_t)name;
+   t->name_ptr = name;
    t->fields.structure = fields;
 }
 
@@ -172,7 +172,7 @@ make_subroutine_type(linear_ctx *lin_ctx, const char *subroutine_name)
    t->sampled_type = GLSL_TYPE_VOID;
    t->vector_elements = 1;
    t->matrix_columns = 1;
-   t->name_id = (uintptr_t)linear_strdup(lin_ctx, subroutine_name);
+   t->name_ptr = linear_strdup(lin_ctx, subroutine_name);
 
    return t;
 }
@@ -359,6 +359,8 @@ glsl_get_base_glsl_type(const glsl_type *t)
       return &glsl_type_builtin_uint64_t;
    case GLSL_TYPE_INT64:
       return &glsl_type_builtin_int64_t;
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
+      return &glsl_type_builtin_yuvCscStandardEXT;
    default:
       return &glsl_type_builtin_error;
    }
@@ -397,6 +399,7 @@ glsl_get_bare_type(const glsl_type *t)
    case GLSL_TYPE_INT:
    case GLSL_TYPE_FLOAT:
    case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
    case GLSL_TYPE_DOUBLE:
    case GLSL_TYPE_UINT64:
    case GLSL_TYPE_INT64:
@@ -550,7 +553,7 @@ make_array_type(linear_ctx *lin_ctx, const glsl_type *element_type, unsigned len
       memcpy(base + array_part, pos, element_part);
    }
 
-   t->name_id = (uintptr_t)n;
+   t->name_ptr = n;
 
    return t;
 }
@@ -675,6 +678,9 @@ glsl_simple_explicit_type(unsigned base_type, unsigned rows, unsigned columns,
          return glsl_u8vec_type(rows);
       case GLSL_TYPE_INT8:
          return glsl_i8vec_type(rows);
+      case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
+         assert(rows == 1);
+         return &glsl_type_builtin_yuvCscStandardEXT;
       default:
          return &glsl_type_builtin_error;
       }
@@ -876,6 +882,11 @@ glsl_sampler_type(enum glsl_sampler_dim dim, bool shadow,
             return &glsl_type_builtin_error;
          else
             return &glsl_type_builtin_samplerExternalOES;
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
+         if (shadow || array)
+            return &glsl_type_builtin_error;
+         else
+            return &glsl_type_builtin_samplerExternal2DY2YEXT;
       case GLSL_SAMPLER_DIM_SUBPASS:
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_error;
@@ -906,6 +917,7 @@ glsl_sampler_type(enum glsl_sampler_dim dim, bool shadow,
       case GLSL_SAMPLER_DIM_MS:
          return (array ? &glsl_type_builtin_isampler2DMSArray : &glsl_type_builtin_isampler2DMS);
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       case GLSL_SAMPLER_DIM_SUBPASS:
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
@@ -937,7 +949,39 @@ glsl_sampler_type(enum glsl_sampler_dim dim, bool shadow,
       case GLSL_SAMPLER_DIM_MS:
          return (array ? &glsl_type_builtin_usampler2DMSArray : &glsl_type_builtin_usampler2DMS);
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
+      case GLSL_SAMPLER_DIM_SUBPASS:
+      case GLSL_SAMPLER_DIM_SUBPASS_MS:
+         return &glsl_type_builtin_error;
+      }
+      break;
+   case GLSL_TYPE_UINT16:
+      if (shadow)
+         return &glsl_type_builtin_error;
+      switch (dim) {
+      case GLSL_SAMPLER_DIM_1D:
+         return (array ? &glsl_type_builtin_u16sampler1DArray : &glsl_type_builtin_u16sampler1D);
+      case GLSL_SAMPLER_DIM_2D:
+         return (array ? &glsl_type_builtin_u16sampler2DArray : &glsl_type_builtin_u16sampler2D);
+      case GLSL_SAMPLER_DIM_3D:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16sampler3D;
+      case GLSL_SAMPLER_DIM_CUBE:
+         return (array ? &glsl_type_builtin_u16samplerCubeArray : &glsl_type_builtin_u16samplerCube);
+      case GLSL_SAMPLER_DIM_RECT:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16sampler2DRect;
+      case GLSL_SAMPLER_DIM_BUF:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16samplerBuffer;
+      case GLSL_SAMPLER_DIM_MS:
+         return (array ? &glsl_type_builtin_u16sampler2DMSArray : &glsl_type_builtin_u16sampler2DMS);
+      case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
       case GLSL_SAMPLER_DIM_SUBPASS:
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_error;
@@ -999,6 +1043,8 @@ glsl_texture_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type typ
             return &glsl_type_builtin_error;
          else
             return &glsl_type_builtin_textureExternalOES;
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
+         return &glsl_type_builtin_error;
       }
       break;
    case GLSL_TYPE_INT:
@@ -1028,6 +1074,7 @@ glsl_texture_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type typ
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_itextureSubpassInputMS;
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       }
       break;
@@ -1058,6 +1105,7 @@ glsl_texture_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type typ
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_utextureSubpassInputMS;
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       }
       break;
@@ -1114,6 +1162,7 @@ glsl_image_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type type)
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_subpassInputMS;
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       }
       break;
@@ -1144,6 +1193,7 @@ glsl_image_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type type)
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_isubpassInputMS;
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       }
       break;
@@ -1174,6 +1224,36 @@ glsl_image_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type type)
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_usubpassInputMS;
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
+         return &glsl_type_builtin_error;
+      }
+      break;
+   case GLSL_TYPE_UINT16:
+      switch (dim) {
+      case GLSL_SAMPLER_DIM_1D:
+         return (array ? &glsl_type_builtin_u16image1DArray : &glsl_type_builtin_u16image1D);
+      case GLSL_SAMPLER_DIM_2D:
+         return (array ? &glsl_type_builtin_u16image2DArray : &glsl_type_builtin_u16image2D);
+      case GLSL_SAMPLER_DIM_3D:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16image3D;
+      case GLSL_SAMPLER_DIM_CUBE:
+         return (array ? &glsl_type_builtin_u16imageCubeArray : &glsl_type_builtin_u16imageCube);
+      case GLSL_SAMPLER_DIM_RECT:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16image2DRect;
+      case GLSL_SAMPLER_DIM_BUF:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16imageBuffer;
+      case GLSL_SAMPLER_DIM_MS:
+         return (array ? &glsl_type_builtin_u16image2DMSArray : &glsl_type_builtin_u16image2DMS);
+      case GLSL_SAMPLER_DIM_SUBPASS:
+      case GLSL_SAMPLER_DIM_SUBPASS_MS:
+      case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       }
       break;
@@ -1202,6 +1282,7 @@ glsl_image_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type type)
       case GLSL_SAMPLER_DIM_SUBPASS:
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       }
       break;
@@ -1230,6 +1311,7 @@ glsl_image_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type type)
       case GLSL_SAMPLER_DIM_SUBPASS:
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
       case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;
       }
       break;
@@ -1321,7 +1403,7 @@ make_cmat_type(linear_ctx *lin_ctx, const struct glsl_cmat_description desc)
    t->cmat_desc = desc;
 
    const glsl_type *element_type = glsl_simple_type(desc.element_type, 1, 1);
-   t->name_id = (uintptr_t ) linear_asprintf(lin_ctx, "coopmat<%s, %s, %u, %u, %s>",
+   t->name_ptr = linear_asprintf(lin_ctx, "coopmat<%s, %s, %u, %u, %s>",
                                              glsl_get_type_name(element_type),
                                              mesa_scope_name((mesa_scope)desc.scope),
                                              desc.rows, desc.cols,
@@ -1763,6 +1845,7 @@ glsl_get_component_slots(const glsl_type *t)
    case GLSL_TYPE_FLOAT_E4M3FN:
    case GLSL_TYPE_FLOAT_E5M2:
    case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       return glsl_get_components(t);
 
    case GLSL_TYPE_DOUBLE:
@@ -1818,6 +1901,7 @@ glsl_get_component_slots_aligned(const glsl_type *t, unsigned offset)
    case GLSL_TYPE_FLOAT_E4M3FN:
    case GLSL_TYPE_FLOAT_E5M2:
    case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       return glsl_get_components(t);
 
    case GLSL_TYPE_DOUBLE:
@@ -2907,6 +2991,7 @@ glsl_count_vec4_slots(const glsl_type *t, bool is_gl_vertex_input, bool is_bindl
    case GLSL_TYPE_FLOAT_E4M3FN:
    case GLSL_TYPE_FLOAT_E5M2:
    case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       return t->matrix_columns;
    case GLSL_TYPE_DOUBLE:
    case GLSL_TYPE_UINT64:
@@ -2965,6 +3050,7 @@ glsl_count_dword_slots(const glsl_type *t, bool is_bindless)
    case GLSL_TYPE_INT:
    case GLSL_TYPE_FLOAT:
    case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       return glsl_get_components(t);
    case GLSL_TYPE_UINT16:
    case GLSL_TYPE_INT16:
@@ -3120,6 +3206,7 @@ encode_type_to_blob(struct blob *blob, const glsl_type *type)
    case GLSL_TYPE_UINT64:
    case GLSL_TYPE_INT64:
    case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       encoded.basic.interface_row_major = type->interface_row_major;
       assert(type->matrix_columns < 8);
       if (type->vector_elements <= 5)
@@ -3237,7 +3324,8 @@ decode_type_from_blob(struct blob_reader *blob)
    case GLSL_TYPE_INT16:
    case GLSL_TYPE_UINT64:
    case GLSL_TYPE_INT64:
-   case GLSL_TYPE_BOOL: {
+   case GLSL_TYPE_BOOL:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT: {
       unsigned explicit_stride = encoded.basic.explicit_stride;
       if (explicit_stride == 0xffff)
          explicit_stride = blob_read_uint32(blob);
@@ -3393,7 +3481,7 @@ glsl_get_type_name(const glsl_type *type)
    if (type->has_builtin_name) {
       return &glsl_type_builtin_names[type->name_id];
    } else {
-      return (const char *) type->name_id;
+      return type->name_ptr;
    }
 }
 
@@ -3416,6 +3504,7 @@ glsl_get_sampler_dim_coordinate_components(enum glsl_sampler_dim dim)
    case GLSL_SAMPLER_DIM_RECT:
    case GLSL_SAMPLER_DIM_MS:
    case GLSL_SAMPLER_DIM_EXTERNAL:
+   case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
    case GLSL_SAMPLER_DIM_SUBPASS:
    case GLSL_SAMPLER_DIM_SUBPASS_MS:
       return 2;
@@ -3773,6 +3862,11 @@ glsl_get_natural_size_align_bytes(const glsl_type *type,
       *align = N;
       break;
    }
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT: {
+      *size = 4 * glsl_get_components(type);
+      *align = 4;
+      break;
+   }
 
    case GLSL_TYPE_ARRAY:
    case GLSL_TYPE_INTERFACE:
@@ -3835,6 +3929,11 @@ glsl_get_word_size_align_bytes(const glsl_type *type,
       *align = N;
       break;
    }
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT: {
+      *size = 4 * glsl_get_components(type);
+      *align = 4;
+      break;
+   }
 
    case GLSL_TYPE_ARRAY:
    case GLSL_TYPE_INTERFACE:
@@ -3894,6 +3993,11 @@ glsl_get_vec4_size_align_bytes(const glsl_type *type,
    case GLSL_TYPE_INT64: {
       unsigned N = glsl_get_bit_size(type) / 8;
       *size = 16 * (type->matrix_columns - 1) + N * type->vector_elements;
+      *align = 16;
+      break;
+   }
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT: {
+      *size = 16 * (type->matrix_columns - 1) + 4 * type->vector_elements;
       *align = 16;
       break;
    }

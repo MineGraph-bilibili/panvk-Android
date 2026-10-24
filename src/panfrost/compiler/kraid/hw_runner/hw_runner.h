@@ -13,6 +13,12 @@
 struct hw_runner_shader_args {
    uint64_t data_addr;
    uint32_t data_stride;
+   uint32_t _pad;
+};
+
+struct hw_runner_buffer_descr {
+   uint64_t device_ptr;
+   uint32_t size_B;
 };
 
 /* All data required to run a compute shader, every pointer is a read-only
@@ -20,15 +26,12 @@ struct hw_runner_shader_args {
  * for execution and copied back when the shader has run (read-write).
  */
 struct hw_runner_invocation_info {
-   /* These BO pointers might be null, if they are the function will exit early
-    * and only write the layout information so that the caller can allocate
-    * buffer objects and call back.
+   /* This BO pointer might be null, if so the function will exit early and only
+    * write the layout information so that the caller can allocate buffer object
+    * and call back.
     */
    void *descr_bo_host_ptr;
    uint64_t descr_bo_device_ptr;
-
-   void *data_bo_host_ptr;
-   uint64_t data_bo_device_ptr;
 
    void *code_ptr;
    uint64_t code_size_B;
@@ -38,9 +41,11 @@ struct hw_runner_invocation_info {
    /* Offset of hw_runner_shader_args in fau */
    uint64_t args_fau_offset;
 
-   void *data_ptr;
-   uint64_t data_size_B;
-   uint32_t data_stride_B;
+   /* Simple Buffers (for DescriptorBuffers) */
+   struct hw_runner_buffer_descr *simple_buffers;
+   uint32_t simple_buffer_count;
+
+   struct hw_runner_shader_args shader_args;
 
    uint8_t register_count;
    uint64_t register_preload;

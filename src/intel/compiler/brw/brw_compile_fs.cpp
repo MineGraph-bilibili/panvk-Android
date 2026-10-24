@@ -17,115 +17,6 @@
 
 #include <memory>
 
-static brw_fb_write_inst *
-brw_emit_single_fb_write(brw_shader &s, const brw_builder &bld,
-                         brw_reg color0, brw_reg color1,
-                         brw_reg src0_alpha,
-                         unsigned target, unsigned components,
-                         bool null_rt)
-{
-   assert(s.stage == MESA_SHADER_FRAGMENT);
-   struct brw_fs_prog_data *prog_data = brw_fs_prog_data(s.prog_data);
-
-   brw_reg sources[FB_WRITE_LOGICAL_NUM_SRCS];
-   sources[FB_WRITE_LOGICAL_SRC_COLOR0]     = color0;
-   sources[FB_WRITE_LOGICAL_SRC_COLOR1]     = color1;
-   sources[FB_WRITE_LOGICAL_SRC_SRC0_ALPHA] = src0_alpha;
-
-   if (prog_data->uses_omask)
-      sources[FB_WRITE_LOGICAL_SRC_OMASK] = s.sample_mask;
-   if (s.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
-      sources[FB_WRITE_LOGICAL_SRC_SRC_DEPTH] = s.frag_depth;
-   if (s.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
-      sources[FB_WRITE_LOGICAL_SRC_SRC_STENCIL] = s.frag_stencil;
-
-   brw_fb_write_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
-                                       sources, ARRAY_SIZE(sources))->as_fb_write();
-   write->target     = target;
-   write->components = components;
-   write->null_rt    = null_rt;
-   write->last_rt    = false;
-
-   if (prog_data->uses_kill) {
-      write->predicate = BRW_PREDICATE_NORMAL;
-      write->flag_subreg = sample_mask_flag_subreg(s);
-   }
-
-   return write;
-}
-
-static void
-brw_emit_fb_writes(brw_shader &s)
-{
-   assert(s.stage == MESA_SHADER_FRAGMENT);
-   brw_fs_prog_key *key = (brw_fs_prog_key*) s.key;
-   const brw_builder bld = brw_builder(&s);
-
-   /* ANV doesn't know about sample mask output during the wm key creation
-    * so we compute if we need replicate alpha and emit alpha to coverage
-    * workaround here.
-    */
-   const bool replicate_alpha = key->alpha_test_replicate_alpha ||
-      (key->nr_color_regions > 1 && key->alpha_to_coverage &&
-       s.sample_mask.file == BAD_FILE);
-
-   brw_fb_write_inst *write = NULL;
-   for (int target = 0; target < key->nr_color_regions; target++) {
-      /* Skip over outputs that weren't written, unless dual source
-       * blending is at play. The results may be undefined depending
-       * on the blending settings, but that's what the user signed
-       * up for.
-       */
-      if (s.outputs[target].file == BAD_FILE && s.dual_src_output.file == BAD_FILE)
-         continue;
-
-      const brw_builder abld = bld.annotate(
-         ralloc_asprintf(s.mem_ctx, "FB write target %d", target));
-
-      brw_reg src0_alpha;
-      if (replicate_alpha && target != 0)
-         src0_alpha = offset(s.outputs[0], bld, 3);
-
-      write = brw_emit_single_fb_write(s, abld, s.outputs[target],
-                                       s.dual_src_output, src0_alpha,
-                                       target, 4, false);
-   }
-
-   if (write) {
-      write->last_rt = true;
-      write->eot = true;
-   }
-
-   if (write == NULL) {
-      struct brw_fs_prog_data *prog_data = brw_fs_prog_data(s.prog_data);
-      /* Enable null_rt if the shader doesn't write any relevant output.
-       */
-      const bool use_null_rt =
-         prog_data->alpha_to_coverage == INTEL_NEVER &&
-         !prog_data->uses_omask &&
-         (s.nir->info.outputs_written &
-          (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
-           BITFIELD64_BIT(FRAG_RESULT_STENCIL))) == 0;
-
-      /* Even if there's no color buffers enabled, we still need to send alpha
-       * out the pipeline to our null renderbuffer to support alpha-testing,
-       * alpha-to-coverage, and so on.
-       */
-      /* FINISHME: Factor out this frequently recurring pattern into a
-       * helper function.
-       */
-      const brw_reg srcs[] = { reg_undef, reg_undef,
-                               reg_undef, offset(s.outputs[0], bld, 3) };
-      const brw_reg tmp = bld.vgrf(BRW_TYPE_UD, 4);
-      bld.LOAD_PAYLOAD(tmp, srcs, 4, 0);
-
-      write = brw_emit_single_fb_write(s, bld, tmp, reg_undef, reg_undef,
-                                      0, 4, use_null_rt);
-      write->last_rt = true;
-      write->eot = true;
-   }
-}
-
 /** Emits the interpolation for the varying inputs. */
 static void
 brw_emit_interpolation_setup(brw_shader &s)
@@ -378,6 +269,7 @@ brw_emit_interpolation_setup(brw_shader &s)
 static void
 brw_emit_repclear_shader(brw_shader &s)
 {
+   assert(!s.key->use_efficient_64bit);
    brw_fs_prog_key *key = (brw_fs_prog_key*) s.key;
    brw_send_inst *write = NULL;
 
@@ -693,6 +585,15 @@ computed_depth_mode(const nir_shader *shader)
    return BRW_PSCDEPTH_OFF;
 }
 
+static enum intel_sometimes
+alpha_to_coverage_enabled(nir_shader *shader, enum intel_sometimes alpha_to_coverage)
+{
+   return (shader->info.outputs_written &
+           (BITFIELD64_BIT(FRAG_RESULT_COLOR) |
+            BITFIELD64_BIT(FRAG_RESULT_DATA0))) != 0 ?
+      alpha_to_coverage : INTEL_NEVER;
+}
+
 static void
 brw_nir_populate_fs_prog_data(nir_shader *shader,
                               const struct intel_device_info *devinfo,
@@ -759,11 +660,7 @@ brw_nir_populate_fs_prog_data(nir_shader *shader,
 
    /* Gate alpha to coverage with the draw buffer 0 being written.
     */
-   prog_data->alpha_to_coverage =
-      (shader->info.outputs_written &
-       (BITFIELD64_BIT(FRAG_RESULT_COLOR) |
-        BITFIELD64_BIT(FRAG_RESULT_DATA0))) != 0 ?
-      key->alpha_to_coverage : INTEL_NEVER;
+   prog_data->alpha_to_coverage = alpha_to_coverage_enabled(shader, key->alpha_to_coverage);
 
    assert(devinfo->verx10 >= 125 || key->mesh_input == INTEL_NEVER);
 
@@ -882,6 +779,8 @@ brw_nir_populate_fs_prog_data(nir_shader *shader,
    calculate_urb_setup(devinfo, key, prog_data, shader, prev_stage_vue_map,
                        mue_map, per_primitive_offsets);
    brw_compute_flat_inputs(prog_data, shader);
+
+   prog_data->prefer_simd32 = key->prefer_simd32;
 }
 
 /* From the SKL PRM, Volume 16, Workarounds:
@@ -1186,10 +1085,6 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
       if (s.failed)
 	 return false;
 
-      brw_emit_fb_writes(s);
-      if (s.failed)
-	 return false;
-
       brw_calculate_cfg(s);
 
       brw_optimize(s);
@@ -1338,7 +1233,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
    const bool debug_enabled =
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_WM,
-                                   params->base.source_hash);
+                                   prog_data->base.source_hash);
 
    brw_prog_data_init(&prog_data->base, &params->base);
 
@@ -1390,6 +1285,25 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
    brw_nir_cleanup_pre_fs_prog_data(pt);
 
+   /* From the SKL PRM, Volume 7, "Alpha Coverage":
+    *  "If Pixel Shader outputs oMask, AlphaToCoverage is disabled in
+    *   hardware, regardless of the state setting for this feature."
+    */
+   if (alpha_to_coverage_enabled(nir, key->alpha_to_coverage) != INTEL_NEVER)
+      BRW_NIR_PASS(brw_nir_lower_alpha_to_coverage);
+
+   /* We need to do this before populate_fs_prog_data because this might
+    * disable sample_mask writes.
+    */
+   BRW_NIR_PASS(intel_nir_lower_fragment_outputs,
+                key->nr_color_regions,
+                key->alpha_test_replicate_alpha ||
+                (key->nr_color_regions > 1 &&
+                 alpha_to_coverage_enabled(nir, key->alpha_to_coverage) &&
+                 !(nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))),
+                params->rt_write_cb,
+                params->rt_write_data);
+
    int per_primitive_offsets[VARYING_SLOT_MAX];
    memset(per_primitive_offsets, -1, sizeof(per_primitive_offsets));
 
@@ -1397,18 +1311,6 @@ brw_compile_fs(const struct brw_compiler *compiler,
                                  params->vue_map, params->mue_map,
                                  per_primitive_offsets);
 
-   /* From the SKL PRM, Volume 7, "Alpha Coverage":
-    *  "If Pixel Shader outputs oMask, AlphaToCoverage is disabled in
-    *   hardware, regardless of the state setting for this feature."
-    */
-   if (prog_data->alpha_to_coverage != INTEL_NEVER) {
-      /* Run constant fold optimization in order to get the correct source
-       * offset to determine render target 0 store instruction in
-       * emit_alpha_to_coverage pass.
-       */
-      BRW_NIR_PASS(nir_opt_constant_folding);
-      BRW_NIR_PASS(brw_nir_lower_alpha_to_coverage);
-   }
 
    if (prog_data->coarse_pixel_dispatch)
       BRW_NIR_PASS(brw_nir_lower_frag_coord_z, devinfo);

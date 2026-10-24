@@ -49,21 +49,13 @@ if with_gallium_zink
   renderonly_drivers_c_args += '-DGALLIUM_ZINK'
 endif
 
-pipe_loader_inc_dirs = [
-  inc_util, inc_loader, inc_gallium, inc_include, inc_src, inc_gallium_aux,
-  inc_gallium_winsys, inc_gallium_drivers,
-]
-
-# pan_kmod.h (included by pipe_loader_drm.c when kbase is enabled) includes
-# pan_trace.h which lives in src/panfrost/lib, so inc_panfrost is required.
-if panfrost_kmds.contains('kbase')
-  pipe_loader_inc_dirs += inc_panfrost
-endif
-
 libpipe_loader_static = static_library(
   'pipe_loader_static',
   files_pipe_loader,
-  include_directories : pipe_loader_inc_dirs,
+  include_directories : [
+    inc_util, inc_loader, inc_gallium, inc_include, inc_src, inc_gallium_aux,
+    inc_gallium_winsys, inc_gallium_drivers,
+  ],
   c_args : [libpipe_loader_defines, renderonly_drivers_c_args],
   gnu_symbol_visibility : 'hidden',
   link_with : [libpipe_loader_links],

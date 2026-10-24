@@ -50,6 +50,9 @@ struct kk_image {
     */
    bool disjoint;
 
+   /* Forces alpha value to be one when creating views. Needed for WSI */
+   bool wsi_opaque_alpha;
+
    uint8_t plane_count;
    struct kk_image_plane planes[3];
 };
@@ -134,5 +137,7 @@ kk_image_memory_aspects_to_plane(ASSERTED const struct kk_image *image,
 mtl_texture *kk_image_plane_create_texture(struct kk_image_plane *plane,
                                            struct kk_image_layout *layout,
                                            uint64_t offset_B);
+
+void kk_image_set_label(struct kk_image *image, const char *label);
 
 #endif

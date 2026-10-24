@@ -1,3 +1,9 @@
+// Copyright © 2026 Collabora, Ltd.
+// SPDX-License-Identifier: MIT
+
+// This is primarily used by tests so some of it is dead
+#![allow(dead_code)]
+
 use std::iter;
 
 use compiler::float16::F16;

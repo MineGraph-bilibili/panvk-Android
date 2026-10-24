@@ -1350,8 +1350,7 @@ radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, n
                nir_store_deref(b, args->vars.iteration_instance_count, iteration_instance_count, 0x1);
             }
 
-            nir_def *next_node = nir_iand_imm(b, nir_channel(b, result, 7), 0xff);
-            nir_push_if(b, nir_ieq_imm(b, next_node, 0xff));
+            nir_push_if(b, nir_ieq_imm(b, nir_channel(b, result, 7), 0xffffffff));
             {
                nir_store_deref(b, args->vars.origin, args->origin, 7);
                nir_store_deref(b, args->vars.dir, args->dir, 7);
@@ -1383,12 +1382,12 @@ radv_build_ray_traversal_gfx12(const struct radv_compiler_info *compiler_info, n
                   for (unsigned i = 0; i < 6; ++i)
                      comps[i] = nir_channel(b, result, i);
                   comps[6] = nir_imm_int(b, RADV_BVH_STACK_SKIP_0_TO_7);
-                  comps[7] = next_node;
+                  comps[7] = nir_imm_int(b, RADV_BVH_ROOT_NODE);
                   nir_store_var(b, intrinsic_result, nir_vec(b, comps, 8), 0xff);
                } else {
-                  nir_store_deref(b, args->vars.current_node, next_node, 0x1);
+                  nir_store_deref(b, args->vars.current_node, nir_imm_int(b, RADV_BVH_ROOT_NODE), 0x1);
                }
-               nir_store_deref(b, args->vars.instance_bottom_node, next_node, 1);
+               nir_store_deref(b, args->vars.instance_bottom_node, nir_imm_int(b, RADV_BVH_ROOT_NODE), 1);
                nir_store_deref(b, args->vars.instance_top_node, bvh_node, 1);
             }
             nir_pop_if(b, NULL);

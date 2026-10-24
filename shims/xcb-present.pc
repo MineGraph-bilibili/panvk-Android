@@ -1,5 +1,0 @@
-Name: xcb-present
-Description: xcb-present
-Version: 1.15
-Libs: -lxcb-present
-Cflags:

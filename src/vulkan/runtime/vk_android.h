@@ -120,6 +120,8 @@ VkResult vk_android_get_ahb_layout(
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes);
 
+void vk_android_set_owned_ahb(const struct AHardwareBuffer *ahb);
+
 VkResult vk_android_get_ahb_image_properties(
    VkPhysicalDevice pdev_handle,
    const VkPhysicalDeviceImageFormatInfo2 *info,
@@ -132,6 +134,10 @@ void vk_android_get_ahb_buffer_properties(
 
 bool vk_android_rp_attachment_has_external_format(
    const VkAttachmentDescription2 *desc);
+
+VkResult vk_common_GetAndroidHardwareBufferPropertiesANDROID(
+   VkDevice device_h, const struct AHardwareBuffer *buffer,
+   VkAndroidHardwareBufferPropertiesANDROID *pProperties);
 
 #else /* defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 26 */
 
@@ -173,6 +179,11 @@ vk_android_get_ahb_layout(
    VkSubresourceLayout *out_layouts, int max_planes)
 {
    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+static inline void
+vk_android_set_owned_ahb(const struct AHardwareBuffer *ahb)
+{
 }
 
 static inline VkResult

@@ -22,6 +22,8 @@
 
 #include "drm-uapi/msm_drm.h"
 
+#include "msm_common.h"
+
 struct msm_device {
    struct fd_device base;
 };
@@ -166,23 +168,6 @@ msm_dump_rd(struct fd_pipe *pipe, struct drm_msm_gem_submit *req)
    }
 
    fd_rd_output_end(rd);
-}
-
-static inline void
-get_abs_timeout(struct drm_msm_timespec *tv, uint64_t ns)
-{
-   struct timespec t;
-
-   if (ns == OS_TIMEOUT_INFINITE)
-      ns = 3600ULL * NSEC_PER_SEC; /* 1 hour timeout is almost infinite */
-
-   clock_gettime(CLOCK_MONOTONIC, &t);
-   tv->tv_sec = t.tv_sec + ns / NSEC_PER_SEC;
-   tv->tv_nsec = t.tv_nsec + ns % NSEC_PER_SEC;
-   if (tv->tv_nsec >= NSEC_PER_SEC) { /* handle nsec overflow */
-      tv->tv_nsec -= NSEC_PER_SEC;
-      tv->tv_sec++;
-   }
 }
 
 #endif /* MSM_PRIV_H_ */

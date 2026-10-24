@@ -5,10 +5,10 @@
 
 #include "vn_sync.h"
 
-#include "venus-protocol/vn_protocol_driver_event.h"
-#include "venus-protocol/vn_protocol_driver_fence.h"
-#include "venus-protocol/vn_protocol_driver_semaphore.h"
-#include "venus-protocol/vn_protocol_driver_transport.h"
+#include "vn_protocol_driver_event.h"
+#include "vn_protocol_driver_fence.h"
+#include "vn_protocol_driver_semaphore.h"
+#include "vn_protocol_driver_transport.h"
 
 #include "vn_device.h"
 #include "vn_physical_device.h"

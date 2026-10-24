@@ -377,7 +377,7 @@ private:
       switch (inst->opcode) {
       case GEN_OP_MATH: {
          text(".");
-         text(gen_math_function_to_string(inst->math.func));
+         text(gen_math_function_to_string(devinfo, inst->math.func));
          break;
       }
 
@@ -463,7 +463,7 @@ private:
          field_sep(DST_COLUMN);
          if (has_dst) {
             print_send_reg(inst->dst, false,
-                           translated_send_as_opcode ? gen_inst_send_dst_len(inst) : -1);
+                           translated_send_as_opcode ? gen_inst_send_dst_len(devinfo, inst) : -1);
          }
 
          field_sep(SEND_SRC0_COLUMN);
@@ -500,13 +500,17 @@ private:
          }
 
          field_sep(SEND_EX_DESC_COLUMN);
-         print_send_ex_desc();
+         if (inst->opcode == GEN_OP_SENDG) {
+            hex_pad0_64(inst->send.combined_desc);
+         } else {
+            print_send_ex_desc();
 
-         field_sep(SEND_DESC_COLUMN);
-         if (inst->send.desc_is_reg)
-            text("a0.0");
-         else
-            hex_pad0(inst->send.desc_imm);
+            field_sep(SEND_DESC_COLUMN);
+            if (inst->send.desc_is_reg)
+               text("a0.0");
+            else
+               hex_pad0(inst->send.desc_imm);
+         }
          break;
       }
 
@@ -944,6 +948,9 @@ private:
    void
    print_send_lengths()
    {
+      if (inst->opcode == GEN_OP_SENDG)
+         return;
+
       const gen_message_desc msg =
          gen_message_desc_decode(devinfo, inst->send.desc_imm);
       const bool header = msg.header_present &&
@@ -1005,6 +1012,12 @@ private:
    }
 
    void
+   hex_pad0_64(uint64_t n)
+   {
+      column += fprintf(fp, "0x%016" PRIx64, n);
+   }
+
+   void
    text(const char *s)
    {
       s = s ? s : "UNKNOWN";
@@ -1058,16 +1071,7 @@ private:
    bool
    is_lsc_translated_sfid(gen_sfid sfid) const
    {
-      switch (sfid) {
-      case GEN_SFID_SLM:
-      case GEN_SFID_TGM:
-      case GEN_SFID_UGM:
-         return devinfo->has_lsc;
-      case GEN_SFID_URB:
-         return devinfo->has_lsc && devinfo->ver >= 20;
-      default:
-         return false;
-      }
+      return gen_is_lsc_translated_sfid(devinfo, sfid);
    }
 
    void
@@ -1192,6 +1196,157 @@ private:
          text(".");
          text(cache);
       }
+      return true;
+   }
+
+   bool
+   print_translated_sendg()
+   {
+      const uint8_t op = gen_64bit_msg_desc_get_opcode(inst->send.combined_desc);
+      const char *sfid_name = gen_sfid_to_string(devinfo, inst->send.sfid);
+      if (!sfid_name) {
+         unknown();
+         return true;
+      }
+
+      switch (inst->send.sfid) {
+      case GEN_SFID_SLM:
+      case GEN_SFID_TGM:
+      case GEN_SFID_UGM:
+      case GEN_SFID_URB: {
+         enum lsc_opcode lsc_op = (enum lsc_opcode)op;
+         const char *op_name = gen_lsc_opcode_to_string(lsc_op);
+
+         if (lsc_op == LSC_OP_FENCE) {
+            enum lsc_fence_scope scope = lsc_fence_64bit_msg_desc_get_fence_scope(inst->send.combined_desc);
+            enum lsc_flush_type flush_type = lsc_fence_64bit_msg_desc_get_fence_flush_type(inst->send.combined_desc);
+            const char *scope_name = gen_lsc_fence_scope_to_string(scope);
+            const char *flush_name = gen_lsc_flush_type_to_string(flush_type);
+            if (!scope_name || !flush_name) {
+               unknown();
+               return true;
+            }
+
+            format("%s.%s.%s.%s", op_name, sfid_name, scope_name, flush_name);
+            break;
+         }
+
+         enum lsc_data_size data_size = gen_lsc_64bit_msg_desc_get_data_size(inst->send.combined_desc);
+         const char *data_name = gen_lsc_data_size_to_string(data_size);
+         if (!data_name) {
+            unknown();
+            return true;
+         }
+
+         format("%s.%s.%s", op_name, sfid_name, data_name);
+
+         uint8_t num_channels_or_cmaks = gen_lsc_64bit_msg_desc_get_num_channels_or_cmaks(inst->send.combined_desc,
+                                                                                          lsc_opcode_has_cmask(lsc_op));
+         if (lsc_opcode_has_cmask(lsc_op)) {
+            const char *cmask_name = gen_lsc_cmask_to_string((enum lsc_cmask)num_channels_or_cmaks);
+
+            if (!cmask_name) {
+               text(".?");
+               return true;
+            }
+            text(".");
+            text(cmask_name);
+         } else if (!lsc_opcode_is_atomic(lsc_op)) {
+            const unsigned num_values = lsc_vector_length((enum lsc_vect_size)num_channels_or_cmaks);
+            const bool transpose = gen_lsc_64bit_msg_desc_get_transpose(inst->send.combined_desc);
+            if (num_values == 0) {
+               text(".?");
+               return true;
+            }
+            if (num_values != 1 || transpose) {
+               format("x%u", num_channels_or_cmaks);
+               if (transpose)
+                  text("t");
+            }
+         }
+
+         const char *addr_type_size_name;
+         switch (inst->send.sfid) {
+         case GEN_SFID_URB: {
+            enum lsc_urb_addr_type_size addr_type_size =
+               (enum lsc_urb_addr_type_size)gen_lsc_64bit_msg_desc_get_addr_size_and_type(inst->send.combined_desc);
+            addr_type_size_name = gen_lsc_urb_addr_type_size_to_string(addr_type_size);
+            if (!addr_type_size_name) {
+               text(".?");
+               return true;
+            }
+            break;
+         }
+         case GEN_SFID_SLM:
+         case GEN_SFID_UGM: {
+            enum lsc_addr_type_size addr_type_size = gen_lsc_64bit_msg_desc_get_addr_size_and_type(inst->send.combined_desc);
+            addr_type_size_name = gen_lsc_addr_type_size_to_string(addr_type_size);
+            if (!addr_type_size_name) {
+               text(".?");
+               return true;
+            }
+            break;
+         }
+         case GEN_SFID_TGM: {
+            addr_type_size_name = "statefull";
+            break;
+         }
+         default:
+            unknown();
+            return false;
+         }
+         text(".");
+         text(addr_type_size_name);
+
+         unsigned cache_ctrl = gen_lsc_64bit_msg_desc_get_cache_ctrl(inst->send.combined_desc);
+         const char *cache_name = gen_lsc_cache_ctrl_to_string(devinfo, lsc_op, cache_ctrl);
+         if (!cache_name) {
+            text(".?");
+            return true;
+         }
+         if (cache_name[0]) {
+            text(".");
+            text(cache_name);
+         }
+
+         break;
+      }
+      case GEN_SFID_MESSAGE_GATEWAY: {
+         enum gen_gateway_64bit_opcode gateway_op = (enum gen_gateway_64bit_opcode)op;
+         const char *op_name = gen_gateway_64bit_opcode_to_string(gateway_op);
+
+         format("%s.%s", op_name, sfid_name);
+         break;
+      }
+      case GEN_SFID_RENDER_CACHE: {
+         const char *op_name = gen_rt_64bit_opcode_to_string(op);
+
+         format("%s.%s", op_name, sfid_name);
+         break;
+      }
+      case GEN_SFID_SAMPLER: {
+         const char *op_name = gen_sampler_msg_type_to_string(devinfo, op);
+
+         format("%s.%s", op_name, sfid_name);
+         break;
+      }
+      default:
+         unknown();
+         return false;
+      }
+
+      for (int i = 0; i < 2; i++) {
+         text(" ind");
+         uint(i);
+
+         if (inst->send.indirect_desc[i].nr == GEN_ARF_SCALAR) {
+            text(":S");
+            uint(inst->send.indirect_desc[i].subnr / sizeof(uint64_t));
+         } else {
+            text(":not_present");
+         }
+      }
+
       return true;
    }
 
@@ -1875,6 +2030,9 @@ private:
    {
       if (!translated_send_may_apply())
          return false;
+
+      if (inst->opcode == GEN_OP_SENDG)
+         return print_translated_sendg();
 
       if (is_lsc_translated_sfid(inst->send.sfid))
          return print_lsc_translated_send();

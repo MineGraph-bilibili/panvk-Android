@@ -183,6 +183,13 @@ fd6_check_valid_format(struct fd_resource *rsc, enum pipe_format format)
    if (orig_format == format)
       return FORMAT_OK;
 
+   if (util_format_is_yuv(orig_format)) {
+      if (rsc->layout.plane == 0 && format == PIPE_FORMAT_R8_UNORM)
+         return FORMAT_OK;
+      if (rsc->layout.plane == 1 && is_r8g8(format))
+         return FORMAT_OK;
+   }
+
    if (rsc->layout.tile_mode && (is_r8g8(orig_format) != is_r8g8(format)))
       return DEMOTE_TO_LINEAR;
 
@@ -243,6 +250,15 @@ setup_lrz(struct fd_resource *rsc)
 
    rsc->lrz = fd_bo_new(screen->dev, rsc->lrz_layout.lrz_total_size,
                         FD_BO_NOMAP, "lrz");
+}
+
+static uint32_t
+fd6_layout_multiplanar_resource(struct fd_resource *y_rsc,
+                                struct fd_resource *uv_rsc)
+{
+   struct pipe_resource *uv_prsc = &uv_rsc->b.b;
+   return (uint32_t)fdl6_layout_multiplanar_image(&y_rsc->layout, &uv_rsc->layout,
+                                                  uv_prsc->last_level + 1);
 }
 
 template <chip CHIP>
@@ -367,6 +383,7 @@ fd6_resource_screen_init(struct pipe_screen *pscreen)
    struct fd_screen *screen = fd_screen(pscreen);
 
    screen->layout_resource = fd6_layout_resource<CHIP>;
+   screen->layout_multiplanar_resource = fd6_layout_multiplanar_resource;
    screen->layout_resource_for_handle = fd6_layout_resource_for_handle;
    screen->is_format_supported = fd6_is_format_supported;
 }

@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -314,6 +315,11 @@ fd_rd_output_begin(struct fd_rd_output *output, uint32_t frame, uint32_t submit)
                fd_rd_dump_env.output_path, output->name, submit);
    }
    output->file = gzopen(file_path, "w");
+   if (output->file == NULL) {
+      mesa_loge("[fd_rd_output] failed to open %s: %s", file_path,
+                strerror(errno));
+      return false;
+   }
    return true;
 }
 
@@ -323,7 +329,7 @@ fd_rd_output_write(struct fd_rd_output *output, const void *buffer, int size)
    const uint8_t *pos = (uint8_t *) buffer;
    while (size > 0) {
       int ret = gzwrite(output->file, pos, size);
-      if (ret < 0) {
+      if (ret <= 0) {
          mesa_loge("[fd_rd_output] failed to write to compressed output: %s",
                    gzerror(output->file, NULL));
          return;

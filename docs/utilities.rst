@@ -16,3 +16,8 @@ Development Utilities
 `Coverity <https://scan.coverity.com/projects/mesa>`__
    provides static code analysis of Mesa. If you create an account you
    can see the results and try to fix outstanding issues.
+`gpu-ratemeter <https://gitlab.freedesktop.org/mesa/gpu-ratemeter>`__
+   is a microbenchmarking tool for driver performance validation,
+   performance comparisons between APIs and API codepaths, and
+   characterizing the performance of undocumented GPU architectures.
+   An indexable mirror is `here <https://github.com/marekolsak/gpu-ratemeter>`__.

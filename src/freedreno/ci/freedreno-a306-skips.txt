@@ -49,12 +49,10 @@ spec@arb_direct_state_access@transformfeedback-bufferbase
 spec@arb_uniform_buffer_object@rendering-array
 spec@arb_uniform_buffer_object@rendering-array-offset
 spec@arb_point_sprite@arb_point_sprite-interactions
-shaders@glsl-uniform-interstage-limits --subdivide 5 --statechanges
 gles-3.0-transform-feedback-uniform-buffer-object
 
 spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_lines
 spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_lines
-glsl-1.40-tf-no-position
 spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index8-clear
 spec@arb_framebuffer_srgb@arb_framebuffer_srgb-srgb_conformance
 spec@arb_framebuffer_srgb@blit renderbuffer linear

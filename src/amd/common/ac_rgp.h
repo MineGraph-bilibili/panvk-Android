@@ -9,6 +9,7 @@
 #define AC_RGP_H
 
 #include <stdint.h>
+#include "amd_family.h"
 #include "compiler/shader_enums.h"
 #include "util/list.h"
 #include "util/simple_mtx.h"
@@ -17,6 +18,22 @@ struct radeon_info;
 struct ac_sqtt_trace;
 struct ac_sqtt;
 struct ac_spm_trace;
+struct rgp_sqtt_marker_barrier_end;
+
+/* Below values are from from llvm project
+ * llvm/include/llvm/BinaryFormat/ELF.h
+ */
+enum elf_gfxip_level
+{
+   EF_AMDGPU_MACH_AMDGCN_GFX801 = 0x028,
+   EF_AMDGPU_MACH_AMDGCN_GFX900 = 0x02c,
+   EF_AMDGPU_MACH_AMDGCN_GFX1010 = 0x033,
+   EF_AMDGPU_MACH_AMDGCN_GFX1030 = 0x036,
+   EF_AMDGPU_MACH_AMDGCN_GFX1100 = 0x041,
+   EF_AMDGPU_MACH_AMDGCN_GFX1150 = 0x043,
+   EF_AMDGPU_MACH_AMDGCN_GFX1170 = 0x05d,
+   EF_AMDGPU_MACH_AMDGCN_GFX1200 = 0x04e,
+};
 
 enum rgp_hardware_stages {
    RGP_HW_STAGE_VS = 0,
@@ -190,13 +207,38 @@ struct ac_rgp_capture_info {
    };
 };
 
+enum ac_rgp_flush_bits {
+   AC_RGP_FLUSH_WAIT_ON_EOP_TS = 0x1,
+   AC_RGP_FLUSH_VS_PARTIAL_FLUSH = 0x2,
+   AC_RGP_FLUSH_PS_PARTIAL_FLUSH = 0x4,
+   AC_RGP_FLUSH_CS_PARTIAL_FLUSH = 0x8,
+   AC_RGP_FLUSH_PFP_SYNC_ME = 0x10,
+   AC_RGP_FLUSH_SYNC_CP_DMA = 0x20,
+   AC_RGP_FLUSH_INVAL_VMEM_L0 = 0x40,
+   AC_RGP_FLUSH_INVAL_ICACHE = 0x80,
+   AC_RGP_FLUSH_INVAL_SMEM_L0 = 0x100,
+   AC_RGP_FLUSH_FLUSH_L2 = 0x200,
+   AC_RGP_FLUSH_INVAL_L2 = 0x400,
+   AC_RGP_FLUSH_FLUSH_CB = 0x800,
+   AC_RGP_FLUSH_INVAL_CB = 0x1000,
+   AC_RGP_FLUSH_FLUSH_DB = 0x2000,
+   AC_RGP_FLUSH_INVAL_DB = 0x4000,
+   AC_RGP_FLUSH_INVAL_L1 = 0x8000,
+};
+
+void
+ac_rgp_flush_bits_to_barrier_marker(enum ac_rgp_flush_bits flush_bits,
+                                    struct rgp_sqtt_marker_barrier_end *marker);
+
 int ac_dump_rgp_capture(const struct radeon_info *info, struct ac_sqtt_trace *sqtt_trace,
                         const struct ac_spm_trace *spm_trace,
                         const struct ac_rgp_capture_info *capture_info);
 
-void
-ac_rgp_file_write_elf_object(FILE *output, size_t file_elf_start,
-                             struct rgp_code_object_record *record,
-                             uint32_t *written_size, uint32_t flags);
+
+enum elf_gfxip_level ac_gfx_level_to_elf_gfxip_level(enum amd_gfx_level gfx_level);
+
+void ac_rgp_file_write_elf_object(FILE *output, size_t file_elf_start,
+                                  struct rgp_code_object_record *record,
+                                  uint32_t *written_size, uint32_t flags);
 
 #endif

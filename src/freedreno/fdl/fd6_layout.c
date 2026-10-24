@@ -34,17 +34,17 @@ fdl6_get_ubwc_blockwidth(const struct fdl_layout *layout,
       {  0, 0 }, /* cpp = 128 */
    };
 
-   /* special case for r8g8 and plane 1 of r8_g8b8_420_unorm (NV12) */
-   if (fdl6_is_r8g8_layout(layout) ||
-      ((layout->format == PIPE_FORMAT_R8_G8B8_420_UNORM) && (layout->plane == 1))) {
+   unsigned num_planes = util_format_get_num_planes(layout->format);
+
+   /* special case for r8g8 and UV plane (plane 1) of 2-plane YUV formats */
+   if (fdl6_is_r8g8_layout(layout) || (num_planes == 2 && layout->plane == 1)) {
       *blockwidth = 16;
       *blockheight = 8;
       return;
    }
 
-   /* special handling for y8_unorm and plane 0 of r8_g8b8_420_unorm (NV12) */
-   if ((layout->format == PIPE_FORMAT_Y8_UNORM) ||
-      ((layout->format == PIPE_FORMAT_R8_G8B8_420_UNORM) && (layout->plane == 0))) {
+   /* special handling for y8_unorm and Y plane (plane 0) of 2-plane YUV formats */
+   if ((layout->format == PIPE_FORMAT_Y8_UNORM) || (num_planes == 2 && layout->plane == 0)) {
       *blockwidth = 32;
       *blockheight = 8;
       return;
@@ -395,4 +395,35 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
    layout->size += offset;
 
    return true;
+}
+
+/**
+ * Stitch together the Y and UV plane layouts for a 2-plane YUV (NV12-family)
+ * resource into a single contiguous BO, adjusting UV plane offsets in-place.
+ * Returns the combined BO size needed for both planes.
+ */
+uint64_t
+fdl6_layout_multiplanar_image(struct fdl_layout *y_layout,
+                               struct fdl_layout *uv_layout,
+                               uint32_t mip_levels)
+{
+   if (y_layout->ubwc) {
+      uint64_t y_ubwc_size  = y_layout->ubwc_layer_size;
+      uint64_t y_pixel_size = y_layout->size - y_ubwc_size;
+      uint64_t uv_offset    = y_ubwc_size + y_pixel_size;
+
+      /* Place UV UBWC metadata after Y pixels; UV pixels follow UV meta */
+      for (uint32_t i = 0; i < mip_levels; i++) {
+         uv_layout->ubwc_slices[i].offset += uv_offset;
+         uv_layout->slices[i].offset      += uv_offset;
+      }
+      return uv_offset + uv_layout->size;
+   } else {
+      /* Linear/tiled: concatenate Y plane (page-aligned) then UV plane */
+      uint64_t y_aligned = align64(y_layout->size, 4096);
+      for (uint32_t i = 0; i < mip_levels; i++) {
+         uv_layout->slices[i].offset += y_aligned;
+      }
+      return y_aligned + uv_layout->size;
+   }
 }

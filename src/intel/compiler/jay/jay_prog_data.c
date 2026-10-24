@@ -5,9 +5,9 @@
 #include "compiler/brw/brw_compiler.h"
 #include "compiler/brw/brw_nir.h"
 #include "compiler/intel_nir.h"
+#include "compiler/intel_prim.h"
 #include "jay_private.h"
 #include "nir.h"
-#include "compiler/intel_prim.h"
 
 static inline enum intel_barycentric_mode
 brw_barycentric_mode(const struct brw_fs_prog_data *prog_data,
@@ -66,6 +66,7 @@ gather_fs_info(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    case nir_intrinsic_load_barycentric_at_offset:
       ctx->offset_interp_modes |=
          BITFIELD_BIT(brw_barycentric_mode(ctx->prog_data, intr));
+      prog_data->uses_src_xy = true;
       break;
 
    case nir_intrinsic_load_frag_coord_z:
@@ -533,22 +534,23 @@ populate_tcs_prog_data(nir_shader *nir,
 }
 
 /* TODO: this is copied in two places right now. probably dedup it? */
-static const uint32_t gl_prim_to_hw_prim[MESA_PRIM_TRIANGLE_STRIP_ADJACENCY + 1] = {
-   [MESA_PRIM_POINTS] = _3DPRIM_POINTLIST,
-   [MESA_PRIM_LINES] = _3DPRIM_LINELIST,
-   [MESA_PRIM_LINE_LOOP] = _3DPRIM_LINELOOP,
-   [MESA_PRIM_LINE_STRIP] = _3DPRIM_LINESTRIP,
-   [MESA_PRIM_TRIANGLES] = _3DPRIM_TRILIST,
-   [MESA_PRIM_TRIANGLE_STRIP] = _3DPRIM_TRISTRIP,
-   [MESA_PRIM_TRIANGLE_FAN] = _3DPRIM_TRIFAN,
-   [MESA_PRIM_QUADS] = _3DPRIM_QUADLIST,
-   [MESA_PRIM_QUAD_STRIP] = _3DPRIM_QUADSTRIP,
-   [MESA_PRIM_POLYGON] = _3DPRIM_POLYGON,
-   [MESA_PRIM_LINES_ADJACENCY] = _3DPRIM_LINELIST_ADJ,
-   [MESA_PRIM_LINE_STRIP_ADJACENCY] = _3DPRIM_LINESTRIP_ADJ,
-   [MESA_PRIM_TRIANGLES_ADJACENCY] = _3DPRIM_TRILIST_ADJ,
-   [MESA_PRIM_TRIANGLE_STRIP_ADJACENCY] = _3DPRIM_TRISTRIP_ADJ,
-};
+static const uint32_t
+   gl_prim_to_hw_prim[MESA_PRIM_TRIANGLE_STRIP_ADJACENCY + 1] = {
+      [MESA_PRIM_POINTS] = _3DPRIM_POINTLIST,
+      [MESA_PRIM_LINES] = _3DPRIM_LINELIST,
+      [MESA_PRIM_LINE_LOOP] = _3DPRIM_LINELOOP,
+      [MESA_PRIM_LINE_STRIP] = _3DPRIM_LINESTRIP,
+      [MESA_PRIM_TRIANGLES] = _3DPRIM_TRILIST,
+      [MESA_PRIM_TRIANGLE_STRIP] = _3DPRIM_TRISTRIP,
+      [MESA_PRIM_TRIANGLE_FAN] = _3DPRIM_TRIFAN,
+      [MESA_PRIM_QUADS] = _3DPRIM_QUADLIST,
+      [MESA_PRIM_QUAD_STRIP] = _3DPRIM_QUADSTRIP,
+      [MESA_PRIM_POLYGON] = _3DPRIM_POLYGON,
+      [MESA_PRIM_LINES_ADJACENCY] = _3DPRIM_LINELIST_ADJ,
+      [MESA_PRIM_LINE_STRIP_ADJACENCY] = _3DPRIM_LINESTRIP_ADJ,
+      [MESA_PRIM_TRIANGLES_ADJACENCY] = _3DPRIM_TRILIST_ADJ,
+      [MESA_PRIM_TRIANGLE_STRIP_ADJACENCY] = _3DPRIM_TRISTRIP_ADJ,
+   };
 
 static void
 populate_gs_prog_data(nir_shader *nir,
@@ -596,18 +598,19 @@ void
 jay_populate_prog_data(const struct intel_device_info *devinfo,
                        nir_shader *nir,
                        union brw_any_prog_data *prog_data,
-                       union brw_any_prog_key *key)
+                       union brw_any_prog_key *key,
+                       struct jay_fs_perprim_data *fs_perprim)
 {
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       populate_vs_prog_data(nir, devinfo, &key->vs, &prog_data->vs);
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
       populate_tcs_prog_data(nir, &key->tcs, &prog_data->tcs);
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      int per_primitive_offsets[VARYING_SLOT_MAX];
-      memset(per_primitive_offsets, -1, sizeof(per_primitive_offsets));
+      int32_t *per_primitive_offsets = fs_perprim->per_primitive_offsets;
+      memset(per_primitive_offsets, -1, VARYING_SLOT_MAX * sizeof(int));
 
       populate_fs_prog_data(nir, devinfo, &key->fs, &prog_data->fs,
-                            NULL /* TODO: mue_map */, per_primitive_offsets);
+                            fs_perprim->mue, per_primitive_offsets);
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
       populate_gs_prog_data(nir, &key->gs, &prog_data->gs);
    }

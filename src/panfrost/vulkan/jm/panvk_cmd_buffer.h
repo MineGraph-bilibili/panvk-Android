@@ -34,6 +34,10 @@
 struct panvk_batch {
    struct list_head node;
    struct util_dynarray jobs;
+#if PAN_ARCH == 9
+   /* MALLOC_VERTEX jobs, the GPU writes their vertex array pointer. */
+   struct util_dynarray malloc_vertex_jobs;
+#endif
    struct util_dynarray event_ops;
    struct pan_jc vtc_jc;
    struct pan_jc frag_jc;
@@ -60,6 +64,10 @@ struct panvk_batch {
    struct pan_tls_info tlsinfo;
    unsigned wls_total_size;
    bool issued;
+   /* libpoly heap bottom reset already queued in this batch */
+   bool poly_heap_reset;
+   /* v67b: tiler heap half used by this batch */
+   unsigned heap_half;
 };
 
 enum panvk_cmd_event_op_type {

@@ -546,6 +546,25 @@ ast_type_qualifier::merge_qualifier(YYLTYPE *loc,
       }
    }
 
+   if ((this->flags.q.explicit_location && q.flags.q.yuv) ||
+       (this->flags.q.yuv && q.flags.q.explicit_location)) {
+      /***
+       * The EXT_YUV_target spec says:
+       *    The new yuv layout qualifier can't be combined with any other
+       *    layout qualifier, <snip>
+       *
+       * However, forbidding *all* layout qualifiers seems like a massive
+       * over-reaction, and limiting potentially useful stuff. So instead,
+       * let's just disallow the location=n layout. This is the only valid
+       * output layout in GLSL ES 3.00, and the extension spec explicitly
+       * says that it's not valid together with multiple color outputs
+       * anyway.
+       */
+      _mesa_glsl_error(loc, state, "yuv layout can't be combined with "
+                       "location= layout");
+      return false;
+   }
+
    return r;
 }
 

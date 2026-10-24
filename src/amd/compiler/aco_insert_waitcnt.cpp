@@ -192,6 +192,7 @@ struct barrier_info {
     * vm_vsrc(0) wait might not be a no-op, it just wouldn't do anything useful for this barrier. */
    bool vm_vsrc[storage_count] = {};
    uint32_t events[storage_count] = {}; /* use wait_event notion */
+   uint8_t vmem_types[storage_count] = {}; /* use vmem_type notion. for counter_vm. */
    sync_scope scope[storage_count] = {};
    uint8_t storage = 0;
 
@@ -203,6 +204,7 @@ struct barrier_info {
          changed |= imm[i].combine(other.imm[i]);
          changed |= (other.events[i] & ~events[i]) != 0;
          events[i] |= other.events[i];
+         vmem_types[i] |= other.vmem_types[i];
          changed |= other.scope[i] > scope[i];
          scope[i] = MAX2(scope[i], other.scope[i]);
          changed |= other.vm_vsrc[i] && !vm_vsrc[i];
@@ -218,6 +220,7 @@ struct barrier_info {
          imm[i].print(output);
          fprintf(output, "vm_vsrc: %u\n", vm_vsrc[i]);
          fprintf(output, "events: %u\n", events[i]);
+         fprintf(output, "vmem_types: %u\n", vmem_types[i]);
          fprintf(output, "scope: %u\n", scope[i]);
          fprintf(output, "}\n");
       }
@@ -460,6 +463,7 @@ setup_barrier(wait_ctx& ctx, wait_imm& imm, memory_sync_info sync, bool is_acqui
 
    wait_imm dst_imm;
    uint32_t dst_events = 0;
+   uint8_t dst_vmem_types = 0;
    u_foreach_bit (i, sync.storage & src.storage) {
       /* LDS is private to the workgroup, but sync.scope might be device scope. */
       if (src.events[i] == event_lds && ctx.program->workgroup_size <= ctx.program->wave_size)
@@ -467,6 +471,7 @@ setup_barrier(wait_ctx& ctx, wait_imm& imm, memory_sync_info sync, bool is_acqui
 
       dst_imm.combine(src.imm[i]);
       dst_events |= src.events[i];
+      dst_vmem_types |= src.vmem_types[i];
    }
    if (!dst_events)
       return;
@@ -477,6 +482,7 @@ setup_barrier(wait_ctx& ctx, wait_imm& imm, memory_sync_info sync, bool is_acqui
    u_foreach_bit (i, sync.storage) {
       dst.imm[i].combine(dst_imm);
       dst.vm_vsrc[i] |= src.vm_vsrc[i];
+      dst.vmem_types[i] |= dst_vmem_types;
       dst.events[i] |= dst_events;
       dst.scope[i] = MAX2(dst.scope[i], sync.scope);
    }
@@ -545,7 +551,8 @@ force_waitcnt(wait_ctx& ctx, wait_imm& imm)
 }
 
 void
-update_barrier_info_for_wait(wait_ctx& ctx, unsigned idx, wait_imm imm, depctr_wait depctr)
+update_barrier_info_for_wait(wait_ctx& ctx, unsigned idx, wait_imm imm, depctr_wait depctr,
+                             uint8_t* vm_wait, uint8_t* vm_nowait)
 {
    static const uint32_t vm_vsrc_events =
       event_lds | event_vmem | event_vmem_sample | event_vmem_bvh | event_vmem_store;
@@ -557,14 +564,23 @@ update_barrier_info_for_wait(wait_ctx& ctx, unsigned idx, wait_imm imm, depctr_w
 
       u_foreach_bit (j, info.storage) {
          wait_imm& bar = info.imm[j];
-         if (bar[i] != wait_imm::unset_counter && imm[i] <= bar[i]) {
-            /* Clear this counter */
-            bar[i] = wait_imm::unset_counter;
-            info.events[j] &= ~ctx.info->events[i];
+
+         if (bar[i] != wait_imm::unset_counter) {
+            if (imm[i] <= bar[i]) {
+               /* Clear this counter */
+               bar[i] = wait_imm::unset_counter;
+               info.events[j] &= ~ctx.info->events[i];
+               *vm_wait |= i == wait_type_vm ? info.vmem_types[j] : 0;
+            } else {
+               *vm_nowait |= i == wait_type_vm ? info.vmem_types[j] : 0;
+            }
          }
 
          if (depctr.vm_vsrc == 0 || !(info.events[j] & vm_vsrc_events))
             info.vm_vsrc[j] = false;
+
+         if (bar.vm == wait_imm::unset_counter)
+            info.vmem_types[j] = 0;
 
          if (!info.events[j]) {
             assert(info.imm[j].empty() && !info.vm_vsrc[j]);
@@ -627,21 +643,35 @@ kill(wait_imm& imm, depctr_wait& depctr, Instruction* instr, wait_ctx& ctx,
       for (unsigned i = 0; i < wait_type_num; i++)
          ctx.nonzero &= imm[i] == 0 ? ~BITFIELD_BIT(i) : UINT32_MAX;
 
+      uint8_t vm_wait = 0, vm_nowait = 0;
+
       u_foreach_bit (i, ctx.bar_nonempty)
-         update_barrier_info_for_wait(ctx, i, imm, depctr);
+         update_barrier_info_for_wait(ctx, i, imm, depctr, &vm_wait, &vm_nowait);
 
       /* remove all gprs with higher counter from map */
       std::map<PhysReg, wait_entry>::iterator it = ctx.gpr_map.begin();
       while (it != ctx.gpr_map.end()) {
          for (unsigned i = 0; i < wait_type_num; i++) {
-            if (imm[i] != wait_imm::unset_counter && imm[i] <= it->second.imm[i])
+            if (imm[i] == wait_imm::unset_counter)
+               continue;
+
+            if (imm[i] <= it->second.imm[i]) {
+               vm_wait |= i == wait_type_vm ? it->second.vmem_types : 0;
                it->second.remove_wait((wait_type)i, ctx.info->events[i]);
+            } else {
+               vm_nowait |= i == wait_type_vm ? it->second.vmem_types : 0;
+            }
          }
          if (!it->second.counters)
             it = ctx.gpr_map.erase(it);
          else
             it++;
       }
+
+      /* TODO: this is safe and fairly simple, but we should be able to set MEM_ORDERED=0 in more
+       * cases. */
+      if (vm_wait && vm_nowait && (vm_wait != vm_nowait || util_bitcount(vm_wait) > 1))
+         ctx.program->config->mem_ordered = ctx.gfx_level >= GFX10 && ctx.gfx_level < GFX12;
    }
 
    if (imm.vm == 0)
@@ -651,7 +681,7 @@ kill(wait_imm& imm, depctr_wait& depctr, Instruction* instr, wait_ctx& ctx,
 }
 
 void
-update_barrier_info_for_event(wait_ctx& ctx, uint8_t counters, wait_event event,
+update_barrier_info_for_event(wait_ctx& ctx, uint8_t counters, wait_event event, uint8_t vmem_types,
                               barrier_info_kind idx, uint16_t storage)
 {
    barrier_info& info = ctx.bar[idx];
@@ -673,6 +703,7 @@ update_barrier_info_for_event(wait_ctx& ctx, uint8_t counters, wait_event event,
             bar[j] = 0;
          if (event & (event_lds | event_vmem | event_vmem_store))
             info.vm_vsrc[i] = true;
+         info.vmem_types[i] |= vmem_types;
       } else if (!(bar_ev & ctx.info->unordered_events) && !(ctx.info->unordered_events & event)) {
          /* Increase counters so that this instruction is ignored when waiting. */
          u_foreach_bit (j, counters) {
@@ -686,33 +717,35 @@ update_barrier_info_for_event(wait_ctx& ctx, uint8_t counters, wait_event event,
 /* This resets or increases the counters for the barrier infos in response to an instruction. */
 void
 update_barriers(wait_ctx& ctx, uint8_t counters, wait_event event, Instruction* instr,
-                memory_sync_info sync)
+                memory_sync_info sync, uint8_t vmem_types)
 {
    uint16_t storage_rel = sync.storage;
    /* We re-use barrier_info_release_dep to wait for all scratch stores to finish, so track those
     * even if they are private. */
    if (sync.semantics & semantic_private)
       storage_rel &= storage_scratch | storage_vgpr_spill;
-   update_barrier_info_for_event(ctx, counters, event, barrier_info_release_dep, storage_rel);
+   update_barrier_info_for_event(ctx, counters, event, vmem_types, barrier_info_release_dep,
+                                 storage_rel);
 
    if (instr) {
       uint16_t storage_acq = is_atomic_or_control_instr(ctx.program, instr, sync, semantic_acquire);
-      update_barrier_info_for_event(ctx, counters, event, barrier_info_acquire_dep, storage_acq);
+      update_barrier_info_for_event(ctx, counters, event, vmem_types, barrier_info_acquire_dep,
+                                    storage_acq);
    }
 
-   update_barrier_info_for_event(ctx, counters, event, barrier_info_release, 0);
-   update_barrier_info_for_event(ctx, counters, event, barrier_info_acquire, 0);
+   update_barrier_info_for_event(ctx, counters, event, vmem_types, barrier_info_release, 0);
+   update_barrier_info_for_event(ctx, counters, event, vmem_types, barrier_info_acquire, 0);
 }
 
 void
 update_counters(wait_ctx& ctx, wait_event event, Instruction* instr,
-                memory_sync_info sync = memory_sync_info())
+                memory_sync_info sync = memory_sync_info(), uint8_t vmem_types = 0)
 {
    uint8_t counters = ctx.info->get_counters_for_event(event);
 
    ctx.nonzero |= counters;
 
-   update_barriers(ctx, counters, event, instr, sync);
+   update_barriers(ctx, counters, event, instr, sync, vmem_types);
 
    if (ctx.info->unordered_events & event)
       return;
@@ -859,7 +892,7 @@ gen(Instruction* instr, wait_ctx& ctx)
       wait_event ev = get_vmem_event(ctx, instr, type);
       uint32_t mask = ev == event_vmem ? get_vmem_mask(ctx, instr) : 0;
 
-      update_counters(ctx, ev, instr, get_sync_info(instr));
+      update_counters(ctx, ev, instr, get_sync_info(instr), type);
 
       for (auto& definition : instr->definitions)
          insert_wait_entry(ctx, definition, ev, type, mask);
@@ -1079,13 +1112,15 @@ insert_waitcnt(Program* program)
 
    if (program->pending_lds_access) {
       update_barriers(in_ctx[0], info.get_counters_for_event(event_lds), event_lds, NULL,
-                      memory_sync_info(storage_shared));
+                      memory_sync_info(storage_shared), 0);
    }
 
    for (Definition def : program->args_pending_vmem) {
-      update_counters(in_ctx[0], event_vmem, NULL);
+      update_counters(in_ctx[0], event_vmem, NULL, memory_sync_info(), vmem_nosampler);
       insert_wait_entry(in_ctx[0], def, event_vmem, vmem_nosampler, 0xffffffff);
    }
+
+   program->config->mem_ordered = false;
 
    for (unsigned i = 0; i < program->blocks.size();) {
       Block& current = program->blocks[i++];

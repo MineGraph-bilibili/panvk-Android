@@ -324,6 +324,11 @@ preprocess_nir(nir_shader *nir)
       NIR_PASS(_, nir, lower_intrinsics);
    }
 
+   const nir_opt_access_options access_options = {
+      .is_vulkan = true,
+   };
+   NIR_PASS(_, nir, nir_opt_access, &access_options);
+
    NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries,
             nir_shader_get_entrypoint(nir), nir_var_shader_out);
 
@@ -760,7 +765,7 @@ lower_sampler(nir_builder *b,
       return false;
 
    /* If the instruction doesn't have a sampler (i.e. txf) we use backend_flags
-    * to bind a default sampler state to configure precission.
+    * to bind a default sampler state to configure precision.
     */
    if (sampler_idx < 0) {
       state->needs_default_sampler_state = true;
@@ -2838,10 +2843,9 @@ pipeline_setup_rendering_info(struct v3dv_device *device,
    struct vk_render_pass_state *rp = &pipeline->rendering_info;
    struct vk_multiview_state *mv = &pipeline->multiview_info;
 
-   if (pipeline->pass) {
-      assert(pipeline->subpass);
-      struct v3dv_render_pass *pass = pipeline->pass;
-      struct v3dv_subpass *subpass = pipeline->subpass;
+   if (pCreateInfo->renderPass) {
+      struct v3dv_render_pass *pass = v3dv_render_pass_from_handle(pCreateInfo->renderPass);
+      struct v3dv_subpass *subpass = &pass->subpasses[pCreateInfo->subpass];
       const uint32_t attachment_idx = subpass->ds_attachment.attachment;
 
       mv->view_mask = subpass->view_mask;
@@ -2941,7 +2945,7 @@ pipeline_init_dynamic_state(struct v3dv_device *device,
 
    if (BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_VIEWPORTS) ||
        BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_SCISSORS)) {
-      /* FIXME: right now we don't support multiViewport so viewporst[0] would
+      /* FIXME: right now we don't support multiViewport so viewports[0] would
        * work now, but would need to change if we allow multiple viewports.
        */
       v3d_X((&device->devinfo), viewport_compute_xform)(&dyn->vp.viewports[0],
@@ -2964,6 +2968,27 @@ pipeline_init_dynamic_state(struct v3dv_device *device,
    return result;
 }
 
+static bool
+pipeline_has_integer_vertex_attrib(struct v3dv_pipeline *pipeline)
+{
+   for (uint8_t i = 0; i < pipeline->va_count; i++) {
+      if (vk_format_is_int(pipeline->va[i].vk_format))
+         return true;
+   }
+   return false;
+}
+
+/* On the hardware that needs the default attribute values we can still skip
+ * the per-pipeline BO when no attribute is fed by them, which is the case
+ * unless the pipeline has an integer vertex attribute.
+ */
+static bool
+pipeline_needs_default_attribute_values(struct v3dv_pipeline *pipeline)
+{
+   return v3d_device_needs_default_attribute_values(&pipeline->device->devinfo) &&
+          pipeline_has_integer_vertex_attrib(pipeline);
+}
+
 static VkResult
 pipeline_init(struct v3dv_pipeline *pipeline,
               struct v3dv_device *device,
@@ -2982,8 +3007,6 @@ pipeline_init(struct v3dv_pipeline *pipeline,
    V3DV_FROM_HANDLE(v3dv_render_pass, render_pass, pCreateInfo->renderPass);
    if (render_pass) {
       assert(pCreateInfo->subpass < render_pass->subpass_count);
-      pipeline->pass = render_pass;
-      pipeline->subpass = &render_pass->subpasses[pCreateInfo->subpass];
    }
 
    pipeline_setup_rendering_info(device, pipeline, pCreateInfo, pAllocator);
@@ -3042,7 +3065,7 @@ pipeline_init(struct v3dv_pipeline *pipeline,
 
    v3d_X((&device->devinfo), pipeline_pack_compile_state)(pipeline, vi_info, vd_info);
 
-   if (v3d_X((&device->devinfo), pipeline_needs_default_attribute_values)(pipeline)) {
+   if (pipeline_needs_default_attribute_values(pipeline)) {
       pipeline->default_attribute_values =
          v3d_X((&pipeline->device->devinfo), create_default_attribute_values)(pipeline->device, pipeline);
 
@@ -3505,19 +3528,22 @@ append(char **str, size_t *offset, const char *fmt, ...)
    va_end(args);
 }
 
-static void
+static VkResult
 pipeline_collect_executable_data(struct v3dv_pipeline *pipeline)
 {
    if (pipeline->executables.mem_ctx)
-      return;
+      return VK_SUCCESS;
 
    pipeline->executables.mem_ctx = ralloc_context(NULL);
+   if (!pipeline->executables.mem_ctx)
+      return vk_error(pipeline->device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
    util_dynarray_init(&pipeline->executables.data,
                       pipeline->executables.mem_ctx);
 
    /* Don't crash for failed/bogus pipelines */
    if (!pipeline->shared_data)
-      return;
+      return VK_SUCCESS;
 
    for (int s = BROADCOM_SHADER_VERTEX; s <= BROADCOM_SHADER_COMPUTE; s++) {
       VkShaderStageFlags vk_stage =
@@ -3555,6 +3581,8 @@ pipeline_collect_executable_data(struct v3dv_pipeline *pipeline)
       };
       util_dynarray_append(&pipeline->executables.data, data);
    }
+
+   return VK_SUCCESS;
 }
 
 static const struct v3dv_pipeline_executable_data *
@@ -3576,7 +3604,9 @@ v3dv_GetPipelineExecutableInternalRepresentationsKHR(
 {
    V3DV_FROM_HANDLE(v3dv_pipeline, pipeline, pExecutableInfo->pipeline);
 
-   pipeline_collect_executable_data(pipeline);
+   VkResult result = pipeline_collect_executable_data(pipeline);
+   if (result != VK_SUCCESS)
+      return result;
 
    VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutableInternalRepresentationKHR, out,
                           pInternalRepresentations, pInternalRepresentationCount);
@@ -3617,7 +3647,9 @@ v3dv_GetPipelineExecutablePropertiesKHR(
 {
    V3DV_FROM_HANDLE(v3dv_pipeline, pipeline, pPipelineInfo->pipeline);
 
-   pipeline_collect_executable_data(pipeline);
+   VkResult result = pipeline_collect_executable_data(pipeline);
+   if (result != VK_SUCCESS)
+      return result;
 
    VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutablePropertiesKHR, out,
                           pProperties, pExecutableCount);
@@ -3652,7 +3684,9 @@ v3dv_GetPipelineExecutableStatisticsKHR(
 {
    V3DV_FROM_HANDLE(v3dv_pipeline, pipeline, pExecutableInfo->pipeline);
 
-   pipeline_collect_executable_data(pipeline);
+   VkResult result = pipeline_collect_executable_data(pipeline);
+   if (result != VK_SUCCESS)
+      return result;
 
    const struct v3dv_pipeline_executable_data *exe =
       pipeline_get_executable(pipeline, pExecutableInfo->executableIndex);
@@ -3676,8 +3710,8 @@ v3dv_GetPipelineExecutableStatisticsKHR(
          .instrs = qpu_inst_count,
          .thread_count = prog_data->threads,
          .spill_size = prog_data->spill_size,
-         .spills = prog_data->spill_size,
-         .fills = prog_data->spill_size,
+         .spills = prog_data->tmu_spills,
+         .fills = prog_data->tmu_fills,
          .read_stalls = prog_data->qpu_read_stalls,
       };
 

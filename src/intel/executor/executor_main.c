@@ -29,6 +29,7 @@
 
 #include "intel/compiler/gen/gen.h"
 #include "intel/compiler/gen/gen_names.h"
+#include "intel/common/intel_common.h"
 #include "intel/common/intel_compute_slm.h"
 #include "intel/common/intel_gem.h"
 #include "intel/common/xe/intel_engine.h"
@@ -1100,6 +1101,36 @@ executor_default_simd(const struct intel_device_info *devinfo)
 }
 
 static void
+handle_param_hw_regs(executor_run *run, slice name, slice args)
+{
+   slice_cut_result cut = slice_cut_any(args, " \t");
+   slice value = cut.before;
+   slice extra = strip_spaces(cut.after);
+
+   if (!slice_is_empty(extra))
+      failf("@param %.*s has extra arguments", SLICE_FMT(name));
+   if (slice_is_empty(value))
+      failf("@param %.*s needs a value", SLICE_FMT(name));
+
+   int64_t v;
+   if (!parse_int64(value, &v))
+      failf("@param %.*s must be an integer", SLICE_FMT(name));
+
+   const struct intel_device_info *devinfo = run->ec->devinfo;
+   bool valid;
+   if (devinfo->verx10 >= 125 && devinfo->ver < 30) {
+      valid = v == 128 || v == 256; /* Large GRF supports 128 or 256 regs */
+   } else {
+      valid = intel_register_blocks_supported(devinfo, v);
+   }
+
+   if (!valid)
+      failf("@param %.*s %u is not supported", SLICE_FMT(name), (unsigned)v);
+
+   run->hw_regs = (uint32_t)v;
+}
+
+static void
 handle_param_hw_threads(executor_run *run, slice name, slice args)
 {
    executor_context *ec = run->ec;
@@ -1205,6 +1236,7 @@ executor_parse_source_params(executor_run *run, slice src)
       const char *name;
       void (*handle)(executor_run *run, slice name, slice args);
    } param_handlers[] = {
+      { "hw_regs",    handle_param_hw_regs },
       { "hw_threads", handle_param_hw_threads },
       { "simd",       handle_param_simd },
       { "slm_size",   handle_param_slm_size },
@@ -2152,6 +2184,7 @@ l_execute(lua_State *L)
    executor_run run = {
       .ec = ec,
       .tmp_ctx = ralloc_context(ec->mem_ctx),
+      .hw_regs = 128,
       .hw_threads = 1,
       .thread_groups = 1,
       .simd = executor_default_simd(ec->devinfo),

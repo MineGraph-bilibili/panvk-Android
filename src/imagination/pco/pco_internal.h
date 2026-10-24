@@ -69,6 +69,7 @@ enum pco_debug {
    PCO_DEBUG_GLOBAL_SHMEM = BITFIELD64_BIT(5),
    PCO_DEBUG_RA_FORCE_SPILL = BITFIELD64_BIT(6),
    PCO_DEBUG_RA_SKIP_OPT = BITFIELD64_BIT(7),
+   PCO_DEBUG_NO_DMA_CACHE = BITFIELD64_BIT(8),
 };
 
 extern uint64_t pco_debug;
@@ -1818,6 +1819,7 @@ bool pco_nir_link_multiview(nir_shader *producer,
 bool pco_nir_lower_algebraic(nir_shader *shader);
 bool pco_nir_lower_algebraic_late(nir_shader *shader);
 bool pco_nir_lower_alpha_to_coverage(nir_shader *shader);
+bool pco_nir_lower_alu(nir_shader *shader, pco_ctx *ctx);
 bool pco_nir_lower_atomics(nir_shader *shader, pco_data *data);
 bool pco_nir_lower_barriers(nir_shader *shader, pco_data *data);
 void pco_nir_lower_clip_cull_vars(nir_shader *shader);
@@ -1825,7 +1827,8 @@ bool pco_nir_lower_fs_intrinsics(nir_shader *shader);
 bool pco_nir_lower_vs_intrinsics(nir_shader *shader);
 bool pco_nir_lower_images(nir_shader *shader, pco_data *data, pco_ctx *ctx);
 bool pco_nir_lower_interpolation(nir_shader *shader, pco_fs_data *fs);
-bool pco_nir_lower_io(nir_shader *shader);
+bool pco_nir_lower_io(nir_shader *shader, pco_data *data);
+bool pco_nir_lower_sample_mask_out(nir_shader *shader);
 bool pco_nir_lower_shared_io_to_global(nir_shader *shader, unsigned usc_slots);
 bool pco_nir_lower_subgroups(nir_shader *shader);
 bool pco_nir_lower_tex(nir_shader *shader, pco_data *data, pco_ctx *ctx);
@@ -2155,6 +2158,25 @@ static inline unsigned pco_ref_get_reg_index(pco_ref ref)
    unsigned index = pco_ref_is_idx_reg(ref) ? ref.idx_reg.offset : ref.val;
 
    return index;
+}
+
+/**
+ * \brief Sets the register index of a reference ref.
+ *
+ * \param[in] ref Reference ref.
+ * \param[in] index New index.
+ * \return Updated ref.
+ */
+static inline pco_ref pco_ref_set_reg_index(pco_ref ref, unsigned index)
+{
+   assert(pco_ref_is_reg(ref) || pco_ref_is_idx_reg(ref));
+
+   if (pco_ref_is_idx_reg(ref))
+      ref.idx_reg.offset = index;
+   else
+      ref.val = index;
+
+   return ref;
 }
 
 /**
@@ -2941,6 +2963,40 @@ pco_refs_are_equal(pco_ref ref0, pco_ref ref1, bool ignore_dtype)
 }
 
 /**
+ * \brief Checks whether two register references overlap.
+ *
+ * \param[in] ref0 First register reference.
+ * \param[in] ref1 Second register reference.
+ * \return True if register references overlap.
+ */
+static inline bool pco_refs_are_overlapping_regs(pco_ref ref0, pco_ref ref1)
+{
+   assert(pco_ref_is_reg(ref0) || pco_ref_is_idx_reg(ref0));
+   assert(pco_ref_is_reg(ref1) || pco_ref_is_idx_reg(ref1));
+
+   if (pco_ref_get_reg_class(ref0) != pco_ref_get_reg_class(ref1))
+      return false;
+
+   unsigned ref0_start = pco_ref_get_reg_index(ref0);
+   unsigned ref0_end =
+      pco_ref_get_reg_index(ref0) + pco_ref_get_chans(ref0) - 1;
+   /**
+    * Index register accesses have a known minimum index but an unbounded
+    * maximum possible index.
+    */
+   if (pco_ref_is_idx_reg(ref0))
+      ref0_end = ~0;
+
+   unsigned ref1_start = pco_ref_get_reg_index(ref1);
+   unsigned ref1_end =
+      pco_ref_get_reg_index(ref1) + pco_ref_get_chans(ref1) - 1;
+   if (pco_ref_is_idx_reg(ref1))
+      ref1_end = ~0;
+
+   return ref0_start <= ref1_end && ref1_start <= ref0_end;
+}
+
+/**
  * \brief Checks a reference has a valid hardware source mapping.
  *
  * \param[in] ref Reference.
@@ -3175,6 +3231,9 @@ static inline bool pco_should_skip_pass(const char *pass)
 /** Integer/float zero/false. */
 #define pco_zero pco_ref_hwreg(0, PCO_REG_CLASS_CONST)
 #define pco_false pco_zero
+
+/** Float negative zero. */
+#define pco_nzero pco_ref_hwreg(141, PCO_REG_CLASS_CONST)
 
 /** Integer one. */
 #define pco_one pco_ref_hwreg(1, PCO_REG_CLASS_CONST)

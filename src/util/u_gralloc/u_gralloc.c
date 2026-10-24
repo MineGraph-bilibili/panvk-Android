@@ -64,7 +64,6 @@ u_gralloc_create(enum u_gralloc_type type)
          u_gralloc_cache[type].refcount = 1;
 
          out_gralloc = u_gralloc_cache[type].u_gralloc;
-         mesa_log(MESA_LOG_INFO, "gralloc", "u_gralloc_create: in type = %d, out id = %d (%d)", type, i, u_grallocs[i].type);
          goto out;
       }
    }

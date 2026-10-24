@@ -549,6 +549,7 @@ mme_tu104_state_sim_mthd(void *_sim, uint16_t addr, uint32_t data)
       *mem = sim->report_sem.data;
       break;
    }
+   /* This sets up a base address for other DMA methods to operate on */
    case NVC597_SET_MME_DATA_RAM_ADDRESS:
       sim->ram.addr = data;
       break;
@@ -558,6 +559,21 @@ mme_tu104_state_sim_mthd(void *_sim, uint16_t addr, uint32_t data)
    case NVC597_SET_MME_MEM_ADDRESS_B:
       sim->mem_addr_lo = data;
       break;
+   /* Copies X words from MME_MEM_ADDRESS to dmem[MME_DATA_RAM_ADDRESS] */
+   case NVC597_MME_DMA_READ: {
+      const uint64_t mem_addr = (sim->mem_addr_hi << 32) | sim->mem_addr_lo;
+      uint32_t *src = find_mem(sim, mem_addr, "MME_DMA_READ");
+      /* TODO: we might want to emulate this more accurately with a u_queue and
+       *       fence on it for DMA_SYNC. */
+      memcpy(&sim->ram.data[sim->ram.addr], src, data * sizeof(uint32_t));
+      break;
+   }
+   /* Writes a sentinel value into dmem[MME_DATA_RAM_ADDRESS] once DMA_READ
+    * or maybe even all DMA operations have completed. */
+   case NVC597_MME_DMA_SYNC: {
+      sim->ram.data[sim->ram.addr] = data;
+      break;
+   }
    case NVC597_MME_DMA_READ_FIFOED:
       sim->dma.read_fifo.count = data;
       break;

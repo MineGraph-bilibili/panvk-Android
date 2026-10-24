@@ -17,6 +17,7 @@
 #include "util/macros.h"
 #include "util/u_math.h"
 #include "util/os_misc.h"
+#include "util/format/u_format.h"
 
 #include <stdio.h>
 #include <ctype.h>
@@ -364,6 +365,20 @@ ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_dev
 
    out->has_gfx6_mrt_export_bug =
       info->family == CHIP_TAHITI || info->family == CHIP_PITCAIRN || info->family == CHIP_VERDE;
+
+   /* Load balance per watt (LBPW) monitors HW utilization to determine
+    * if the HW can handle the workload with fewer CUs enabled.
+    * The SPI_LB_CU_MASK register directs the SPI to stop launching
+    * waves to a CU so it will be clock-gated. Due to a bug, SPI applies
+    * the clock-gate immediately, which causes pending LS/HS/CS waves on
+    * that CU to never be launched. (A microcode fix exists for CS.)
+    *
+    * The workaround is to limit each LS/HS threadgroup to a single wavefront.
+    * The kernel only enables LBPW on SI when VRAM is DDR3, that's when we
+    * need the workaround.
+    */
+   out->has_lbpw_tcs_wg_bug = info->gfx_level == GFX6 && info->vram_type == AMDGPU_VRAM_TYPE_DDR3;
+
    out->has_vtx_format_alpha_adjust_bug = info->gfx_level <= GFX8 && info->family != CHIP_STONEY;
 
    /* On GFX6-7, SMEM instructions access memory when num_records == 0 or offset >= num_records,
@@ -500,18 +515,21 @@ ac_fill_hw_ip_info(struct radeon_info *info, const struct drm_amdgpu_info_device
       info->ip[ip_type].ver_major = ip_info->hw_ip_version_major;
       info->ip[ip_type].ver_minor = ip_info->hw_ip_version_minor;
 
-      /* Fix incorrect IP versions reported by the kernel. */
-      if (device_info->family == FAMILY_NV &&
-            (ASICREV_IS(device_info->external_rev, NAVI10) ||
-            ASICREV_IS(device_info->external_rev, NAVI12) ||
-            ASICREV_IS(device_info->external_rev, NAVI14)))
-         info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 1;
-      else if (device_info->family == FAMILY_NV ||
-               device_info->family == FAMILY_VGH ||
-               device_info->family == FAMILY_RMB ||
-               device_info->family == FAMILY_RPL ||
-               device_info->family == FAMILY_MDN)
-         info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 3;
+      if (ip_type == AMD_IP_GFX) {
+         /* Fix incorrect IP versions reported by the kernel. */
+         if (device_info->family == FAMILY_NV &&
+               (ASICREV_IS(device_info->external_rev, NAVI10) ||
+               ASICREV_IS(device_info->external_rev, NAVI12) ||
+               ASICREV_IS(device_info->external_rev, NAVI14) ||
+               ASICREV_IS(device_info->external_rev, GFX1013)))
+            info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 1;
+         else if (device_info->family == FAMILY_NV ||
+                  device_info->family == FAMILY_VGH ||
+                  device_info->family == FAMILY_RMB ||
+                  device_info->family == FAMILY_RPL ||
+                  device_info->family == FAMILY_MDN)
+            info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 3;
+      }
    }
 
    /* According to the kernel, only SDMA and VPE require 256B alignment, but use it
@@ -740,6 +758,7 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
          break;
       case FAMILY_GFX1170:
          identify_chip(GFX1170);
+         identify_chip(GFX1171);
          break;
       case FAMILY_NV4:
          if (info->ip[AMD_IP_GFX].ver_minor == 0) {
@@ -1028,8 +1047,16 @@ void ac_fill_bug_info(struct radeon_info *info)
    /* Firmware bug with DISPATCH_TASKMESH_INDIRECT_MULTI_ACE packets.
     * On old MEC FW versions, it hangs the GPU when indirect count is zero.
     */
-   info->has_taskmesh_indirect0_bug = info->gfx_level == GFX10_3 &&
-                                      info->mec_fw_version < 100;
+   if (info->gfx_level == GFX10_3) {
+      if (info->family == CHIP_RAPHAEL_MENDOCINO) {
+         info->has_taskmesh_indirect0_bug = info->mec_fw_version < 18;
+      } else {
+         /* All other GFX10.3 chips, including dGPUs, Vangogh and Rembrandt
+          * have been fixed in MEC 100.
+          */
+         info->has_taskmesh_indirect0_bug = info->mec_fw_version < 100;
+      }
+   }
 
    info->has_export_conflict_bug = info->gfx_level == GFX11;
 
@@ -1492,6 +1519,15 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    }
 
    info->userq_ip_mask = debug_get_bool_option("AMD_USERQ", false) ? device_info.userq_ip_mask : 0;
+   info->userq_ip_mask &= ~BITFIELD_BIT(AMD_IP_SDMA);
+
+   /* Incomplete userq syncobj timeline support until .65 */
+   if (info->userq_ip_mask && info->drm_minor < 65) {
+      fprintf(stderr, "amdgpu: DRM version is %u.%u.%u, but userq support "
+                      "requires 3.65.0 or later.\n",
+              info->drm_major, info->drm_minor, info->drm_patchlevel);
+      return AC_QUERY_GPU_INFO_FAIL;
+   }
 
    for (unsigned ip_type = 0; ip_type < AMD_NUM_IP_TYPES; ip_type++) {
       struct drm_amdgpu_info_hw_ip ip_info = {0};
@@ -1505,12 +1541,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          if (!ac_drm_query_hw_ip_count(dev, ip_type, &num_instances))
             info->ip[ip_type].num_instances = num_instances;
       }
-   }
-
-   /* Only require gfx or compute. */
-   if (!info->ip[AMD_IP_GFX].num_queues && !info->ip[AMD_IP_COMPUTE].num_queues) {
-      fprintf(stderr, "amdgpu: failed to find gfx or compute.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
    }
 
    r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_GFX_ME, 0, 0, &info->me_fw_version,
@@ -1647,10 +1677,10 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->pcie_bandwidth_mbps = info->pcie_num_lanes * 0.985 * 1024;
       break;
    case 4:
-      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 1.969 * 1024;
+      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 1.970 * 1024;
       break;
    case 5:
-      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 3.938 * 1024;
+      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 3.940 * 1024;
       break;
    case 6:
       info->pcie_bandwidth_mbps = info->pcie_num_lanes * 7.563 * 1024;
@@ -1859,6 +1889,32 @@ void ac_compute_device_uuid(const struct radeon_info *info, char *uuid, size_t s
    uint_uuid[1] = info->pci.bus;
    uint_uuid[2] = info->pci.dev;
    uint_uuid[3] = info->pci.func;
+}
+
+static void ac_print_gpu_modifiers(FILE *f, const struct radeon_info *const info,
+                                   const enum pipe_format format)
+{
+   const uint32_t bpp = util_format_get_blocksizebits(format);
+   struct ac_modifier_options modifier_options = {
+      .dcc = true,
+      .dcc_retile = true,
+   };
+   uint64_t modifiers[256];
+   unsigned modifier_count = ARRAY_SIZE(modifiers);
+
+   /* Get the number of modifiers. */
+   if (ac_get_supported_modifiers(info, &modifier_options, format,
+                                  &modifier_count, modifiers)) {
+      if (modifier_count)
+         fprintf(f, "Modifiers (%u bpp):\n", bpp);
+
+      for (unsigned i = 0; i < modifier_count; i++) {
+         char *name = drmGetFormatModifierName(modifiers[i]);
+
+         fprintf(f, "    0x%" PRIx64 " - %s\n", modifiers[i], name);
+         free(name);
+      }
+   }
 }
 
 void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
@@ -2120,6 +2176,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_attr_ring = %i\n", info->compiler_info.has_attr_ring);
    fprintf(f, "    smaller_tcs_workgroups = %i\n", info->compiler_info.smaller_tcs_workgroups);
    fprintf(f, "    has_gfx6_mrt_export_bug = %i\n", info->compiler_info.has_gfx6_mrt_export_bug);
+   fprintf(f, "    has_lbpw_tcs_wg_bug = %i\n", info->compiler_info.has_lbpw_tcs_wg_bug);
    fprintf(f, "    has_vtx_format_alpha_adjust_bug = %i\n", info->compiler_info.has_vtx_format_alpha_adjust_bug);
    fprintf(f, "    has_smem_oob_access_bug = %i\n", info->compiler_info.has_smem_oob_access_bug);
    fprintf(f, "    has_image_load_dcc_bug = %i\n", info->compiler_info.has_image_load_dcc_bug);
@@ -2205,26 +2262,9 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
       fprintf(f, "    num_lower_pipes = %u (raw)\n", G_0098F8_NUM_LOWER_PIPES(info->gb_addr_config));
    }
 
-   struct ac_modifier_options modifier_options = {
-      .dcc = true,
-      .dcc_retile = true,
-   };
-   uint64_t modifiers[256];
-   unsigned modifier_count = ARRAY_SIZE(modifiers);
-
-   /* Get the number of modifiers. */
-   if (ac_get_supported_modifiers(info, &modifier_options, PIPE_FORMAT_R8G8B8A8_UNORM,
-                                  &modifier_count, modifiers)) {
-      if (modifier_count)
-         fprintf(f, "Modifiers (32bpp):\n");
-
-      for (unsigned i = 0; i < modifier_count; i++) {
-         char *name = drmGetFormatModifierName(modifiers[i]);
-
-         fprintf(f, "    %s\n", name);
-         free(name);
-      }
-   }
+   ac_print_gpu_modifiers(f, info, PIPE_FORMAT_R8G8_UNORM);
+   ac_print_gpu_modifiers(f, info, PIPE_FORMAT_R8G8B8A8_UNORM);
+   ac_print_gpu_modifiers(f, info, PIPE_FORMAT_R16G16B16A16_UNORM);
 }
 
 int ac_get_gs_table_depth(enum amd_gfx_level gfx_level, enum radeon_family family)

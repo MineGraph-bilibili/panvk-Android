@@ -47,6 +47,7 @@ enum {
 enum {
    RC_STATE_R300_TEXRECT_FACTOR = 0,
    RC_STATE_R300_TEXSCALE_FACTOR,
+   RC_STATE_R300_TEXSCALE_UPPER,
    RC_STATE_R300_VIEWPORT_SCALE,
    RC_STATE_R300_VIEWPORT_OFFSET
 };
@@ -141,20 +142,43 @@ struct r300_fragment_program_external_state {
       unsigned compare_mode_enabled : 1;
 
       /**
-       * This field specifies wrapping modes for the sampler.
+       * These fields specify the wrapping mode for each sampler coordinate.
        *
-       * If this field is \ref RC_WRAP_NONE (aka 0), no wrapping maths
-       * will be performed on the coordinates.
+       * If a field is \ref RC_WRAP_NONE (aka 0), no wrapping maths will be
+       * performed on that coordinate.
        */
-      unsigned wrap_mode : 3;
+      rc_wrap_mode wrap_mode_s : 3;
+      rc_wrap_mode wrap_mode_t : 3;
+      rc_wrap_mode wrap_mode_r : 3;
+
+      /**
+       * Coordinates using CLAMP_TO_EDGE which need their upper bound
+       * adjusted to the logical edge of an NPOT 3D texture.
+       */
+      unsigned clamp_to_edge_s : 1;
+      unsigned clamp_to_edge_t : 1;
+      unsigned clamp_to_edge_r : 1;
 
       /**
        * The coords are scaled after applying the wrap mode emulation
        * and right before texture fetch. The scaling factor is given by
        * RC_STATE_R300_TEXSCALE_FACTOR. */
       unsigned clamp_and_scale_before_fetch : 1;
+
+      /**
+       * Transform cube coordinates so that a logical NPOT face addresses
+       * the corresponding subregion of its physical POT face. */
+      unsigned scale_cube_coords_before_fetch : 1;
+
+      /** Clamp linearly filtered NPOT cube coordinates to the logical edge. */
+      unsigned clamp_cube_coords_before_fetch : 1;
+
+      /** Correct implicit LOD selection at the logical NPOT cube edge. */
+      unsigned bias_cube_lod_at_edge : 1;
    } unit[16];
 
+   /** Mask of 2D samplers using unnormalized coordinates. */
+   unsigned unnormalized_coords_mask : 16;
    unsigned alpha_to_one : 1;
 
    int sampler_state_count;

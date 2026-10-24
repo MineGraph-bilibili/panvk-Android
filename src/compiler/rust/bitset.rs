@@ -540,6 +540,24 @@ macro_rules! impl_const_bit_set {
                 }
             }
 
+            pub const fn contains_any_in_range(
+                &self,
+                range: Range<$K>,
+            ) -> bool {
+                assert!(
+                    range.end as usize <= W * 32,
+                    "ConstBitSet index out of bounds",
+                );
+
+                if range.start < range.end {
+                    let start = BitIndex::from_flat_index(range.start as usize);
+                    let end = BitIndex::from_flat_index(range.end as usize);
+                    any_set_in_range(&self.words, start, end)
+                } else {
+                    false
+                }
+            }
+
             pub const fn insert(&mut self, key: $K) -> bool {
                 let idx = BitIndex::from_flat_index(key as usize);
                 assert!(idx.word < W, "ConstBitSet index out of bounds");
@@ -569,6 +587,19 @@ macro_rules! impl_const_bit_set {
                     exists
                 } else {
                     false
+                }
+            }
+
+            pub const fn remove_range(&mut self, range: Range<$K>) {
+                assert!(
+                    range.end as usize <= W * 32,
+                    "ConstBitSet index out of bounds",
+                );
+
+                if range.start < range.end {
+                    let start = BitIndex::from_flat_index(range.start as usize);
+                    let end = BitIndex::from_flat_index(range.end as usize);
+                    unset_range(&mut self.words, start, end);
                 }
             }
 
@@ -687,6 +718,14 @@ impl<K> BitSet<K> {
             }
         }
         true
+    }
+
+    pub fn len(&self) -> usize {
+        let mut count = 0;
+        for w in self.words.iter() {
+            count += usize::try_from(w.count_ones()).unwrap();
+        }
+        count
     }
 }
 

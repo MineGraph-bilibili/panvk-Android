@@ -124,6 +124,10 @@ pub fn derive_as_slice(
             let attr_type = Ident::new(attr_type, Span::call_site());
             if let Some(first) = first {
                 quote! {
+                    impl compiler::as_slice::AsArrayLen<#slice_type> for #ident {
+                        const LEN: usize = #count;
+                    }
+
                     unsafe impl compiler::as_slice::AsArray<#slice_type, #count>
                         for #ident
                     {
@@ -154,6 +158,18 @@ pub fn derive_as_slice(
                 }
             } else {
                 quote! {
+                    impl compiler::as_slice::AsArrayLen<#slice_type> for #ident {
+                        const LEN: usize = 0;
+                    }
+
+                    unsafe impl compiler::as_slice::AsArray<#slice_type, #count>
+                        for #ident
+                    {
+                        type Attr = #attr_type;
+                        const ATTRS: [#attr_type; 0] = [#attrs];
+                        const ARRAY_OFFSET: usize = 0;
+                    }
+
                     impl compiler::as_slice::AsSlice<#slice_type> for #ident {
                         type Attr = #attr_type;
 

@@ -1,5 +1,0 @@
-Name: xcb-shm
-Description: xcb-shm
-Version: 1.15
-Libs: -lxcb-shm
-Cflags:

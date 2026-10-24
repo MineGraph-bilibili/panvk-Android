@@ -24,6 +24,12 @@ dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.max_workgroup_memory\.
 # tests are broken with Vulkan 1.0: https://gerrit.khronos.org/c/vk-gl-cts/+/19823
 dEQP-VK.wsi.direct_drm.*
 dEQP-VK.wsi.acquire_drm_display.*
+dEQP-VK.api.image_compression_control.swapchain.direct_drm.*
+dEQP-VK.api.image_compression_control.swapchain.direct.disabled
 
 # flake timeout
 program@execute@builtin@builtin-float-sincos-1.0.generated
+
+# OpenCL-CTS Timeouts:
+^Images \(clFillImage\)$
+^Images \(clCopyImage\)$

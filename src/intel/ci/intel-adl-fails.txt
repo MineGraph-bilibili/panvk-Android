@@ -1,8 +1,6 @@
 api@clgetdeviceinfo,Fail
 api@clgetextensionfunctionaddressforplatform,Fail
 api@cllinkprogram,Fail
-program@execute@global-offset,Fail
-program@execute@global-offset@3d- input dependent,Fail
 program@execute@vstore@vstore-char-private,Crash
 program@execute@vstore@vstore-short-private,Crash
 program@execute@vstore@vstore-uchar-private,Crash

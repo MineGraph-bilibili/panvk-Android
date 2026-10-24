@@ -551,9 +551,11 @@ lower_shared_to_var(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          
          if (intr->intrinsic == nir_intrinsic_shared_atomic_swap)
             nir_def_rewrite_uses(&intr->def, nir_deref_atomic_swap(b, 32, &deref->def, intr->src[1].ssa, intr->src[2].ssa,
+                                                                   .access = nir_intrinsic_access(intr),
                                                                    .atomic_op = nir_intrinsic_atomic_op(intr)));
          else
             nir_def_rewrite_uses(&intr->def, nir_deref_atomic(b, 32, &deref->def, intr->src[1].ssa,
+                                                              .access = nir_intrinsic_access(intr),
                                                               .atomic_op = nir_intrinsic_atomic_op(intr)));
          break;
       }

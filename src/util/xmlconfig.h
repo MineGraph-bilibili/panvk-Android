@@ -140,6 +140,7 @@ typedef struct {
    const char *driverName;
    const char *kernelDriverName;
    const char *deviceName;
+   uint32_t deviceVersion;
    const char *applicationName;
    uint32_t applicationVersion;
    const char *engineName;

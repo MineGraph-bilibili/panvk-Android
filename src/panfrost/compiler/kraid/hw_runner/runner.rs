@@ -32,6 +32,10 @@ impl TestRunner {
         self.vm.dev().props().gpu_id
     }
 
+    pub fn gpu_variant(&self) -> u32 {
+        self.vm.dev().props().gpu_variant
+    }
+
     pub fn run(&self, invoc: InvocationInfo) -> Result<(), HwError> {
         // Create the command stream
         let cs = new_invocation_cs(&self.vm, &invoc)?;
@@ -50,7 +54,7 @@ impl TestRunner {
         self.group.check_state()?;
 
         // Copy the data back
-        invoc.data.copy_from_slice(cs.read_host_data());
+        cs.copy_back(invoc);
 
         Ok(())
     }

@@ -253,17 +253,32 @@ impl WordCopies<'_> {
                 }
             }
             SrcMod::FAbs | SrcMod::FNeg | SrcMod::FNegAbs => {
+                // If we are trying to propagate a float modifier into this
+                // source, both instructions need to have the same float type,
+                // up to a vector.
+                if copy.src_type.scalar_type() != src_type.scalar_type() {
+                    return;
+                }
+
                 // If we have a float source modifier sitting between the two
                 // swizzles, we need to ensure that src.swizzle respects it so
                 // that we can re-order the copy source modifier and the
                 // instruction's swizzle.
                 match src_type {
                     DataType::F32 => {
-                        if !src.swizzle.is_none() {
+                        let swz_src_type = match src.swizzle {
+                            Swizzle::NONE => DataType::F32,
+                            Swizzle::HF0 | Swizzle::HF1 => DataType::F16,
+                            _ => return,
+                        };
+                        if copy.src_type.scalar_type() != swz_src_type {
                             return;
                         }
                     }
                     DataType::F16 | DataType::V2F16 => {
+                        if copy.src_type.scalar_type() != DataType::F16 {
+                            return;
+                        }
                         if !matches!(
                             src.swizzle,
                             Swizzle::H00
@@ -734,7 +749,9 @@ impl ByteCopies<'_> {
         let Some(copy) = self.copies.get(&src_ssa) else {
             return;
         };
-        let Some(copy_src) = copy.as_src(src.swizzle.bytes_read(4)) else {
+        let src_bytes = instr.src_type(src).total_bytes();
+        let Some(copy_src) = copy.as_src(src.swizzle.bytes_read(src_bytes))
+        else {
             return;
         };
         let Some(swizzle) = copy_src.swizzle.swizzle(src.swizzle) else {

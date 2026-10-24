@@ -42,6 +42,7 @@
 #include "util/simple_mtx.h"
 #include "util/u_shader_variant_cache.h"
 #include "util/vma.h"
+#include "lp_texture_handle.h"
 #include "gallivm/lp_bld.h"
 #include "gallivm/lp_bld_misc.h"
 
@@ -73,6 +74,8 @@ struct llvmpipe_screen
    struct list_head ctx_list;
 
    struct lp_context_ref llvm_context;
+
+   struct lp_sampler_matrix sampler_matrix;
 
    struct util_shader_variant_cache_options fs_variant_opts;
    struct util_shader_variant_cache_options setup_variant_opts;

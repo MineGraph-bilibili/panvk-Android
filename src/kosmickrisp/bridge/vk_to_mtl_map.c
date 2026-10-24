@@ -180,6 +180,22 @@ vk_sampler_mipmap_mode_to_mtl_sampler_mip_filter(enum VkSamplerMipmapMode mode)
    }
 }
 
+enum mtl_sampler_reduction_mode
+vk_sampler_reduction_mode_to_mtl_sampler_reduction_mode(
+   enum VkSamplerReductionMode mode)
+{
+   switch (mode) {
+   case VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE:
+      return MTL_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE;
+   case VK_SAMPLER_REDUCTION_MODE_MIN:
+      return MTL_SAMPLER_REDUCTION_MODE_MINIMUM;
+   case VK_SAMPLER_REDUCTION_MODE_MAX:
+      return MTL_SAMPLER_REDUCTION_MODE_MAXIMUM;
+   default:
+      UNREACHABLE("Unsupported sampler reduction mode");
+   }
+}
+
 enum mtl_compare_function
 vk_compare_op_to_mtl_compare_function(enum VkCompareOp op)
 {
@@ -232,6 +248,34 @@ vk_front_face_to_mtl_cull_mode(enum VkCullModeFlagBits mode)
       return MTL_CULL_MODE_BACK;
    default:
       UNREACHABLE("Unsupported VkCullModeFlags");
+   }
+}
+
+enum mtl_depth_resolve_filter
+vk_resolve_mode_to_mtl_depth_resolve_filter(
+   enum VkResolveModeFlagBits resolve_mode)
+{
+   switch (resolve_mode) {
+   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
+      return MTL_DEPTH_RESOLVE_FILTER_SAMPLE_0;
+   case VK_RESOLVE_MODE_MIN_BIT:
+      return MTL_DEPTH_RESOLVE_FILTER_MIN;
+   case VK_RESOLVE_MODE_MAX_BIT:
+      return MTL_DEPTH_RESOLVE_FILTER_MAX;
+   default:
+      UNREACHABLE("Unsupported VkResolveMode for depth");
+   }
+}
+
+enum mtl_stencil_resolve_filter
+vk_resolve_mode_to_mtl_stencil_resolve_filter(
+   enum VkResolveModeFlagBits resolve_mode)
+{
+   switch (resolve_mode) {
+   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
+      return MTL_STENCIL_RESOLVE_FILTER_SAMPLE_0;
+   default:
+      UNREACHABLE("Unsupported VkResolveMode for stencil");
    }
 }
 

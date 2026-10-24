@@ -43,7 +43,7 @@ try_extract_const_addition(nir_builder *b, opt_offsets_state *state, nir_scalar 
 {
    bool is_unsigned = min == 0;
    assert(is_unsigned || max <= INT32_MAX);
-   nir_scalar val = nir_scalar_chase_movs(*out_val);
+   nir_scalar val = *out_val;
 
    if (!nir_scalar_is_alu(val))
       return false;
@@ -53,8 +53,8 @@ try_extract_const_addition(nir_builder *b, opt_offsets_state *state, nir_scalar 
       return false;
 
    nir_scalar src[2] = {
-      { alu->src[0].src.ssa, alu->src[0].swizzle[val.comp] },
-      { alu->src[1].src.ssa, alu->src[1].swizzle[val.comp] },
+      nir_scalar_chase_alu_src(val, 0),
+      nir_scalar_chase_alu_src(val, 1),
    };
 
    /* Make sure that we aren't taking out an addition that could trigger
@@ -83,7 +83,6 @@ try_extract_const_addition(nir_builder *b, opt_offsets_state *state, nir_scalar 
    }
 
    for (unsigned i = 0; i < 2; ++i) {
-      src[i] = nir_scalar_chase_movs(src[i]);
       if (nir_scalar_is_const(src[i])) {
          int64_t offset;
          if (is_unsigned)
@@ -141,7 +140,7 @@ try_fold_load_store(nir_builder *b,
       return false;
 
    if (!nir_src_is_const(*off_src)) {
-      nir_scalar val = { .def = off_src->ssa, .comp = 0 };
+      nir_scalar val = nir_scalar_resolved(off_src->ssa, 0);
       if (!try_extract_const_addition(b, state, &val, &off_const, min, max, need_nuw))
          return false;
       b->cursor = nir_before_instr(&intrin->instr);

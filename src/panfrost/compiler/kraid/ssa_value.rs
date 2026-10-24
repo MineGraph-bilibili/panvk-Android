@@ -4,7 +4,7 @@
 use compiler::bitset::IntoBitIndex;
 use compiler::lower_bounded::*;
 use std::fmt;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, Range};
 
 type SSAValueInner = LowerBoundedU32<9>;
 type SSARefInnerShort = LowerBoundedU32Array<9, 3>;
@@ -44,7 +44,17 @@ impl SSAValueMeta {
     }
 }
 
-/// An SSA value
+/// A scalar SSA value.  SSA values in Kraid are 8, 16, or 32 bits and
+/// represent a single register or sub-register value.  SSA values can be
+/// combined together into an SSARef for larger values.
+///
+/// SSA values can only be created with the SSAValueAllocator and can never be
+/// modified.  This allows us to make them Copy while also ensuring that you
+/// can always get basic information from an SSAValue such as the number of
+/// bits and the index without ever risking inconsistencies in the IR.  For any
+/// given SSAValueAllocator and any given SSA value index, bits() and is_mem()
+/// will always return the same, no matter which instance of SSAValue they're
+/// called on.
 #[repr(transparent)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct SSAValue(SSAValueInner);
@@ -122,6 +132,28 @@ enum SSARefInner {
     Long(Box<SSARefInnerLong>),
 }
 
+/// A reference to one or more SSA values.  SSA values in Kraid are 8, 16, or
+/// 32 bits and represent a single register or sub-register value.  An SSARef
+/// groups together one or more SSA values to construct a larger value.  There
+/// is, however, one important rule:  If an SSARef references more than one
+/// SSAValue, all referenced SSA values must be 32-bit.
+///
+/// This design ensures that there is exactly one unique way to construct and
+/// SSARef for any given bit size.  It also means that RA and other components
+/// never have to deal with heterogeneous vectors, such as a vector of 8, 16,
+/// and 8 bits for a total of 32.  Everything is either a single SSAValue or
+/// a vector of 32-bit elements.  It does, however, come with the downside
+/// that there is no way to make an SSARef of 24 or 48 bits.  However, small
+/// 3-component vectors are unlikely enough and the space savings is small
+/// enough that this was considered an acceptible trade-off.
+///
+/// The other downside with this design is that we still have to use MKVEC to
+/// construct vectors of 8 or 16-bit elements.  However, since the ops producing
+/// such values will usually be vectorized,  we likely either already have a
+/// vector or we're components from two or more distinct vectors, in which case
+/// we need a MKVEC anyway.  Also, RA is capable of eliminating some MKVEC ops
+/// by simply allocating the scalars consecutively.  In practice, this hasn't
+/// been shown to be much of a problem.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct SSARef(SSARefInner);
 
@@ -327,8 +359,79 @@ impl TryFrom<&[SSAValue]> for SSARef {
     }
 }
 
+struct SSABytesIter<'a> {
+    ssa_iter: std::slice::Iter<'a, SSAValue>,
+    bytes: Range<u16>,
+}
+
+impl<'a> Iterator for SSABytesIter<'a> {
+    type Item = (&'a SSAValue, Range<u16>);
+
+    fn next(&mut self) -> Option<(&'a SSAValue, Range<u16>)> {
+        if let Some(ssa) = self.ssa_iter.next() {
+            let ssa_bytes = u16::from(ssa.bytes());
+            let bytes = self.bytes.start..(self.bytes.start + ssa_bytes);
+            debug_assert!(bytes.end <= self.bytes.end);
+            self.bytes.start = bytes.end;
+            Some((ssa, bytes))
+        } else {
+            None
+        }
+    }
+}
+
+struct SSABytesIterMut<'a> {
+    ssa_iter: std::slice::IterMut<'a, SSAValue>,
+    bytes: Range<u16>,
+}
+
+impl<'a> Iterator for SSABytesIterMut<'a> {
+    type Item = (&'a mut SSAValue, Range<u16>);
+
+    fn next(&mut self) -> Option<(&'a mut SSAValue, Range<u16>)> {
+        if let Some(ssa) = self.ssa_iter.next() {
+            let ssa_bytes = u16::from(ssa.bytes());
+            let bytes = self.bytes.start..(self.bytes.start + ssa_bytes);
+            debug_assert!(bytes.end <= self.bytes.end);
+            self.bytes.start = bytes.end;
+            Some((ssa, bytes))
+        } else {
+            None
+        }
+    }
+}
+
+impl SSARef {
+    /// Simultaneously iterate over an SSARef and a byte range.  The byte range
+    /// must be big enough to contain the SSARef.  If the byte range is larger
+    /// than the SSARef, the trailing bytes will be ignored.
+    pub fn iter_zip_bytes(
+        &self,
+        bytes: Range<u16>,
+    ) -> impl Iterator<Item = (&SSAValue, Range<u16>)> {
+        SSABytesIter {
+            ssa_iter: self.iter(),
+            bytes,
+        }
+    }
+
+    /// Simultaneously iterate over an SSARef and a byte range.  The byte range
+    /// must be big enough to contain the SSARef.  If the byte range is larger
+    /// than the SSARef, the trailing bytes will be ignored.
+    pub fn iter_mut_zip_bytes(
+        &mut self,
+        bytes: Range<u16>,
+    ) -> impl Iterator<Item = (&mut SSAValue, Range<u16>)> {
+        SSABytesIterMut {
+            ssa_iter: self.iter_mut(),
+            bytes,
+        }
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 const _: () = {
+    debug_assert!(size_of::<Option<SSAValue>>() == 4);
     debug_assert!(size_of::<SSARef>() == 16);
 };
 
@@ -368,10 +471,6 @@ pub struct SSAValueAllocator {
 }
 
 impl SSAValueAllocator {
-    pub fn new() -> SSAValueAllocator {
-        Default::default()
-    }
-
     pub fn count(&self) -> u32 {
         self.meta.len().try_into().unwrap()
     }
@@ -394,6 +493,69 @@ impl AllocSSA for SSAValueAllocator {
         let idx = self.count();
         self.meta.push(meta);
         SSAValue::new(idx, meta)
+    }
+}
+
+#[derive(Clone)]
+pub struct SSAValueIndexedVec<T: Default>(Vec<T>);
+
+impl<T: Default> SSAValueIndexedVec<T> {
+    pub fn with_count(count: u32) -> SSAValueIndexedVec<T> {
+        let mut vec = Vec::new();
+        vec.resize_with(count.try_into().unwrap(), Default::default);
+        SSAValueIndexedVec(vec)
+    }
+
+    pub fn get_by_idx(&self, idx: u32) -> &T {
+        let idx = usize::try_from(idx).unwrap();
+        &self.0[idx]
+    }
+
+    pub fn get_mut_by_idx(&mut self, idx: u32) -> &mut T {
+        let idx = usize::try_from(idx).unwrap();
+        &mut self.0[idx]
+    }
+}
+
+impl<T: Default> std::ops::Index<SSAValue> for SSAValueIndexedVec<T> {
+    type Output = T;
+
+    fn index(&self, ssa: SSAValue) -> &T {
+        self.get_by_idx(ssa.idx())
+    }
+}
+
+impl<T: Default> std::ops::Index<&SSAValue> for SSAValueIndexedVec<T> {
+    type Output = T;
+
+    fn index(&self, ssa: &SSAValue) -> &T {
+        self.get_by_idx(ssa.idx())
+    }
+}
+
+impl<T: Default> std::ops::Index<u32> for SSAValueIndexedVec<T> {
+    type Output = T;
+
+    fn index(&self, ssa: u32) -> &T {
+        self.get_by_idx(ssa)
+    }
+}
+
+impl<T: Default> std::ops::IndexMut<SSAValue> for SSAValueIndexedVec<T> {
+    fn index_mut(&mut self, ssa: SSAValue) -> &mut T {
+        self.get_mut_by_idx(ssa.idx())
+    }
+}
+
+impl<T: Default> std::ops::IndexMut<&SSAValue> for SSAValueIndexedVec<T> {
+    fn index_mut(&mut self, ssa: &SSAValue) -> &mut T {
+        self.get_mut_by_idx(ssa.idx())
+    }
+}
+
+impl<T: Default> std::ops::IndexMut<u32> for SSAValueIndexedVec<T> {
+    fn index_mut(&mut self, ssa: u32) -> &mut T {
+        self.get_mut_by_idx(ssa)
     }
 }
 

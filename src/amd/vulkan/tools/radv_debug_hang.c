@@ -818,12 +818,11 @@ radv_dump_enabled_options(const struct radv_device *device, FILE *f)
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    uint64_t mask;
 
-   if (instance->debug_flags) {
+   if (!BITSET_IS_EMPTY(instance->debug_flags)) {
       fprintf(f, "Enabled debug options: ");
 
-      mask = instance->debug_flags;
-      while (mask) {
-         int i = u_bit_scan64(&mask);
+      unsigned i;
+      BITSET_FOREACH_SET(i, instance->debug_flags, RADV_DEBUG_COUNT) {
          fprintf(f, "%s, ", radv_get_debug_option_name(i));
       }
       fprintf(f, "\n");
@@ -936,6 +935,14 @@ radv_vm_fault_occurred(struct radv_device *device, struct radv_winsys_gpuvm_faul
    return device->ws->query_gpuvm_fault(device->ws, fault_info);
 }
 
+bool
+radv_shader_abort_occurred(struct radv_device *device)
+{
+   const uint32_t *data = device->shader_abort.buffer.map;
+   /* Check if something was written to the abort buffer. */
+   return data && data[0] != sizeof(uint32_t);
+}
+
 enum radv_device_fault_chunk {
    RADV_DEVICE_FAULT_CHUNK_TRACE,
    RADV_DEVICE_FAULT_CHUNK_QUEUE_STATE,
@@ -1027,7 +1034,7 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
    };
 
    char *wave_dump = NULL;
-   if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+   if (!RADV_DEBUG(instance, NO_UMR))
       wave_dump = ac_get_umr_waves(&pdev->info, radv_queue_ring(queue));
 
    for (uint32_t i = 0; i < RADV_DEVICE_FAULT_CHUNK_COUNT; i++) {
@@ -1051,11 +1058,11 @@ radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_i
          radv_dump_queue_state(queue, dump_dir, wave_dump, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_UMR_WAVES:
-         if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+         if (!RADV_DEBUG(instance, NO_UMR))
             radv_dump_umr_waves(queue, wave_dump, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_UMR_RING:
-         if (!(instance->debug_flags & RADV_DEBUG_NO_UMR))
+         if (!RADV_DEBUG(instance, NO_UMR))
             radv_dump_umr_ring(queue, f);
          break;
       case RADV_DEVICE_FAULT_CHUNK_REGISTERS:

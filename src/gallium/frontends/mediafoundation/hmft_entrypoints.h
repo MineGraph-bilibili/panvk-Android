@@ -129,8 +129,16 @@ extern const wchar_t *g_pMFTFriendlyName;
 
 #define HMFT_MIN_BITS_PER_SLICE 256
 
-#define AVC_MAX_QP     51
-#define AVC_DEFAULT_QP 26
+#if MFT_CODEC_H264ENC
+#define HMFT_MAX_QP     51
+#define HMFT_DEFAULT_QP 26
+#elif MFT_CODEC_H265ENC
+#define HMFT_MAX_QP     51
+#define HMFT_DEFAULT_QP 26
+#elif MFT_CODEC_AV1ENC
+#define HMFT_MAX_QP     63
+#define HMFT_DEFAULT_QP 26
+#endif
 
 #define HMFT_MAX_TEMPORAL_LAYERS 2
 
@@ -510,7 +518,7 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    BOOL m_bContentTypeSet = FALSE;
    UINT32 m_uiMinQP = 0;
    BOOL m_bMinQPSet = FALSE;
-   UINT32 m_uiMaxQP = AVC_MAX_QP;
+   UINT32 m_uiMaxQP = HMFT_MAX_QP;
    BOOL m_bMaxQPSet = FALSE;
    UINT32 m_uiSPSID = 0;
    BOOL m_bSPSIDSet = FALSE;
@@ -559,9 +567,9 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    BOOL m_bVideoROIEnabled = FALSE;
    UINT32 m_uiDirtyRectEnabled = 0;
    UINT32 m_uiQuality[3] = { 65, 65, 65 };   // Default value for AVEncCommonQuality is 65
-   uint32_t m_uiEncodeFrameTypeIQP[3] = { AVC_DEFAULT_QP, AVC_DEFAULT_QP, AVC_DEFAULT_QP };
-   uint32_t m_uiEncodeFrameTypePQP[3] = { AVC_DEFAULT_QP, AVC_DEFAULT_QP, AVC_DEFAULT_QP };
-   uint32_t m_uiEncodeFrameTypeBQP[3] = { AVC_DEFAULT_QP, AVC_DEFAULT_QP, AVC_DEFAULT_QP };
+   uint32_t m_uiEncodeFrameTypeIQP[3] = { HMFT_DEFAULT_QP, HMFT_DEFAULT_QP, HMFT_DEFAULT_QP };
+   uint32_t m_uiEncodeFrameTypePQP[3] = { HMFT_DEFAULT_QP, HMFT_DEFAULT_QP, HMFT_DEFAULT_QP };
+   uint32_t m_uiEncodeFrameTypeBQP[3] = { HMFT_DEFAULT_QP, HMFT_DEFAULT_QP, HMFT_DEFAULT_QP };
    BOOL m_bEncodeQPSet = FALSE;
 
    BOOL m_bLowLatency = FALSE;

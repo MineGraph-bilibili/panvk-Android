@@ -124,7 +124,9 @@ draw_reset_vertex_ids(struct draw_context *draw)
       unsigned stride = draw->pipeline.vertex_stride;
 
       for (unsigned i = 0; i < draw->pipeline.vertex_count; i++) {
-         ((struct vertex_header *)verts)->vertex_id = UNDEFINED_VERTEX_ID;
+         struct vertex_header *vh = (struct vertex_header *)verts;
+         if (vh->vertex_id != UNDEFINED_VERTEX_ID)
+            vh->vertex_id = UNDEFINED_VERTEX_ID;
          verts += stride;
       }
    }

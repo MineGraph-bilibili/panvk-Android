@@ -5,6 +5,7 @@
 
 #include "executor.h"
 
+#include "common/intel_common.h"
 #include "common/intel_compute_slm.h"
 #include "util/u_math.h"
 
@@ -368,6 +369,10 @@ genX(emit_execute)(const executor_run *run)
                                                       run->simd),
       .NumberOfBarriers = run->hw_threads > 1,
 #endif
+#if GFX_VER >= 30
+      .RegistersPerThread =
+         intel_register_blocks(ec->devinfo, run->hw_regs),
+#endif
    };
 
    void *b = executor_alloc_bytes_aligned(&ec->bo.batch, 0, 256);
@@ -393,8 +398,15 @@ genX(emit_execute)(const executor_run *run)
 #if GFX_VERx10 >= 125
    executor_batch_emit(GENX(STATE_COMPUTE_MODE), cm) {
       cm.Mask1 = 0xffff;
+#if GFX_VER < 30
+      cm.LargeGRFMode = run->hw_regs == 256;
+#endif
 #if GFX_VERx10 >= 200
       cm.Mask2 = 0xffff;
+#endif
+#if GFX_VER >= 30
+      cm.EnableVariableRegisterSizeAllocationMask = 1;
+      cm.EnableVariableRegisterSizeAllocation = 1;
 #endif
    }
 

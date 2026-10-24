@@ -22,7 +22,7 @@ layout(push_constant) uniform CONSTS
 void
 main()
 {
-   uint32_t bvh_offset = DEREF(args.src).bvh_offset;
+   uint32_t bvh_offset = DEREF(args.src).base.bvh_offset;
 
    VOID_REF src_bvh = OFFSET(args.src, bvh_offset);
    VOID_REF dst_bvh = OFFSET(args.dst, bvh_offset);
@@ -121,7 +121,8 @@ main()
 
       if (cluster.invocation_index == 0) {
          if (is_root_node) {
-            DEREF(args.dst).aabb = total_bounds;
+            DEREF(args.dst).base.aabb = total_bounds;
+            radv_write_instance_filter_gfx12(args.dst, cluster, total_bounds, bounds, valid_child_count_minus_one);
          } else {
             DEREF(INDEX(vk_aabb, args.bounds, node_index - 1)) = total_bounds;
 
@@ -130,11 +131,8 @@ main()
          }
       }
 
-      vec3 origin = total_bounds.min;
-      vec3 extent = total_bounds.max - total_bounds.min;
-
-      extent = uintBitsToFloat((floatBitsToUint(extent) + uvec3(0x7fffff)) & 0x7f800000);
-      uvec3 extent_exponents = floatBitsToUint(extent) >> 23;
+      radv_gfx12_box_node_encoder box_encoder;
+      radv_gfx12_box_node_encoder_init(box_encoder, total_bounds);
 
       if (cluster.invocation_index == 0) {
          if (!RADV_TEST_BUILD_FLAG_UPDATE_IN_PLACE) {
@@ -142,26 +140,16 @@ main()
             DEREF(dst_node).internal_base_id = src_node.internal_base_id;
             DEREF(dst_node).parent_id = src_node.parent_id;
          }
-         DEREF(dst_node).origin = origin;
-         DEREF(dst_node).child_count_exponents = extent_exponents.x | (extent_exponents.y << 8) |
-                                                 (extent_exponents.z << 16) | (valid_child_count_minus_one << 28);
+         DEREF(dst_node).origin = total_bounds.min;
+         DEREF(dst_node).child_count_exponents =
+            radv_gfx12_box_node_encoder_get_exponents_count(box_encoder, valid_child_count_minus_one);
          if (!RADV_TEST_BUILD_FLAG_UPDATE_IN_PLACE)
             DEREF(dst_node).obb_matrix_index = 0x7f;
       }
 
       if (is_valid) {
-         radv_gfx12_box_child box_child;
-         box_child.dword0 = (child.dword0 & 0xFF000000) |
-                            min(uint32_t(floor((bounds.min.x - origin.x) / extent.x * float(0x1000))), 0xfff) |
-                            (min(uint32_t(floor((bounds.min.y - origin.y) / extent.y * float(0x1000))), 0xfff) << 12);
-         box_child.dword1 =
-            (child.dword1 & 0xFF000000) |
-            min(uint32_t(floor((bounds.min.z - origin.z) / extent.z * float(0x1000))), 0xfff) |
-            (min(uint32_t(ceil((bounds.max.x - origin.x) / extent.x * float(0x1000))) - 1, 0xfff) << 12);
-         box_child.dword2 =
-            (child.dword2 & 0xFF000000) |
-            min(uint32_t(ceil((bounds.max.y - origin.y) / extent.y * float(0x1000))) - 1, 0xfff) |
-            (min(uint32_t(ceil((bounds.max.z - origin.z) / extent.z * float(0x1000))) - 1, 0xfff) << 12);
+         radv_gfx12_box_child box_child = child;
+         radv_gfx12_box_node_encoder_set_child_bounds(box_encoder, box_child, bounds);
          DEREF(dst_node).children[cluster.invocation_index] = box_child;
       }
 

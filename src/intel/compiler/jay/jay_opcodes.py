@@ -20,6 +20,7 @@ class Opcode:
     cmod: bool
     side_effects: bool
     _2src_commutative: bool
+    no_mask: bool
     extra_struct: list[tuple[str, str]]
 
 
@@ -36,6 +37,7 @@ class Props(enum.IntEnum):
     NO_DEST_ = 1 << 8
     NEGATE = NEGATE0 | NEGATE1 | NEGATE2 | NEGATE3
     NO_DEST = SIDE_EFFECTS | NO_DEST_
+    NO_MASK = 1 << 9
 
 
 _opcodes: dict[str, Opcode] = {}
@@ -59,6 +61,7 @@ def op(name: str, num_srcs: int, types: str | None = None,
                             bool(props & Props.SAT), bool(props & Props.CMOD),
                             bool(props & Props.SIDE_EFFECTS),
                             bool(props & Props.COMMUTATIVE),
+                            bool(props & Props.NO_MASK),
                             extra_struct_)
 
 
@@ -68,6 +71,8 @@ op('or',  2, 'u1 u16 u32', Props.NEGATE | Props.CMOD | Props.COMMUTATIVE)
 op('xor', 2, 'u1 u16 u32', Props.NEGATE | Props.CMOD | Props.COMMUTATIVE)
 
 op('add',   2, 'u32 s32 u64 s64 f32 f64 f16 bf16 u16 s16',
+   Props.SAT | Props.CMOD | Props.COMMUTATIVE | Props.NEGATE)
+op('add_rtne',   2, 'f32 f64',
    Props.SAT | Props.CMOD | Props.COMMUTATIVE | Props.NEGATE)
 op('add3',  3, 'u32 s32 u64 s64 u16 s16', Props.SAT |
    Props.CMOD | Props.COMMUTATIVE | Props.NEGATE)
@@ -130,6 +135,7 @@ op('shr', 2, 'u32 u64 u16 s16 s32 s64', Props.CMOD | Props.NEGATE0)
 op('quad_swizzle', 1, 'u1 u32', 0, ['enum jay_quad_swizzle swizzle'])
 op('sync', 1, 'u32', Props.NO_DEST, ['enum tgl_sync_function op'])
 op('schedule_barrier', 0, None, Props.NO_DEST)
+op('check_tdr', 0, None, Props.NO_DEST)
 
 for n in ['brd', 'illegal', 'goto', 'join', 'if', 'else',
           'endif', 'while', 'break', 'cont', 'call', 'calla', 'jmpi', 'ret',
@@ -140,7 +146,6 @@ op('halt', 0, None, Props.NO_DEST, ['bool predicate_all'])
 
 op('send', 4, None, Props.SIDE_EFFECTS, [
     'gen_sfid sfid',
-    'uint8_t sbid',
     'bool eot',
     'bool check_tdr',
     'bool bindless',
@@ -150,14 +155,15 @@ op('send', 4, None, Props.SIDE_EFFECTS, [
     'enum jay_type type_1',
     'uint8_t mlen',
     'uint8_t ex_mlen',
+    'uint8_t explicit_simd_width',
     'bool pad[1]',
     'uint32_t ex_desc_imm',
 ])
 
 op('reloc',   0, 'u32 u64', 0, ['unsigned param', 'unsigned base'])
 op('preload', 0, 'u32',     0, ['unsigned reg'])
-op('deswizzle_odd', 2, 'f32', 0, ['bool src2_hi'])
-op('deswizzle_even', 1, 'f32', 0, ['bool src_hi'])
+op('deswizzle_odd', 2, 'f32', Props.NO_MASK, ['bool src2_hi'])
+op('deswizzle_even', 1, 'f32', Props.NO_MASK, ['bool src_hi'])
 
 # Return the UGPR[4] vector base + (0, 1, 2, 3, 4, 5, 6, 7) as packed 16-bit.
 op('lane_id_8', 0, 'u16', 0, ['unsigned base'])
@@ -169,14 +175,14 @@ op('zip_ugpr16', 2, 'u32')
 op('extract_byte_per_8lanes', 2, 'u32')
 op('shr_odd_subspans_by_4', 1, 'u16')
 op('and_u32_u16', 2, 'u32')
-op('and_s32_sN', 2, 's32', 0, ['unsigned n'])
+op('and_sN_s32', 2, 's32', 0, ['unsigned n'])
 
 # Pixel coord calculations. expand_quad replicates out the per-2x2 values from
 # its source g0.[10...13] and - in the case of SIMD32 - g1.[10...13] into a
 # per-lane value. Then offset_packed_pixel_coords adds the appropriate packed
 # 2x16-bit offset within each quad, giving 2x16-bit per-lane coordinates.
 op('expand_quad', 2, 'u32')
-op('offset_packed_pixel_coords', 2, 'u32')
+op('offset_packed_pixel_coords', 2, 'u32', Props.NO_MASK)
 op("coarse_pixel_corners", 1, 'u32')
 op('extract_subspan_info', 2, 'u32', Props.CMOD, ['uint16_t mask'])
 
@@ -229,17 +235,15 @@ op('broadcast_imm', 1, 'u1 u32', 0, ['unsigned lane'])
 
 # Follows hardware source order: C B A.  Data is already packed u32 slots
 # by NIR, types are used when making the gen_inst.
-op('dpas', 3, 'u32', 0, [
+op('dpas', 3, 'u32', Props.NO_MASK, [
     'uint8_t sdepth',
     'uint8_t rcount',
     'enum jay_type acc_type',
     'enum jay_type src_type',
-    'uint8_t sbid',
-    'uint8_t pad[3]',
 ])
 
 # Pack/unpack multiple sources to/from a single 32-bit def.
-op('slice_repack', 1, 'u32', 0, [
+op('slice_repack', 1, 'u32', Props.NO_MASK, [
    'uint8_t factor_log2',
    'bool unpack',
    ])
@@ -260,7 +264,7 @@ ENUMS: 'Mapping[str, tuple[str, list[str]]]' = {
                                               'xyxy', 'zwzw', 'xxzz', 'yyww']),
     'jay_rounding_mode': ('JAY', ['round', 'rne', 'ru', 'rd', 'rtz']),
     'jay_math': ('JAY_MATH', ['_', 'inv', 'log', 'exp', 'sqrt', 'rsq', 'sin', 'cos']),
-    'gen_sfid': ('GEN_SFID', ['null', 'sampler', 'message_gateway',
+    'gen_sfid': ('GEN_SFID', ['null', '1?', 'sampler', 'message_gateway',
                               'render_cache', 'urb', 'bindless_thread_dispatch',
                               'ray_trace_accelerator', 'hdc0',
                               'pixel_interpolator', 'tgm', 'slm', 'ugm']),

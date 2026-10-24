@@ -78,12 +78,15 @@ iris_backend_compile(const struct iris_screen *screen,
    const struct intel_device_info *devinfo = screen->devinfo;
    nir_shader *nir = params->nir;
 
+   params->prog_data->source_hash = *(uint64_t *)nir->info.source_blake3;
+
    if (intel_use_jay(devinfo, nir->info.stage)) {
       struct jay_shader_bin *bin =
          jay_compile(devinfo, mem_ctx, nir,
                      (union brw_any_prog_data *)params->prog_data,
                      (union brw_any_prog_key *)params->key,
-                     params->archiver);
+                     params->archiver,
+                     NULL);
 
       return bin->kernel;
    } else {
@@ -105,7 +108,6 @@ iris_apply_brw_fs_prog_data(struct iris_compiled_shader *shader,
    iris->urb_setup_attribs_count = brw->urb_setup_attribs_count;
 
    iris->num_varying_inputs   = brw->num_varying_inputs;
-   iris->fs_config_param      = brw->fs_config_param;
    iris->flat_inputs          = brw->flat_inputs;
    iris->inputs               = brw->inputs;
    iris->computed_depth_mode  = brw->computed_depth_mode;
@@ -311,7 +313,6 @@ iris_apply_elk_fs_prog_data(struct iris_compiled_shader *shader,
    iris->urb_setup_attribs_count = elk->urb_setup_attribs_count;
 
    iris->num_varying_inputs   = elk->num_varying_inputs;
-   iris->fs_config_param      = elk->fs_config_param;
    iris->flat_inputs          = elk->flat_inputs;
    iris->inputs               = elk->inputs;
    iris->computed_depth_mode  = elk->computed_depth_mode;
@@ -1934,7 +1935,6 @@ iris_compile_vs(struct iris_screen *screen,
             .key = &brw_key.base,
             .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
             .archiver = debug_archiver,
          },
       };
@@ -1967,7 +1967,6 @@ iris_compile_vs(struct iris_screen *screen,
             .mem_ctx = mem_ctx,
             .nir = nir,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
          },
          .key = &elk_key,
          .prog_data = elk_prog_data,
@@ -2168,15 +2167,8 @@ iris_compile_tcs(struct iris_screen *screen,
       options = screen->elk->nir_options[MESA_SHADER_TESS_CTRL];
    struct elk_tcs_prog_key elk_key = iris_to_elk_tcs_key(screen, key);
 #endif
-   uint64_t source_hash;
 
-   if (ish) {
-      nir = nir_shader_clone(mem_ctx, ish->nir);
-      source_hash = ish->source_hash;
-   } else {
-      nir = iris_create_passthrough_tcs(mem_ctx, options, key);
-      source_hash = *(uint64_t*)nir->info.source_blake3;
-   }
+   nir = ish ? nir_shader_clone(mem_ctx, ish->nir) : iris_create_passthrough_tcs(mem_ctx, options, key);
 
    debug_archiver *debug_archiver =
       iris_debug_archiver_open(mem_ctx, screen, nir, key, sizeof(*key));
@@ -2202,7 +2194,6 @@ iris_compile_tcs(struct iris_screen *screen,
             .key = &brw_key.base,
             .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
             .log_data = dbg,
-            .source_hash = source_hash,
             .archiver = debug_archiver,
          },
       };
@@ -2226,7 +2217,6 @@ iris_compile_tcs(struct iris_screen *screen,
             .mem_ctx = mem_ctx,
             .nir = nir,
             .log_data = dbg,
-            .source_hash = source_hash,
          },
          .key = &elk_key,
          .prog_data = elk_prog_data,
@@ -2412,7 +2402,6 @@ iris_compile_tes(struct iris_screen *screen,
             .key = &brw_key.base,
             .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
             .archiver = debug_archiver,
          },
          .input_vue_map = &input_vue_map,
@@ -2443,7 +2432,6 @@ iris_compile_tes(struct iris_screen *screen,
             .mem_ctx = mem_ctx,
             .nir = nir,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
          },
          .key = &elk_key,
          .prog_data = elk_prog_data,
@@ -2594,10 +2582,6 @@ iris_compile_gs(struct iris_screen *screen,
       struct iris_ubo_range ubo_ranges[4] = {};
       brw_apply_ubo_ranges(screen, nir, ubo_ranges, &brw_prog_data->base.base);
 
-      brw_compute_vue_map(devinfo,
-                          &brw_prog_data->base.vue_map, nir->info.outputs_written,
-                          key->vue.layout, /* pos_slots */ 1);
-
       struct brw_gs_prog_key brw_key = iris_to_brw_gs_key(screen, key);
 
       struct brw_compile_gs_params params = {
@@ -2607,7 +2591,6 @@ iris_compile_gs(struct iris_screen *screen,
             .key = &brw_key.base,
             .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
             .archiver = debug_archiver,
          },
       };
@@ -2638,7 +2621,6 @@ iris_compile_gs(struct iris_screen *screen,
             .mem_ctx = mem_ctx,
             .nir = nir,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
          },
          .key = &elk_key,
          .prog_data = elk_prog_data,
@@ -2775,6 +2757,8 @@ iris_compile_fs(struct iris_screen *screen,
    if (key->force_dual_color_blend)
       iris_force_dual_color_blend(nir);
 
+   nir_lower_fragcolor(nir, key->nr_color_regions);
+
 #ifdef INTEL_USE_ELK
    /* Lower output variables to load_output intrinsics before setting up
     * binding tables, so iris_setup_binding_table can map any load_output
@@ -2811,7 +2795,6 @@ iris_compile_fs(struct iris_screen *screen,
             .key = &brw_key.base,
             .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
             .archiver = debug_archiver,
          },
 
@@ -2841,7 +2824,6 @@ iris_compile_fs(struct iris_screen *screen,
             .mem_ctx = mem_ctx,
             .nir = nir,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
          },
          .key = &elk_key,
          .prog_data = elk_prog_data,
@@ -3164,7 +3146,6 @@ iris_compile_cs(struct iris_screen *screen,
             .key = &brw_key.base,
             .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
             .archiver = debug_archiver,
          },
       };
@@ -3187,7 +3168,6 @@ iris_compile_cs(struct iris_screen *screen,
             .mem_ctx = mem_ctx,
             .nir = nir,
             .log_data = dbg,
-            .source_hash = ish->source_hash,
          },
          .key = &elk_key,
          .prog_data = elk_prog_data,
@@ -3396,8 +3376,8 @@ iris_create_uncompiled_shader(struct iris_screen *screen,
       update_so_info(&ish->stream_output, nir->info.outputs_written);
    }
 
-   /* Use lowest dword of source shader blake3 for shader hash. */
-   ish->source_hash = *(uint32_t*)nir->info.source_blake3;
+   /* Use lowest qword of source shader blake3 for shader hash. */
+   ish->source_hash = *(uint64_t*)nir->info.source_blake3;
 
    if (screen->disk_cache) {
       /* Serialize the NIR to a binary blob that we can hash for the disk

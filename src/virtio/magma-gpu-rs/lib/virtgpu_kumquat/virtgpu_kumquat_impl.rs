@@ -8,8 +8,9 @@ use std::slice::from_raw_parts_mut;
 
 use crate::protocols::ipc::KumquatStream;
 use crate::protocols::kumquat_gpu_protocol::*;
+use crate::util::create_event_pair;
 use crate::util::Error;
-use crate::util::Event;
+use crate::util::EventWaiter;
 use crate::util::Handle;
 use crate::util::IntoRawDescriptor;
 use crate::util::MemoryMapping;
@@ -343,10 +344,11 @@ impl VirtGpuKumquat {
             .get_mut(&transfer.bo_handle)
             .ok_or(Error::Unsupported)?;
 
-        let event = Event::new()?;
-        let emulated_fence: Handle = event.into();
+        // The host signals and this end waits, so the halves go opposite ways.
+        let (signaler, waiter) = create_event_pair()?;
+        let emulated_fence: Handle = signaler.into();
 
-        resource.attached_fences.push(emulated_fence.try_clone()?);
+        resource.attached_fences.push(waiter.into());
 
         let transfer_to_host = kumquat_gpu_protocol_transfer_host_3d {
             hdr: kumquat_gpu_protocol_ctrl_hdr {
@@ -376,10 +378,11 @@ impl VirtGpuKumquat {
             .get_mut(&transfer.bo_handle)
             .ok_or(Error::Unsupported)?;
 
-        let event = Event::new()?;
-        let emulated_fence: Handle = event.into();
+        // The host signals and this end waits, so the halves go opposite ways.
+        let (signaler, waiter) = create_event_pair()?;
+        let emulated_fence: Handle = signaler.into();
 
-        resource.attached_fences.push(emulated_fence.try_clone()?);
+        resource.attached_fences.push(waiter.into());
         let transfer_from_host = kumquat_gpu_protocol_transfer_host_3d {
             hdr: kumquat_gpu_protocol_ctrl_hdr {
                 type_: KUMQUAT_GPU_PROTOCOL_TRANSFER_FROM_HOST_3D,
@@ -420,8 +423,15 @@ impl VirtGpuKumquat {
             host_flags = RUTABAGA_FLAG_INFO_RING_IDX;
         }
 
-        let need_fence =
-            !bo_handles.is_empty() || (flags & VIRTGPU_KUMQUAT_EXECBUF_FENCE_FD_OUT) != 0;
+        let need_implicit_sync = !bo_handles.is_empty();
+        let need_explicit_sync = (flags & VIRTGPU_KUMQUAT_EXECBUF_FENCE_FD_OUT) != 0;
+        let need_fence = need_implicit_sync || need_explicit_sync;
+
+        // One fence, one holder: a Mach port's receive right cannot be
+        // duplicated, so there is no second fence to give out.
+        if need_implicit_sync && (need_explicit_sync || bo_handles.len() > 1) {
+            return Err(Error::Unsupported);
+        }
 
         let actual_fence = (flags & VIRTGPU_KUMQUAT_EXECBUF_SHAREABLE_OUT) != 0
             && (flags & VIRTGPU_KUMQUAT_EXECBUF_FENCE_FD_OUT) != 0;
@@ -462,18 +472,13 @@ impl VirtGpuKumquat {
                 }
             };
 
-            for handle in bo_handles {
-                // We could support implicit sync with real fences, but the need does not exist.
-                if actual_fence {
-                    return Err(Error::Unsupported);
+            match bo_handles.first() {
+                Some(handle) => {
+                    let resource = self.resources.get_mut(handle).ok_or(Error::Unsupported)?;
+                    resource.attached_fences.push(fence);
                 }
-
-                let resource = self.resources.get_mut(handle).ok_or(Error::Unsupported)?;
-
-                resource.attached_fences.push(fence.try_clone()?);
+                None => fence_opt = Some(fence),
             }
-
-            fence_opt = Some(fence);
         } else {
             self.stream
                 .write(KumquatGpuProtocolWrite::CmdWithData(submit_command, data))?;
@@ -497,8 +502,8 @@ impl VirtGpuKumquat {
 
         let new_fences: Vec<Handle> = std::mem::take(&mut resource.attached_fences);
         for fence in new_fences {
-            let mut event: Event = fence.try_into()?;
-            event.wait()?;
+            let waiter: EventWaiter = fence.try_into()?;
+            waiter.wait()?;
         }
 
         Ok(())

@@ -931,7 +931,7 @@ const void *crocus_find_previous_compile(const struct crocus_context *ice,
 bool crocus_blorp_lookup_shader(struct blorp_batch *blorp_batch,
                                 const void *key,
                                 uint32_t key_size,
-                                uint32_t *kernel_out,
+                                uint64_t *kernel_out,
                                 void *prog_data_out);
 bool crocus_blorp_upload_shader(struct blorp_batch *blorp_batch,
                                 uint32_t stage,
@@ -939,7 +939,7 @@ bool crocus_blorp_upload_shader(struct blorp_batch *blorp_batch,
                                 const void *kernel, uint32_t kernel_size,
                                 const void *prog_data,
                                 uint32_t prog_data_size,
-                                uint32_t *kernel_out,
+                                uint64_t *kernel_out,
                                 void *prog_data_out);
 
 /* crocus_resolve.c */

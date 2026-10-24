@@ -189,6 +189,10 @@
 
 #define DRI_CONF_FORCE_GLSL_VERSION(def) \
    DRI_CONF_OPT_I(force_glsl_version, def, 0, 999, \
+                  "Force a GLSL version as if it was an explicit #version line")
+
+#define DRI_CONF_DEFAULT_GLSL_VERSION(def) \
+   DRI_CONF_OPT_I(default_glsl_version, def, 0, 999, \
                   "Force a default GLSL version for shaders that lack an explicit #version line")
 
 #define DRI_CONF_ALLOW_EXTRA_PP_TOKENS(def) \

@@ -899,7 +899,8 @@ ir_swizzle::constant_expression_value(linear_ctx *linalloc,
          case GLSL_TYPE_UINT16:
          case GLSL_TYPE_INT16: data.u16[i] = v->value.u16[swiz_idx[i]]; break;
          case GLSL_TYPE_UINT:
-         case GLSL_TYPE_INT:   data.u[i] = v->value.u[swiz_idx[i]]; break;
+         case GLSL_TYPE_INT:
+         case GLSL_TYPE_YUV_CSC_STANDARD_EXT: data.u[i] = v->value.u[swiz_idx[i]]; break;
          case GLSL_TYPE_FLOAT: data.f[i] = v->value.f[swiz_idx[i]]; break;
          case GLSL_TYPE_FLOAT16: data.f16[i] = v->value.f16[swiz_idx[i]]; break;
          case GLSL_TYPE_BOOL:  data.b[i] = v->value.b[swiz_idx[i]]; break;

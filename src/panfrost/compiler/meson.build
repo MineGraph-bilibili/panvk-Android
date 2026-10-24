@@ -21,8 +21,11 @@ libpanfrost_compiler_files = files(
   'pan_nir_lower_tex.c',
   'pan_nir_lower_var_special.c',
   'pan_nir_lower_vertex_id.c',
+  'pan_nir_lower_vs_inputs.c',
   'pan_nir_lower_vs_outputs.c',
+  'pan_nir_opt_push_ubo.c',
   'pan_nir_resize_varying_io.c',
+  'pan_nir_xfb.c',
 )
 
 libpanfrost_compiler_c_args = [no_override_init_args, soong_compat_c_args]

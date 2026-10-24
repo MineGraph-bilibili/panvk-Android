@@ -99,13 +99,8 @@ poly_load_tess_coord(constant struct poly_tess_params *p, uint raw_id)
    /* Written weirdly because NIR struggles with loads of structs */
    uint2 fixed = *((global uint2 *)t);
 
-   /* Convert fixed point to float. The arithmetic is done per-component in
-    * the scalar domain: clang 22.1.8 (as used by the host mesa_clc tool)
-    * hangs indefinitely when a float2 built from a memory load feeds any
-    * vector binary arithmetic. Bit-exact equivalent to
-    * convert_float2(fixed) / (1u << 16).
-    */
-   return (float2)((float)fixed.x / 65536.0f, (float)fixed.y / 65536.0f);
+   /* Convert fixed point to float */
+   return convert_float2(fixed) / (1u << 16);
 }
 
 uintptr_t

@@ -66,6 +66,95 @@ enum {
    CMASK_8xMSAA_FMASK_UNCOMPRESSED_COLOR_EXPANDED  = CMASK_MSAA_CODE(3, 3),
 };
 
+/* FMASK is bandwidth compression of MSAA color images taking advantage of the fact that some
+ * samples in MSAA images have equal values. FMASK is essentially a mapping of logical samples to
+ * physical samples represented as an array of sample indices per pixel that can map multiple equal
+ * logical samples to 1 physical sample to save bandwidth. 8x MSAA stores 8 4-bit sample indices
+ * (only using range [0, 7]) in FMASK that map logical samples to physical samples, 4x MSAA stores
+ * 4 2-bit sample indices (range [0, 3]) in FMASK, and 2x MSAA stores 2 1-bit sample indices (range
+ * [0, 1]) in FMASK.
+ *
+ * FMASK uses a physical layout identical to UINT8, UINT16, and UINT32 images and it's effectively
+ * an additional plane of the color image. Regardless of the element encoding in memory, FMASK is
+ * always loaded to the shader as UINT32 (or UINT16 with D16). For example, FMASK value 0 means all
+ * logical samples map to physical sample 0, while FMASK values 0x76543210, 0x3210, and 0x10 are
+ * identity mappings for 8 samples, 4 samples, and 2 samples, respectively. The physical layout uses
+ * a tighter bit packing for 2 and 4 samples, which is hidden from the shader.
+ *
+ * Some generations don't have FMASK and instead fully rely on DCC for MSAA compression.
+ *
+ * Usage:
+ * - Rasterization is the only path that results in automatic optimal MSAA compression on GPUs with
+ *   FMASK. Compute-shader-based image clears and copies must compare sample values, store only
+ *   unique physical samples, and finally store FMASK manually to get the same bandwidth usage
+ *   reduction.
+ * - MSAA image stores are unaware of FMASK and always store to physical samples directly. For image
+ *   stores, the driver can either "expand" FMASK to an identity mapping and store to physical samples
+ *   as if they were logical samples, or store only unique physical samples and then store the FMASK
+ *   value manually to set the mapping from logical samples to physical samples.
+ * - MSAA image loads must first load the FMASK value, use that to remap the logical sample to
+ *   a physical sample, and then load the physical sample. This indirection adds latency and can be
+ *   skipped if we know in advance that FMASK is identity.
+ *
+ * (NOTE: FMASK image stores are untested, but we expect that they work either as-is or by
+ * reinterpreting the FMASK image format as UINT8/16/32.)
+ *
+ * While FMASK compresses the MSAA color image, FMASK itself can also be compressed by CMASK similar
+ * to how DCC compresses image data. CMASK is FMASK metadata and is cached by CB_META and
+ * L2_METADATA caches similar to how DCC is color metadata. CMASK can put FMASK in the following
+ * states:
+ * - cleared to 0: All logical samples map to physical sample 0.
+ * - compressed: CMASK compresses the FMASK image in a proprietary manner similar to DCC.
+ * - decompressed: FMASK is a regular UINT8, UINT16, or UINT32 image.
+ *
+ * TC-compatible CMASK removes the middle "compressed" state.
+ *
+ * CMASK can also contain fast clear state for the MSAA color image predating DCC fast clear, but
+ * that's unrelated to FMASK. If that's used, CMASK provides fast clear for both FMASK and the color
+ * image simultaneously.
+ *
+ * Definitions:
+ * - "MSAA compression" means FMASK compresses the MSAA color image.
+ * - "FMASK compression" means CMASK compresses the FMASK image.
+ * - "FMASK fast clear" means that CMASK is in a state that indicates that FMASK is cleared to 0.
+ * - "fast color clear" means that CMASK and/or DCC are in a state that indicates that the color
+ *   (MSAA) image is cleared (to some value) and FMASK is cleared to 0. (thus it includes "FMASK
+ *   fast clear")
+ * - "FMASK decompression" means that the FMASK image is transitioned to the decompressed state
+ *   to enable shader access. Only TC-compatible CMASK doesn't require FMASK decompression before
+ *   shader access since it's never in the compressed state.
+ * - "FMASK expansion" means that the FMASK image is transitioned to an identity mapping, which
+ *   is done by moving/duplicating the physical samples in the MSAA image to match the identity
+ *   mapping, and clearing FMASK to the corresponding identity value.
+ *
+ * In NIR, nir_texop_fragment_mask_fetch_amd and nir_intrinsic_*_fragment_mask_load_amd load from
+ * FMASK, while nir_texop_fragment_fetch_amd and ACCESS_FMASK_LOWERED_AMD (for images) load
+ * physical samples from the color image. The corresponding lowering is done by nir_lower_tex and
+ * nir_lower_image. If the lowering is skipped, the image coordinates end up referencing physical
+ * samples instead of logical samples. Image stores and atomics are not lowered and therefore
+ * always reference physical samples.
+ *
+ * Since Z/S don't have FMASK, ACO and ac_nir_to_llvm conditionally replace the loaded FMASK value
+ * with 0x76543210 if the FMASK descriptor is NULL for tex opcodes only, thus forcing the identity
+ * mapping for Z/S samplers. That still costs VMEM latency even though nothing is loaded from
+ * memory. This is not done for image opcodes.
+ *
+ * EQAA increases quality by increasing the number of logical samples in FMASK that can map to
+ * physical samples. For example, EQAA 16S 8F (16 samples, 8 fragments) means that FMASK has
+ * 16 logical samples and the MSAA image has 8 physical samples. In that example, each physical
+ * sample can contribute any multiple of 1/16 of itself to the resolved color value instead of only
+ * any multiple of 1/8 of itself, giving the impression of 16x MSAA as long as there are at most
+ * 8 unique samples. If more than 8 unique samples are needed, FMASK stores a special sample index
+ * meaning "unknown" that's equal to the value of the last sample index + 1. The HW determines
+ * which drawn color samples are dropped and get the "unknown" value in FMASK when the number of
+ * samples that's needed exceeds the number of physical samples. Analogous logic applies to any
+ * scenario where the number of physical color samples is less than the number of rasterization
+ * samples, and even 1 physical sample with multiple logical samples is possible. Z/S supports
+ * up to 16 samples to match rasterization samples for precise coverage determination. The MSAA
+ * resolve pass can optionally ignore logical samples that say "unknown". This type of MSAA was
+ * mostly popular during the DX11 era and is being phased out today. GFX10.3 is the last generation
+ * that supports it.
+ */
 enum {
    /* Don't ever use this. Clear CMASK instead. */
    FMASK_CLEAR_0 = 0,

@@ -16,6 +16,7 @@
 
 #include "panvk_device.h"
 
+#include "util/u_queue.h"
 #include "vk_queue.h"
 
 enum panvk_subqueue_id {
@@ -33,18 +34,6 @@ struct panvk_tiler_heap {
       uint32_t handle;
       uint64_t dev_addr;
    } context;
-#ifdef HAVE_PAN_KMOD_KBASE
-   /* Per-generation TILER_HEAP descriptor slots carved out of the first 4K
-    * of desc (64 slots x 64B).  Each heap generation owns one slot; the
-    * per-subqueue contexts point at the current generation's slot, and
-    * in-flight VERTEX_TILER jobs keep loading the older slot they were
-    * emitted with -- so a renewal never rewrites memory an in-flight job
-    * still walks.  The [4K, 68K) tail of desc stays the shared geom_buf. */
-#define KBASE_HEAP_DESC_SLOT_SIZE 64
-#define KBASE_HEAP_DESC_SLOTS 64
-   uint32_t desc_slot_cur;
-   uint32_t desc_slot_next;
-#endif
 };
 
 struct panvk_subqueue {
@@ -81,9 +70,9 @@ struct panvk_subqueue {
    /* kbase-backed queues manage the CS ring buffer in userspace (the
     * panthor kernel driver does the equivalent in kernel-owned rings). */
    struct {
-      /* kbase compatibility path: all PanVK subqueues share one CSG, each
-       * bound to its own CSI (CSI0..CSI2 = VT/FRAG/COMPUTE), matching the
-       * panthor topology. */
+      /* kbase compatibility path: each PanVK subqueue owns a CSG and uses
+       * CSI0.  Some Android kbase stacks accept later CSIs into a scheduled
+       * CSG but never execute them. */
       uint32_t group_handle;
 
       struct pan_kmod_bo *ringbuf_bo;
@@ -108,12 +97,10 @@ struct panvk_subqueue {
       uint32_t last_stream_size;
       uint32_t last_flush_id;
       uint64_t last_stream_addr;
-      /* DIAG-ONLY (panvk.17-diag): CPU mapping of the last stream submitted
-       * on this subqueue.  The 16-diag ring census proved the 64KB ring holds
-       * no sync atoms (entries are pure CALL trampolines); the fence/semaphore
-       * signal atoms live in the stream reached through cs_call(), so the
-       * fatal dump needs the stream's CPU mapping to census them. */
-      const void *last_stream_cpu;
+
+      /* TILER_HEAP descriptor last stored into this subqueue's context by a
+       * ring entry (see kbase_renew_tiler_heap()). */
+      uint64_t heap_desc;
 
       struct panvk_priv_mem init_cs;
       uint64_t init_stream_addr;
@@ -125,7 +112,6 @@ struct panvk_subqueue {
 };
 
 struct panvk_desc_ringbuf {
-   struct panvk_priv_mem syncobj;
    struct pan_kmod_bo *bo;
    uint64_t size;
    struct {
@@ -145,10 +131,10 @@ struct panvk_gpu_queue {
    struct panvk_priv_mem syncobjs;
 
 #ifdef HAVE_PAN_KMOD_KBASE
-   /* Per-subqueue completion seqno cells (panvk_cs_sync64 layout), written
-    * with a plain LS store at the end of every ring entry and polled by the
-    * CPU.  Must live in GPU-uncached memory: on inner-shareable pages the
-    * sync write can linger in the GPU L2 where the CPU never sees it. */
+   /* Per-subqueue completion seqno cells (panvk_cs_sync64 layout), bumped
+    * by a SYNC_ADD64 at the end of every ring entry and polled by the CPU.
+    * Must live in GPU-uncached memory: on inner-shareable pages the sync
+    * write can linger in the GPU L2 where the CPU never sees it. */
    struct {
       struct pan_kmod_bo *bo;
       void *cpu;
@@ -156,45 +142,49 @@ struct panvk_gpu_queue {
    } kbase_seqnos;
    uint32_t kbase_tiler_submit_count;
    uint64_t kbase_tiler_work_count;
-   /* DIAG-ONLY (panvk.15-diag): fires the immediate fatal-state dump exactly
-    * once, as close to the faulting atomic as possible.  The 10s timeout
-    * snapshot lands long after the fatal notification was consumed, and the
-    * exception tears the CS down asynchronously -- the widest evidence is
-    * right after the notification read returns. */
-   bool kbase_fatal_dumped;
-   /* Consecutive skipped renewals (retirement ring full or no free desc
-    * slot).  While a renewal skips, the current heap generation keeps
-    * growing through the kernel's grow-on-fault path; if the skips persist
-    * the generation hits max_chunks and the kernel's unhandled-OOM
-    * termination of the CSG is the panic trigger.  After
-    * KBASE_RENEW_SKIP_DRAIN_THRESHOLD consecutive skips the next attempt
-    * falls back to the old drain-per-renewal semantics, which always makes
-    * progress.  Submit-thread only, no lock needed. */
-   uint32_t kbase_renew_skip_count;
-   /* Tiler heap generations retired by past heap renewals.  Renewal no
-    * longer drains the graphics subqueues: it switches to a brand-new
-    * kernel heap (fresh chunk pool) and parks the old context here until
-    * both graphics subqueues have executed ring entries emitted after the
-    * retirement (their in-flight HEAP_SETs still reference it).  Slots are
-    * destroyed lazily, but only at graphics-silence points (both graphics
-    * subqueues fully drained); a renewal that finds no free slot falls
-    * back to the old graphics drain.  16 slots: the 32x renew-work cadence
-    * rotates ~4x more often than the original 128x one, so the ring grew
-    * 4x to match, keeping the full-ring skip rare under sustained tiler
-    * load (2026-10-07). */
-#define KBASE_RETIRED_HEAP_SLOTS 16
+   uint64_t kbase_gpu_waits[PANVK_SUBQUEUE_COUNT][PANVK_SUBQUEUE_COUNT];
+   /* Which of the PANVK_KBASE_HEAP_SLOTS TILER_HEAP descriptor slots the
+    * current heap uses. */
+   uint32_t kbase_heap_slot;
+   /* Tiler heap contexts retired by heap renewals, oldest first.  Ring
+    * entries emitted before a renewal keep using the retired heap (their
+    * HEAP_SET and TILER_HEAP descriptor slot), so it is only destroyed once
+    * both graphics subqueues have completed a ring entry emitted after the
+    * retirement.  Several can be in flight so renewal never has to wait for
+    * the GPU to catch up; each holds one descriptor slot. */
+#define PANVK_KBASE_HEAP_SLOTS 4
+#define PANVK_KBASE_DESTROY_RING 16
    struct {
-      uint32_t count;
-      struct {
-         uint64_t ctx;
-         uint64_t vt_jobs;
-         uint64_t frag_jobs;
-         uint32_t desc_slot;
-      } slots[KBASE_RETIRED_HEAP_SLOTS];
-   } kbase_retired_heaps;
-   /* Guards kbase_retired_heaps: destroy attempts run from fence-wait /
-    * status threads as well as the submit thread. */
-   simple_mtx_t kbase_retired_heaps_lock;
+      uint64_t ctx;
+      uint64_t vt_jobs;
+      uint64_t frag_jobs;
+   } kbase_retired_heaps[PANVK_KBASE_HEAP_SLOTS - 1];
+   uint32_t kbase_retired_heap_count;
+   /* Heap context pre-created on a worker thread for the next renewal:
+    * KBASE_IOCTL_CS_TILER_HEAP_INIT commits and zeroes the initial chunks,
+    * which took ~7 ms per renewal on the submitting thread. */
+   struct {
+      struct util_queue thread;
+      struct util_queue_fence fence;
+      bool enabled;
+      bool pending;
+      uint64_t ctx;
+      uint64_t first_chunk;
+   } kbase_spare_heap;
+   /* Retired heap contexts waiting to be destroyed by the panvk_heap worker.
+    * KBASE_IOCTL_CS_TILER_HEAP_TERM cost ~3.2 ms on the submitting thread,
+    * which was the entire heap renewal cost.  The seqno check alone gates
+    * slot reuse, so the TERM can run after the slot has been recycled.
+    * Single producer (the submit thread) and single consumer (the worker):
+    * head is only written by the producer, tail only by the consumer. */
+   struct {
+      struct util_queue_fence fence;
+      uint64_t ctxs[PANVK_KBASE_DESTROY_RING];
+      uint32_t head;
+      uint32_t tail;
+      /* Set while a destroy job is queued or running, to deduplicate kicks. */
+      bool job_pending;
+   } kbase_destroy;
 #endif
 
    struct {

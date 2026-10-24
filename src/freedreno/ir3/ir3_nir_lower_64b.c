@@ -151,17 +151,20 @@ lower_64b_image_load(nir_builder *b, nir_intrinsic_instr *intr)
    nir_intrinsic_set_format(intr, PIPE_FORMAT_R32G32_UINT);
    nir_intrinsic_set_dest_type(intr, nir_type_uint32);
    unsigned ncomp = intr->num_components;
-   intr->num_components = 2;
-   intr->def.num_components = 2;
+   intr->num_components =
+      intr->intrinsic == nir_intrinsic_bindless_image_sparse_load ? 5 : 2;
+   intr->def.num_components = intr->num_components;
    intr->def.bit_size = 32;
 
    /* We only load the R component but the original load might need GBA as well,
     * return the default (0, 0, 1) values.
     */
    b->cursor = nir_after_instr(&intr->instr);
-   nir_def *val_r64 = nir_pack_64_2x32(b, &intr->def);
-   nir_def *vec[4] = {val_r64, nir_imm_int64(b, 0), nir_imm_int64(b, 0),
-                      nir_imm_int64(b, 1)};
+   nir_def *val_r64 = nir_pack_64_2x32(b, nir_trim_vector(b, &intr->def, 2));
+   nir_def *vec[5] = {val_r64, nir_imm_int64(b, 0), nir_imm_int64(b, 0),
+                      nir_imm_int64(b, 1), NULL};
+   if (intr->intrinsic == nir_intrinsic_bindless_image_sparse_load)
+      vec[4] = nir_u2u64(b, nir_channel(b, &intr->def, 4));
    assert(ncomp <= ARRAY_SIZE(vec));
    nir_def_rewrite_uses_after(&intr->def, nir_vec(b, vec, ncomp));
 }
@@ -184,6 +187,7 @@ lower_64b_image(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    switch (intr->intrinsic) {
    case nir_intrinsic_bindless_image_load:
+   case nir_intrinsic_bindless_image_sparse_load:
    case nir_intrinsic_bindless_image_store: {
       enum pipe_format format = nir_intrinsic_format(intr);
       if (format != PIPE_FORMAT_R64_UINT && format != PIPE_FORMAT_R64_SINT) {
@@ -195,7 +199,8 @@ lower_64b_image(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
    }
 
-   if (intr->intrinsic == nir_intrinsic_bindless_image_load) {
+   if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+       intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
       lower_64b_image_load(b, intr);
    } else {
       lower_64b_image_store(b, intr);

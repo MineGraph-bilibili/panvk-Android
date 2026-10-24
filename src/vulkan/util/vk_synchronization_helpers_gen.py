@@ -156,6 +156,14 @@ def get_group_stages(xml):
             stages = equiv.attrib['stage'].split(',')
             group_stages[name] = stages
 
+    # Handle nested groups.
+    for members in group_stages.values():
+        i = 0
+        while i < len(members):
+            members.extend(s for s in group_stages.get(members[i], [])
+                           if s not in members)
+            i += 1
+
     return group_stages
 
 def access_is_read(name):

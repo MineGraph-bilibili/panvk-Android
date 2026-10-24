@@ -1500,8 +1500,22 @@ unbind(struct gl_context *ctx,
        struct gl_buffer_object *obj)
 {
    if (vao->BufferBinding[index].BufferObj == obj) {
+      const bool core_profile = _mesa_is_desktop_gl_core(ctx);
+
+      /* Core profiles don't support client arrays.  Clear the pointer state
+       * so that a buffer offset isn't interpreted as a user pointer if the
+       * array remains enabled after the buffer is deleted.
+       */
+      if (core_profile) {
+         GLbitfield mask = vao->BufferBinding[index]._BoundArrays;
+
+         while (mask)
+            vao->VertexAttrib[u_bit_scan(&mask)].Ptr = NULL;
+      }
+
       _mesa_bind_vertex_buffer(ctx, vao, index, NULL,
-                               vao->BufferBinding[index].Offset,
+                               core_profile ? 0 :
+                                  vao->BufferBinding[index].Offset,
                                vao->BufferBinding[index].Stride, true, false);
    }
 }

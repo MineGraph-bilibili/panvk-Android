@@ -7,7 +7,7 @@ use crate::isa::*;
 use proc_macro2::TokenStream as TokenStream2;
 use proc_macro2::{Ident, Span};
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, HashSet, btree_map};
+use std::collections::{BTreeMap, HashMap, HashSet, btree_map};
 use std::rc::{Rc, Weak};
 
 pub struct EnumValue {
@@ -89,10 +89,11 @@ impl Enum {
         let may_be_data_type =
             xml.children.len() > 0 && name != "ls_multi_sr_count_m";
 
+        let enum_arch = xml.get_arch(arch.clone());
         let mut e = Enum {
             name,
             ident,
-            arch: xml.get_arch(arch.clone()).into(),
+            arch: enum_arch.clone().into(),
             has_none: false,
             is_bool: xml.children.len() == 2,
             is_data_type: may_be_data_type,
@@ -101,7 +102,7 @@ impl Enum {
         };
 
         for child in xml.children.into_iter() {
-            let v = EnumValue::from_xml(child, arch.clone())?;
+            let v = EnumValue::from_xml(child, enum_arch.clone())?;
 
             if v.name == "none" {
                 e.has_none = true;
@@ -419,7 +420,7 @@ impl Enum {
                 {
                     cases_ts.extend(quote! {
                         #e_ident::#ident => {
-                            if #arch.contains(arch) {
+                            if (#arch).contains(arch) {
                                 Ok(#value)
                             } else {
                                 Err(#err.into())
@@ -543,25 +544,37 @@ pub struct MetaEnum {
     pub ident: Ident,
     pub has_none: bool,
     enums: Vec<Rc<Enum>>,
-    none_values: HashSet<String>,
+    remaps: HashMap<(String, String), (String, Ident)>,
 }
 
 impl MetaEnum {
-    fn new(
+    fn new<'a>(
         name: &str,
         enums: Vec<Rc<Enum>>,
-        none_values: HashSet<String>,
+        remaps: impl IntoIterator<Item = ((&'a str, &'a str), &'a str)>,
     ) -> Rc<MetaEnum> {
         let camel_name = to_camel_case(&name);
         let ident = Ident::new(&camel_name, Span::call_site());
-        let has_none = enums.iter().find(|e| e.has_none).is_some();
-        assert!(has_none || none_values.is_empty());
+        let mut has_none = enums.iter().any(|e| e.has_none);
+
+        let remaps = remaps
+            .into_iter()
+            .map(|((e, v), r)| {
+                if r == "none" {
+                    has_none = true;
+                }
+                let camel_name = to_camel_case(r);
+                let ident = ident!("{camel_name}");
+                ((e.to_string(), v.to_string()), (r.to_string(), ident))
+            })
+            .collect();
+
         let me = MetaEnum {
             name: name.to_string(),
             ident,
             has_none,
             enums,
-            none_values,
+            remaps,
         };
         Rc::new_cyclic(|weak| {
             for e in &me.enums {
@@ -572,11 +585,27 @@ impl MetaEnum {
         })
     }
 
+    fn get_remap(
+        &self,
+        e_name: &str,
+        v_name: &str,
+    ) -> Option<&(String, Ident)> {
+        let e_name = e_name.to_string();
+        let v_name = v_name.to_string();
+        self.remaps.get(&(e_name, v_name))
+    }
+
     pub fn declare(&self, ts: &mut TokenStream2) {
         let mut values = BTreeMap::new();
         for e in &self.enums {
             for v in e.values.values() {
-                values.insert(&v.name, &v.ident);
+                if let Some((r_name, r_ident)) =
+                    self.get_remap(&e.name, &v.name)
+                {
+                    values.insert(r_name, r_ident);
+                } else {
+                    values.insert(&v.name, &v.ident);
+                }
             }
         }
 
@@ -584,9 +613,6 @@ impl MetaEnum {
         let mut values_ts = TokenStream2::new();
         let mut fmt_cases_ts = TokenStream2::new();
         for (v_name, v_ident) in &values {
-            if self.none_values.contains(*v_name) {
-                continue;
-            }
             values_ts.extend(quote! {
                 #v_ident,
             });
@@ -640,12 +666,12 @@ impl MetaEnum {
             let mut from_cases_ts = TokenStream2::new();
             let mut into_cases_ts = TokenStream2::new();
             for EnumValue { name, ident, .. } in e.values.values() {
-                if self.none_values.contains(name) {
+                if let Some((_, r_ident)) = self.get_remap(&e.name, name) {
                     from_cases_ts.extend(quote! {
-                        #e_ident::#ident => #me_ident::None,
+                        #e_ident::#ident => #me_ident::#r_ident,
                     });
                     into_cases_ts.extend(quote! {
-                        #me_ident::None => Ok(#e_ident::#ident),
+                        #me_ident::#r_ident => Ok(#e_ident::#ident),
                     });
                 } else {
                     from_cases_ts.extend(quote! {
@@ -691,7 +717,7 @@ pub enum EnumType {
 }
 
 impl EnumType {
-    fn ident(&self) -> &Ident {
+    pub fn ident(&self) -> &Ident {
         match self {
             EnumType::Enum(e) => &e.ident,
             EnumType::Meta(m) => &m.ident,
@@ -722,11 +748,12 @@ impl EnumLiteral {
         };
         let m = e.get_meta()?;
 
-        let (v_name, v_ident) = if m.none_values.contains(&self.value_name) {
-            ("none".to_string(), ident!("None"))
-        } else {
-            (self.value_name.clone(), self.value_ident.clone())
-        };
+        let (v_name, v_ident) =
+            if let Some(remap) = m.get_remap(&e.name, &self.value_name) {
+                remap.clone()
+            } else {
+                (self.value_name.clone(), self.value_ident.clone())
+            };
 
         Some(EnumLiteral {
             enum_type: EnumType::Meta(m),
@@ -801,7 +828,7 @@ impl EnumSet {
         &mut self,
         name: &str,
         enums: impl IntoIterator<Item = &'a str>,
-        none_values: impl IntoIterator<Item = &'a str>,
+        remaps: impl IntoIterator<Item = ((&'a str, &'a str), &'a str)>,
     ) -> Result<()> {
         if self.enums.contains_key(name) {
             return Err(err("Enum and meta enum cannot have the same name"));
@@ -820,9 +847,7 @@ impl EnumSet {
             enum_vec.push(e.clone());
         }
 
-        let none_values = none_values.into_iter().map(str::to_string).collect();
-
-        let me = MetaEnum::new(name, enum_vec, none_values);
+        let me = MetaEnum::new(name, enum_vec, remaps);
         self.meta_enums.insert(name.to_string(), me);
         Ok(())
     }

@@ -138,24 +138,34 @@ fn cfg_args() -> CfgArgs {
     CfgArgs { args }
 }
 
+fn cfg_isa_xml_path(args: &GenIsaArgs) -> String {
+    let isa_xml_path = cfg_args()
+        .find(|(key, _value)| key == "kraid_isa_xml_path")
+        .and_then(|(_key, value)| value)
+        .expect("kraid_isa_xml_path not specified");
+
+    let mut xml_path = PathBuf::from(isa_xml_path);
+    xml_path.push(&args.xml);
+
+    String::from(xml_path.to_str().unwrap())
+}
+
 #[proc_macro]
 pub fn gen_isa_encode(item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(item as GenIsaArgs);
+    let xml_path = cfg_isa_xml_path(&args);
 
-    let mut isa_xml_path = None;
-    for (key, value) in cfg_args() {
-        if key == "kraid_isa_xml_path" {
-            isa_xml_path = value;
-            break;
-        }
-    }
-    let isa_xml_path = isa_xml_path.expect("kraid_isa_xml_path not specified");
+    isa::encoder::gen_encoder(&xml_path, args.arch)
+        .unwrap()
+        .into()
+}
 
-    let mut xml_path = PathBuf::from(isa_xml_path);
-    xml_path.push(args.xml);
-    let xml_path = xml_path.to_str().unwrap();
+#[proc_macro]
+pub fn gen_isa_decode(item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(item as GenIsaArgs);
+    let xml_path = cfg_isa_xml_path(&args);
 
-    isa::encoder::gen_encoder(xml_path, args.arch)
+    isa::decoder::gen_decoder(&xml_path, args.arch)
         .unwrap()
         .into()
 }

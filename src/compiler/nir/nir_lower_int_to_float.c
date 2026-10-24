@@ -180,13 +180,31 @@ lower_alu_instr(nir_builder *b, nir_alu_instr *alu)
    case nir_op_idiv: {
       nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
       nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
+      nir_def *q;
 
       /* Hand-lower fdiv, since lower_int_to_float is after nir_opt_algebraic. */
       if (b->shader->options->lower_fdiv) {
-         rep = nir_ftrunc(b, nir_fmul(b, x, nir_frcp(b, y)));
+         q = nir_ftrunc(b, nir_fmul(b, x, nir_frcp(b, y)));
       } else {
-         rep = nir_ftrunc(b, nir_fdiv(b, x, y));
+         q = nir_ftrunc(b, nir_fdiv(b, x, y));
       }
+
+      /* The quotient is not computed exactly, and hardware reciprocals tend to
+       * round down, so an exact quotient can land just under the integer and
+       * truncate to one less: 12 / 12 == 0.  Recover the remainder, which is
+       * exact for operands this scheme can represent at all, and step the
+       * quotient away from zero if it came out short.
+       *
+       * fsub and fsign are avoided here: nir_opt_algebraic has already run, so
+       * anything it would have lowered has to be built by hand.
+       */
+      nir_def *rem = nir_fadd(b, x, nir_fneg(b, nir_fmul(b, q, y)));
+      nir_def *is_short = nir_fge(b, nir_fabs(b, rem), nir_fabs(b, y));
+      nir_def *negative = nir_flt_imm(b, nir_fmul(b, x, y), 0.0);
+      nir_def *step = nir_bcsel(b, negative, nir_imm_float(b, -1.0),
+                                nir_imm_float(b, 1.0));
+
+      rep = nir_bcsel(b, is_short, nir_fadd(b, q, step), q);
       break;
    }
 

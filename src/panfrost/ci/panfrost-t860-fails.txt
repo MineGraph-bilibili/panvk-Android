@@ -121,7 +121,7 @@ program@execute@builtin@builtin-float-sign-1.0.generated@sign float16,Fail
 program@execute@builtin@builtin-float-sign-1.0.generated@sign float2,Fail
 program@execute@builtin@builtin-float-sign-1.0.generated@sign float4,Fail
 program@execute@builtin@builtin-float-sign-1.0.generated@sign float8,Fail
-program@execute@builtin@builtin-int-mad_sat-1.0.generated,Fail
+program@execute@builtin@builtin-int-mad_sat-1.0.generated,Crash
 program@execute@builtin@builtin-int-mad_sat-1.0.generated@mad_sat int1,Fail
 program@execute@builtin@builtin-int-mad_sat-1.0.generated@mad_sat int16,Fail
 program@execute@builtin@builtin-int-mad_sat-1.0.generated@mad_sat int2,Fail
@@ -163,7 +163,12 @@ program@execute@builtin@builtin-long-hadd-1.0.generated@hadd long2,Fail
 program@execute@builtin@builtin-long-hadd-1.0.generated@hadd long4,Fail
 program@execute@builtin@builtin-long-hadd-1.0.generated@hadd long8,Fail
 program@execute@builtin@builtin-long-mad_hi-1.0.generated,Crash
-program@execute@builtin@builtin-long-mad_sat-1.0.generated,Crash
+program@execute@builtin@builtin-long-mad_sat-1.0.generated,Fail
+program@execute@builtin@builtin-long-mad_sat-1.0.generated@mad_sat long1,Fail
+program@execute@builtin@builtin-long-mad_sat-1.0.generated@mad_sat long16,Fail
+program@execute@builtin@builtin-long-mad_sat-1.0.generated@mad_sat long2,Fail
+program@execute@builtin@builtin-long-mad_sat-1.0.generated@mad_sat long4,Fail
+program@execute@builtin@builtin-long-mad_sat-1.0.generated@mad_sat long8,Fail
 program@execute@builtin@builtin-long-max-1.1.generated,Fail
 program@execute@builtin@builtin-long-max-1.1.generated@max long1,Fail
 program@execute@builtin@builtin-long-max-1.1.generated@max long16,Fail
@@ -209,7 +214,6 @@ program@execute@builtin@builtin-long-sub_sat-1.0.generated@sub_sat long16,Fail
 program@execute@builtin@builtin-long-sub_sat-1.0.generated@sub_sat long2,Fail
 program@execute@builtin@builtin-long-sub_sat-1.0.generated@sub_sat long4,Fail
 program@execute@builtin@builtin-long-sub_sat-1.0.generated@sub_sat long8,Fail
-program@execute@builtin@builtin-short-mad_sat-1.0.generated,Crash
 program@execute@builtin@builtin-short-rotate-1.0.generated,Fail
 program@execute@builtin@builtin-short-rotate-1.0.generated@rotate short1,Fail
 program@execute@builtin@builtin-short-rotate-1.0.generated@rotate short16,Fail
@@ -385,7 +389,6 @@ program@execute@builtin@builtin-ulong-sub_sat-1.0.generated@sub_sat ulong16,Fail
 program@execute@builtin@builtin-ulong-sub_sat-1.0.generated@sub_sat ulong2,Fail
 program@execute@builtin@builtin-ulong-sub_sat-1.0.generated@sub_sat ulong4,Fail
 program@execute@builtin@builtin-ulong-sub_sat-1.0.generated@sub_sat ulong8,Fail
-program@execute@builtin@builtin-ushort-mad_sat-1.0.generated,Crash
 program@execute@builtin@builtin-ushort-rotate-1.0.generated,Fail
 program@execute@builtin@builtin-ushort-rotate-1.0.generated@rotate ushort1,Fail
 program@execute@builtin@builtin-ushort-rotate-1.0.generated@rotate ushort16,Fail
@@ -396,8 +399,6 @@ program@execute@clz-optimizations,Crash
 program@execute@float-convert_long,Fail
 program@execute@float-convert_long@convert_long(float),Fail
 program@execute@float-convert_long@convert_ulong(float),Fail
-program@execute@global-offset,Fail
-program@execute@global-offset@3d- input dependent,Fail
 program@execute@load-hi16,Crash
 program@execute@load-lo16,Crash
 program@execute@program-scope-arrays,Crash
@@ -648,7 +649,16 @@ program@execute@vstore@vstorea_half-float-private@vector storea_half private off
 program@execute@vstore@vstorea_half-float-private@vector storea_half private offset float3,Fail
 program@execute@vstore@vstorea_half-float-private@vector storea_half private offset float4,Fail
 program@execute@vstore@vstorea_half-float-private@vector storea_half private offset float8,Fail
-program@run kernel with max work item sizes,Fail
 
 # (file=input,line=0,column=0,index=0): Unresolved external reference to "_Z21convert_char4_sat_rteDv4_i".
 program@execute@vector-conversion,Fail
+
+# regressed in https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/43044,
+# bisected to 1a9bd6af99157c55354c32236c7c71ce2f9abe5b
+dEQP-GLES2.functional.texture.specification.basic_texsubimage2d.a16f_2d,Fail
+dEQP-GLES2.functional.texture.specification.random_teximage2d.cube_7,Fail
+dEQP-GLES2.functional.texture.specification.texsubimage2d_empty_tex.a16f_2d,Fail
+dEQP-GLES2.functional.texture.specification.basic_teximage2d.a16f_2d,Fail
+dEQP-GLES2.functional.texture.specification.basic_texsubimage2d.a16f_cube,Fail
+dEQP-GLES2.functional.texture.specification.texsubimage2d_empty_tex.a16f_cube,Fail
+dEQP-GLES2.functional.texture.specification.basic_teximage2d.a16f_cube,Fail

@@ -58,4 +58,6 @@ VkResult kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
 
 void kk_image_view_finish(struct kk_device *dev, struct kk_image_view *view);
 
+void kk_image_view_set_label(struct kk_image_view *iview, const char *label);
+
 #endif /* KK_IMAGE_VIEW_H */

@@ -14,21 +14,8 @@
 static int
 query_param(struct fd_pipe *pipe, uint32_t param, uint64_t *value)
 {
-   struct msm_pipe *msm_pipe = to_msm_pipe(pipe);
-   struct drm_msm_param req = {
-      .pipe = msm_pipe->pipe,
-      .param = param,
-   };
-   int ret;
-
-   ret =
-      drmCommandWriteRead(pipe->dev->fd, DRM_MSM_GET_PARAM, &req, sizeof(req));
-   if (ret)
-      return ret;
-
-   *value = req.value;
-
-   return 0;
+   return msm_common_get_param(pipe->dev->fd, to_msm_pipe(pipe)->pipe, param,
+                               value);
 }
 
 static int
@@ -95,15 +82,8 @@ msm_pipe_get_param(struct fd_pipe *pipe, enum fd_param_id param,
 static int
 set_param(struct fd_pipe *pipe, uint32_t param, uint64_t value)
 {
-   struct msm_pipe *msm_pipe = to_msm_pipe(pipe);
-   struct drm_msm_param req = {
-      .pipe  = msm_pipe->pipe,
-      .param = param,
-      .value = value,
-   };
-
-   return drmCommandWriteRead(pipe->dev->fd, DRM_MSM_SET_PARAM,
-                              &req, sizeof(req));
+   return msm_common_set_param(pipe->dev->fd, to_msm_pipe(pipe)->pipe, param,
+                               value, 0);
 }
 
 static int
@@ -121,16 +101,8 @@ msm_pipe_set_param(struct fd_pipe *pipe, enum fd_param_id param, uint64_t value)
 static int
 msm_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t timeout)
 {
-   struct fd_device *dev = pipe->dev;
-   struct drm_msm_wait_fence req = {
-      .fence = fence->kfence,
-      .queueid = to_msm_pipe(pipe)->queue_id,
-   };
-   int ret;
-
-   get_abs_timeout(&req.timeout, timeout);
-
-   ret = drmCommandWrite(dev->fd, DRM_MSM_WAIT_FENCE, &req, sizeof(req));
+   int ret = msm_common_wait_fence(pipe->dev->fd, to_msm_pipe(pipe)->queue_id,
+                                   fence->kfence, timeout);
    if (ret && (ret != -ETIMEDOUT)) {
       ERROR_MSG("wait-fence failed! %d (%s)", ret, strerror(errno));
    }

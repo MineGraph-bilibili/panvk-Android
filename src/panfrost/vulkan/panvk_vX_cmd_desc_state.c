@@ -40,6 +40,8 @@ cmd_desc_state_bind_sets(struct panvk_descriptor_state *desc_state,
          desc_state->push_sets[set_idx]->descs.dev = 0;
 
       desc_state->sets[set_idx] = set;
+      desc_state->desc_buffer_sets[set_idx].dev_addr = 0;
+      desc_state->desc_buffer_sets[set_idx].size = 0;
 
       if (set) {
          for (unsigned b = 0; b < set->layout->dyn_buf_count; b++) {
@@ -51,6 +53,35 @@ cmd_desc_state_bind_sets(struct panvk_descriptor_state *desc_state,
    }
 
    assert(dynoffset_idx == info->dynamicOffsetCount);
+}
+
+/* True when the sets being bound are already bound with the same dynamic
+ * offsets. Descriptor set contents are not part of this state, so a repeated
+ * bind cannot disturb the shader tables and does not need a DESC_STATE
+ * invalidation. */
+static bool
+cmd_desc_state_bind_is_noop(const struct panvk_descriptor_state *desc_state,
+                            const VkBindDescriptorSetsInfoKHR *info)
+{
+   unsigned dynoffset_idx = 0;
+
+   for (unsigned i = 0; i < info->descriptorSetCount; ++i) {
+      unsigned set_idx = i + info->firstSet;
+      VK_FROM_HANDLE(panvk_descriptor_set, set, info->pDescriptorSets[i]);
+
+      if (desc_state->sets[set_idx] != set)
+         return false;
+
+      if (set) {
+         for (unsigned b = 0; b < set->layout->dyn_buf_count; b++) {
+            if (desc_state->dyn_buf_offsets[set_idx][b] !=
+                info->pDynamicOffsets[dynoffset_idx++])
+               return false;
+         }
+      }
+   }
+
+   return true;
 }
 
 static struct panvk_descriptor_set *
@@ -287,9 +318,21 @@ panvk_per_arch(cmd_prepare_shader_res_table)(
 
          pan_pack(&res_table[i + 1], RESOURCE, cfg) {
             if (desc_info->used_set_mask & BITFIELD_BIT(i)) {
-               cfg.address = set->descs.dev;
-               cfg.contains_descriptors = true;
-               cfg.size = set->desc_count * PANVK_DESCRIPTOR_SIZE;
+               if (desc_state->desc_buffer_sets[i].dev_addr) {
+                  cfg.address = desc_state->desc_buffer_sets[i].dev_addr;
+                  cfg.contains_descriptors = true;
+                  cfg.size = desc_state->desc_buffer_sets[i].size ?
+                             desc_state->desc_buffer_sets[i].size :
+                             (65536 * PANVK_DESCRIPTOR_SIZE);
+               } else if (set) {
+                  cfg.address = set->descs.dev;
+                  cfg.contains_descriptors = true;
+                  cfg.size = set->desc_count * PANVK_DESCRIPTOR_SIZE;
+               } else {
+                  cfg.address = 0;
+                  cfg.contains_descriptors = false;
+                  cfg.size = 0;
+               }
             } else {
                cfg.address = 0;
                cfg.contains_descriptors = false;
@@ -351,17 +394,23 @@ panvk_per_arch(CmdBindDescriptorSets2KHR)(
 
    /* TODO: Invalidate only if the shader tables are disturbed */
    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
-      cmd_desc_state_bind_sets(&cmdbuf->state.gfx.desc_state,
-                               pBindDescriptorSetsInfo);
+      if (!cmd_desc_state_bind_is_noop(&cmdbuf->state.gfx.desc_state,
+                                       pBindDescriptorSetsInfo)) {
+         cmd_desc_state_bind_sets(&cmdbuf->state.gfx.desc_state,
+                                  pBindDescriptorSetsInfo);
 
-      gfx_state_set_dirty(cmdbuf, DESC_STATE);
+         gfx_state_set_dirty(cmdbuf, DESC_STATE);
+      }
    }
 
    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
-      cmd_desc_state_bind_sets(&cmdbuf->state.compute.desc_state,
-                               pBindDescriptorSetsInfo);
+      if (!cmd_desc_state_bind_is_noop(&cmdbuf->state.compute.desc_state,
+                                       pBindDescriptorSetsInfo)) {
+         cmd_desc_state_bind_sets(&cmdbuf->state.compute.desc_state,
+                                  pBindDescriptorSetsInfo);
 
-      compute_state_set_dirty(cmdbuf, DESC_STATE);
+         compute_state_set_dirty(cmdbuf, DESC_STATE);
+      }
    }
 }
 

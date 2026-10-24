@@ -24,7 +24,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <string.h>
 #include <unistd.h>
 
 #include "util/format/u_format.h"
@@ -133,24 +132,3 @@ panfrost_drm_screen_create_renderonly(int fd, struct renderonly *ro,
    return u_pipe_screen_lookup_or_create(os_dupfd_cloexec(fd), config, ro,
                                          panfrost_create_screen);
 }
-
-#ifdef HAVE_PAN_KMOD_KBASE
-struct pipe_screen *
-panfrost_kbase_screen_create(const char *path,
-                             const struct pipe_screen_config *config)
-{
-   /* Open the kbase device node.  panfrost_open_device() will detect that
-    * drmGetVersion() fails on this fd and automatically retry with the
-    * kbase backend. */
-   int fd = open(path, O_RDWR | O_CLOEXEC);
-   if (fd < 0) {
-      fprintf(stderr, "panfrost: failed to open kbase device %s: %s\n",
-              path, strerror(errno));
-      return NULL;
-   }
-
-   /* The fd is consumed (or closed on failure) by panfrost_create_screen
-    * via panfrost_open_device. */
-   return panfrost_create_screen(fd, config, NULL);
-}
-#endif /* HAVE_PAN_KMOD_KBASE */

@@ -19,9 +19,6 @@ extern const struct drm_driver_descriptor v3d_driver_descriptor;
 extern const struct drm_driver_descriptor vc4_driver_descriptor;
 extern const struct drm_driver_descriptor panfrost_driver_descriptor;
 extern const struct drm_driver_descriptor panthor_driver_descriptor;
-#if defined(HAVE_PAN_KMOD_KBASE)
-extern const struct drm_driver_descriptor kbase_driver_descriptor;
-#endif
 extern const struct drm_driver_descriptor asahi_driver_descriptor;
 extern const struct drm_driver_descriptor etnaviv_driver_descriptor;
 extern const struct drm_driver_descriptor rknpu_driver_descriptor;

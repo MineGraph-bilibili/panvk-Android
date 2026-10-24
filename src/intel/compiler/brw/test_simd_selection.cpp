@@ -251,6 +251,81 @@ TEST_F(SIMDSelectionCS, SpillAtSIMD16)
    ASSERT_EQ(brw_simd_select(simd_state), SIMD8);
 }
 
+TEST_F(SIMDSelectionCS, FailAtSIMD8)
+{
+   ASSERT_TRUE(brw_simd_should_compile(simd_state, SIMD8));
+   brw_simd_mark_failed(simd_state, SIMD8, "fail");
+   ASSERT_FALSE(brw_simd_should_compile(simd_state, SIMD16));
+   ASSERT_FALSE(brw_simd_should_compile(simd_state, SIMD32));
+
+   ASSERT_EQ(brw_simd_select(simd_state), -1);
+}
+
+TEST_F(SIMDSelectionCS, FailAtSIMD8Forced)
+{
+   const uint64_t saved_intel_simd = intel_simd;
+   const uint32_t saved_intel_simd_overridden = intel_simd_overridden;
+   intel_simd |= DEBUG_CS_SIMD;
+   intel_simd_overridden |= BITFIELD_BIT(MESA_SHADER_COMPUTE);
+
+   EXPECT_TRUE(brw_simd_should_compile(simd_state, SIMD8));
+   brw_simd_mark_failed(simd_state, SIMD8, "fail");
+   EXPECT_FALSE(brw_simd_should_compile(simd_state, SIMD16));
+   EXPECT_FALSE(brw_simd_should_compile(simd_state, SIMD32));
+
+   EXPECT_EQ(brw_simd_select(simd_state), -1);
+
+   intel_simd = saved_intel_simd;
+   intel_simd_overridden = saved_intel_simd_overridden;
+}
+
+TEST_F(SIMDSelectionCS, FailAtSIMD16)
+{
+   ASSERT_TRUE(brw_simd_should_compile(simd_state, SIMD8));
+   brw_simd_mark_compiled(simd_state, SIMD8, not_spilled);
+   ASSERT_TRUE(brw_simd_should_compile(simd_state, SIMD16));
+   brw_simd_mark_failed(simd_state, SIMD16, "fail");
+   ASSERT_FALSE(brw_simd_should_compile(simd_state, SIMD32));
+
+   ASSERT_EQ(brw_simd_select(simd_state), SIMD8);
+}
+
+TEST_F(SIMDSelectionCS, FailAtSIMD32Xe3)
+{
+   /* Xe3 attempts the widths in decreasing order, so a failure says
+    * nothing about the narrower ones.
+    */
+   devinfo->ver = 30;
+
+   ASSERT_TRUE(brw_simd_should_compile(simd_state, SIMD32));
+   brw_simd_mark_failed(simd_state, SIMD32, "fail");
+   ASSERT_TRUE(brw_simd_should_compile(simd_state, SIMD16));
+   brw_simd_mark_compiled(simd_state, SIMD16, not_spilled);
+
+   ASSERT_EQ(brw_simd_select(simd_state), SIMD16);
+}
+
+TEST_F(SIMDSelectionCS, EnvironmentVariable16Only)
+{
+   const uint64_t saved_intel_simd = intel_simd;
+   const uint32_t saved_intel_simd_overridden = intel_simd_overridden;
+   intel_simd = (intel_simd & ~DEBUG_CS_SIMD) | DEBUG_CS_SIMD16;
+   intel_simd_overridden |= BITFIELD_BIT(MESA_SHADER_COMPUTE);
+
+   EXPECT_FALSE(brw_simd_should_compile(simd_state, SIMD8));
+   EXPECT_STREQ(simd_state.error[SIMD8],
+                "Disabled by INTEL_SIMD_DEBUG environment variable");
+
+   EXPECT_TRUE(brw_simd_should_compile(simd_state, SIMD16));
+   brw_simd_mark_compiled(simd_state, SIMD16, not_spilled);
+   EXPECT_FALSE(brw_simd_should_compile(simd_state, SIMD32));
+
+   EXPECT_EQ(brw_simd_select(simd_state), SIMD16);
+
+   intel_simd = saved_intel_simd;
+   intel_simd_overridden = saved_intel_simd_overridden;
+}
+
 TEST_F(SIMDSelectionCS, EnvironmentVariable32)
 {
    intel_simd_overridden |= BITFIELD_BIT(MESA_SHADER_COMPUTE);

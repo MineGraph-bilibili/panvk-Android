@@ -343,6 +343,17 @@ struct rvce_feedback_data {
    struct rvce_output_unit_segment segments[];
 };
 
+struct rvce_tile_config_param {
+   uint32_t bankWidth              : 2;  /* Bank width: 1, 2, 4, 8 */
+   uint32_t bankHeight             : 2;  /* Bank height: 1, 2, 4, 8 */
+   uint32_t macroTileAspect        : 2;  /* MacroTileAspect: 1, 2, 4, 8 */
+   uint32_t numBanks               : 2;  /* Number of banks: 2, 4, 8, 16 */
+   uint32_t microTileMode          : 2;  /* Micro tile mode */
+   uint32_t pipeConfig             : 5;  /* Pipe config */
+   uint32_t tileSplit              : 3;  /* Tile split bytes: 64, 128, 256, 512, 1K, 2K, 4K */
+   uint32_t reserved               : 14; /* Reserved bits */
+};
+
 struct pipe_video_codec *si_vce_create_encoder(struct pipe_context *context,
                                                const struct pipe_video_codec *templat,
                                                struct radeon_winsys *ws,

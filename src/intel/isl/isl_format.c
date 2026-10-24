@@ -899,6 +899,15 @@ isl_format_supports_ccs_e(const struct intel_device_info *devinfo,
    if (devinfo->ver >= 20)
       return true;
 
+   /* On gfx12.5, the following formats are not explicitly listed in the docs
+    * as supporting compression. However, we allow them because, just like
+    * Xe2+, they seem to work regardless of what the documentation implies.
+    */
+   if (devinfo->verx10 == 125 && (format == ISL_FORMAT_L8_UNORM_SRGB ||
+                                  format == ISL_FORMAT_L8A8_UNORM_SRGB ||
+                                  format == ISL_FORMAT_R9G9B9E5_SHAREDEXP))
+      return true;
+
    /* For simplicity, only report that a format supports CCS_E if blorp can
     * perform bit-for-bit copies with an image of that format while compressed.
     * Unfortunately, R11G11B10_FLOAT is in a compression class of its own, and

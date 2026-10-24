@@ -210,7 +210,22 @@ u_copy_swap422_packed(void *const *destination_data,
 static inline uint32_t
 u_get_h264_level(uint32_t width, uint32_t height, uint32_t *max_reference)
 {
-   uint32_t max_dpb_mbs;
+   /* From Table A-1 of the H.264 specification */
+   static const struct {
+      uint32_t level;
+      uint32_t max_fs;
+      uint32_t max_dpb_mbs;
+   } levels[] = {
+      {30, 1620, 8100},
+      {31, 3600, 18000},
+      {32, 5120, 20480},
+      {41, 8192, 32768},
+      {42, 8704, 34816},
+      {50, 22080, 110400},
+      {52, 36864, 184320},
+      {62, 139264, 696320},
+   };
+   uint32_t frame_mbs, max_dpb_mbs;
 
    width = align(width, 16);
    height = align(height, 16);
@@ -220,26 +235,15 @@ u_get_h264_level(uint32_t width, uint32_t height, uint32_t *max_reference)
       like mpv application for VA-API, it requires references more than that,
       so we have to set max of references to 16 here. */
    *max_reference = MIN2(*max_reference, 16);
-   max_dpb_mbs = (width / 16) * (height / 16) * *max_reference;
+   frame_mbs = DIV_ROUND_UP(width, 16) * DIV_ROUND_UP(height, 16);
+   max_dpb_mbs = frame_mbs * *max_reference;
 
-   /* The calculation is based on "Decoded picture buffering" section
-      from http://en.wikipedia.org/wiki/H.264/MPEG-4_AVC */
-   if (max_dpb_mbs <= 8100)
-      return 30;
-   else if (max_dpb_mbs <= 18000)
-      return 31;
-   else if (max_dpb_mbs <= 20480)
-      return 32;
-   else if (max_dpb_mbs <= 32768)
-      return 41;
-   else if (max_dpb_mbs <= 34816)
-      return 42;
-   else if (max_dpb_mbs <= 110400)
-      return 50;
-   else if (max_dpb_mbs <= 184320)
-      return 51;
-   else
-      return 52;
+   for (unsigned i = 0; i < ARRAY_SIZE(levels); i++) {
+      if (frame_mbs <= levels[i].max_fs && max_dpb_mbs <= levels[i].max_dpb_mbs)
+         return levels[i].level;
+   }
+
+   return 62;
 }
 
 static inline uint32_t

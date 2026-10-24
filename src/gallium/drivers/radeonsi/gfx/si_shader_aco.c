@@ -64,7 +64,6 @@ si_fill_aco_shader_info(struct si_shader *shader, struct aco_shader_info *info,
 
    info->image_2d_view_of_3d = gfx_level == GFX9;
    info->hw_stage = si_select_hw_stage(stage, key, gfx_level);
-   info->lds_size = si_calculate_needed_lds_size(gfx_level, shader);
 
    if (stage <= MESA_SHADER_GEOMETRY && key->ge.as_ngg && !key->ge.as_es) {
       info->schedule_ngg_pos_exports = sel->screen->info.gfx_level < GFX11 &&
@@ -87,50 +86,54 @@ si_fill_aco_shader_info(struct si_shader *shader, struct aco_shader_info *info,
       info->ps.has_prolog = !shader->is_monolithic;
       info->ps.has_epilog = !shader->is_monolithic;
       break;
+   case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_TASK:
+   case MESA_SHADER_MESH:
+      /* ACO doesn't need to know the LDS size of other pre-rasterization
+       * stages for VGPR spilling because their workgroups won't get larger
+       * than 256 invocations, which isn't enough to lower the VGPR limit.
+       */
+      info->lds_size = shader->info.shared_size;
+      break;
    default:
       break;
    }
 }
 
 static void
-si_aco_build_shader_binary(void **data, const struct ac_shader_config *config,
-                           const char *llvm_ir_str, unsigned llvm_ir_size, const char *disasm_str,
-                           unsigned disasm_size, struct amd_stats *statistics,
-                           uint32_t exec_size, const uint32_t *code, uint32_t code_dw,
-                           const struct aco_symbol *symbols, unsigned num_symbols,
-                           const struct ac_shader_debug_info *debug_info, unsigned debug_info_count)
+si_aco_build_shader_binary(void **data, const aco_callback_params *params)
 {
    struct si_shader *shader = (struct si_shader *)data;
 
-   unsigned code_size = code_dw * 4;
-   char *buffer = MALLOC(code_size + disasm_size);
-   memcpy(buffer, code, code_size);
+   unsigned code_size = params->code_dw * 4;
+   char *buffer = MALLOC(code_size + params->disasm_size);
+   memcpy(buffer, params->code, code_size);
 
    shader->binary.type = SI_SHADER_BINARY_RAW;
    shader->binary.code_buffer = buffer;
    shader->binary.code_size = code_size;
-   shader->binary.exec_size = exec_size;
+   shader->binary.exec_size = params->exec_size;
 
-   if (disasm_size) {
-      memcpy(buffer + code_size, disasm_str, disasm_size);
+   if (params->disasm_size) {
+      memcpy(buffer + code_size, params->disasm_str, params->disasm_size);
       shader->binary.disasm_string = buffer + code_size;
-      shader->binary.disasm_size = disasm_size;
+      shader->binary.disasm_size = params->disasm_size;
    }
 
-   if (llvm_ir_size) {
-      shader->binary.llvm_ir_string = MALLOC(llvm_ir_size);
-      memcpy(shader->binary.llvm_ir_string, llvm_ir_str, llvm_ir_size);
+   if (params->ir_size) {
+      shader->binary.llvm_ir_string = MALLOC(params->ir_size);
+      memcpy(shader->binary.llvm_ir_string, params->ir_str, params->ir_size);
    }
 
-   if (num_symbols) {
-      unsigned symbol_size = num_symbols * sizeof(*symbols);
+   if (params->num_symbols) {
+      unsigned symbol_size = params->num_symbols * sizeof(params->symbols[0]);
       void *data = MALLOC(symbol_size);
-      memcpy(data, symbols, symbol_size);
+      memcpy(data, params->symbols, symbol_size);
       shader->binary.symbols = data;
-      shader->binary.num_symbols = num_symbols;
+      shader->binary.num_symbols = params->num_symbols;
    }
 
-   shader->config = *config;
+   shader->config = params->config;
 }
 
 bool
@@ -209,29 +212,27 @@ si_aco_resolve_symbols(struct si_shader *shader, uint32_t *code_for_write,
 }
 
 static void
-si_aco_build_shader_part_binary(void** priv_ptr, uint32_t num_sgprs, uint32_t num_vgprs,
-                                uint32_t exec_size, const uint32_t* code, uint32_t code_dw_size,
-                                const char* disasm_str, uint32_t disasm_size)
+si_aco_build_shader_part_binary(void** priv_ptr, const aco_callback_params *params)
 {
    struct si_shader_part *result = (struct si_shader_part *)priv_ptr;
-   unsigned code_size = code_dw_size * 4;
+   unsigned code_size = params->code_dw * 4;
 
-   char *buffer = MALLOC(code_size + disasm_size);
-   memcpy(buffer, code, code_size);
+   char *buffer = MALLOC(code_size + params->disasm_size);
+   memcpy(buffer, params->code, code_size);
 
    result->binary.type = SI_SHADER_BINARY_RAW;
    result->binary.code_buffer = buffer;
    result->binary.code_size = code_size;
-   result->binary.exec_size = exec_size;
+   result->binary.exec_size = params->exec_size;
 
-   if (disasm_size) {
-      memcpy(buffer + code_size, disasm_str, disasm_size);
+   if (params->disasm_size) {
+      memcpy(buffer + code_size, params->disasm_str, params->disasm_size);
       result->binary.disasm_string = buffer + code_size;
-      result->binary.disasm_size = disasm_size;
+      result->binary.disasm_size = params->disasm_size;
    }
 
-   result->num_sgprs = num_sgprs;
-   result->num_vgprs = num_vgprs;
+   result->num_sgprs = params->config.num_sgprs;
+   result->num_vgprs = params->config.num_vgprs;
 }
 
 static bool
@@ -299,6 +300,7 @@ si_aco_build_ps_epilog(struct aco_compiler_options *options,
       .kill_depth = key->ps_epilog.states.kill_z,
       .kill_stencil = key->ps_epilog.states.kill_stencil,
       .kill_samplemask = key->ps_epilog.states.kill_samplemask,
+      .spi_shader_z_format = ACO_SPI_SHADER_Z_FORMAT_UNKNOWN,
       .skip_null_export = options->gfx_level >= GFX10 && !key->ps_epilog.uses_discard,
       .color_types = key->ps_epilog.color_types,
       .color_map = { 0, 1, 2, 3, 4, 5, 6, 7 },

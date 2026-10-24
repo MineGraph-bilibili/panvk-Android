@@ -65,6 +65,9 @@ etna_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
 
    uint32_t mask = 1 << offset;
    for (int idx = 0; idx < num_samplers; ++idx, mask <<= 1) {
+      if (ctx->sampler[offset + idx] != samplers[idx])
+         ctx->dirty_samplers |= mask;
+
       ctx->sampler[offset + idx] = samplers[idx];
       if (samplers[idx])
          ctx->active_samplers |= mask;

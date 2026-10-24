@@ -584,7 +584,8 @@ ngg_gs_cull_primitive(nir_builder *b, nir_def *tid_in_tg, nir_def *max_vtxcnt,
          pos[i][1] = nir_fdiv(b, pos[i][1], pos[i][3]);
       }
 
-      nir_def *accepted = ac_nir_cull_primitive(b, s->options->skip_viewport_state_culling,
+      nir_def *accepted = ac_nir_cull_primitive(b, s->options->skip_face_culling,
+                                                s->options->skip_viewport_state_culling,
                                                 s->options->use_point_tri_intersection,
                                                 accepted_by_clipdist, pos,
                                                 s->num_vertices_per_primitive, NULL, NULL);
@@ -747,6 +748,19 @@ ngg_gs_finale(nir_builder *b, lower_ngg_gs_state *s)
    nir_def *max_vtxcnt = nir_load_workgroup_num_input_vertices_amd(b);
    nir_def *max_prmcnt = max_vtxcnt; /* They are currently practically the same; both RADV and RadeonSI do this. */
    nir_def *out_vtx_lds_addr = ngg_gs_out_vertex_addr(b, tid_in_tg, s);
+
+   if (s->options->rasterizer_discard) {
+      /* Export nothing for rasterizer discard. There should be only XFB outputs in LDS after
+       * nir_remove_outputs.
+       */
+      nir_if *if_wave_0 = nir_push_if(b, nir_ieq_imm(b, nir_load_subgroup_id(b), 0));
+      {
+         ac_nir_ngg_alloc_vertices_and_primitives(b, nir_imm_int(b, 0), nir_imm_int(b, 0),
+                                                  s->ac->has_ngg_fully_culled_bug);
+      }
+      nir_pop_if(b, if_wave_0);
+      return;
+   }
 
    if (s->output_compile_time_known) {
       /* When the output is compile-time known, the GS writes all possible vertices and primitives it can.

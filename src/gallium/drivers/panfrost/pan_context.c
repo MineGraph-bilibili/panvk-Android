@@ -215,14 +215,15 @@ panfrost_set_shader_images(struct pipe_context *pctx,
    struct panfrost_context *ctx = pan_context(pctx);
    ctx->dirty_shader[shader] |= PAN_DIRTY_STAGE_IMAGE;
 
-   /* Unbind start_slot...start_slot+count */
+   /* Unbind start_slot...start_slot+count+unbind_num_trailing_slots */
    if (!iviews) {
       for (int i = start_slot;
            i < start_slot + count + unbind_num_trailing_slots; i++) {
          pipe_resource_reference(&ctx->images[shader][i].resource, NULL);
       }
 
-      ctx->image_mask[shader] &= ~(BITFIELD64_MASK(count) << start_slot);
+      ctx->image_mask[shader] &=
+         ~BITFIELD64_RANGE(start_slot, count + unbind_num_trailing_slots);
       return;
    }
 
@@ -550,10 +551,11 @@ static const void *
 panfrost_trace_get_data(struct u_trace_context *utctx, void *buffer,
                         uint64_t offset_B, uint32_t size_B)
 {
+   struct panfrost_context *ctx = pan_context((struct pipe_context *)utctx->pctx);
    struct panfrost_resource *rsrc =
       pan_resource((struct pipe_resource *)buffer);
 
-   panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+   panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
 
    if (panfrost_bo_mmap(rsrc->bo))
       return NULL;
@@ -573,7 +575,7 @@ panfrost_trace_read_ts(struct u_trace_context *utctx, void *timestamps,
    if (!dev->kmod.dev->props.timestamp_frequency)
       return U_TRACE_NO_TIMESTAMP;
 
-   panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+   panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
 
    if (panfrost_bo_mmap(rsrc->bo))
       return U_TRACE_NO_TIMESTAMP;
@@ -814,7 +816,7 @@ panfrost_get_query_result(struct pipe_context *pipe, struct pipe_query *q,
    case PIPE_QUERY_OCCLUSION_PREDICATE:
    case PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE:
       panfrost_flush_writer(ctx, rsrc, "Occlusion query");
-      panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+      panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
 
       /* Read back the query results */
       uint64_t *result = (uint64_t *)rsrc->bo->ptr.cpu;
@@ -836,7 +838,7 @@ panfrost_get_query_result(struct pipe_context *pipe, struct pipe_query *q,
 
    case PIPE_QUERY_TIMESTAMP: {
       panfrost_flush_writer(ctx, rsrc, "Timestamp query");
-      panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+      panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
       uint64_t *timestamp = (uint64_t *)rsrc->bo->ptr.cpu;
 
       vresult->u64 = pan_gpu_time_to_ns(dev, *timestamp);
@@ -852,7 +854,7 @@ panfrost_get_query_result(struct pipe_context *pipe, struct pipe_query *q,
 
    case PIPE_QUERY_TIME_ELAPSED: {
       panfrost_flush_writer(ctx, rsrc, "Time elapsed query");
-      panfrost_bo_wait(rsrc->bo, INT64_MAX, false);
+      panfrost_resource_wait(rsrc, ctx, INT64_MAX, false);
       uint64_t *timestamp = (uint64_t *)rsrc->bo->ptr.cpu;
 
       vresult->u64 = pan_gpu_time_to_ns(dev, timestamp[1] - timestamp[0]);
@@ -1174,6 +1176,7 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    ctx->sample_mask = ~0;
    ctx->active_queries = true;
 
+   util_dynarray_init(&ctx->bo_access, ctx);
    util_dynarray_init(&ctx->global_buffers, ctx);
 
    /* Sync object/FD used for NATIVE_FENCE_FD. */

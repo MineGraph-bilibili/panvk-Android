@@ -16,5 +16,6 @@ from .unbox import *
 from .decodersnapshot import *
 from .subdecode import *
 from .api_log_decoder import *
+from .supportedextensions import *
 from .vkextensionstructuretype import VulkanGfxstreamStructureType, \
     VulkanAndroidNativeBufferStructureType

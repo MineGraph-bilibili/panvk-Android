@@ -34,6 +34,9 @@ struct kk_descriptor_pool {
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_descriptor_pool, base, VkDescriptorPool,
                                VK_OBJECT_TYPE_DESCRIPTOR_POOL)
 
+void kk_descriptor_pool_set_label(struct kk_descriptor_pool *pool,
+                                  const char *label);
+
 struct kk_descriptor_set {
    struct vk_object_base base;
 

@@ -23,4 +23,5 @@ struct jay_shader_bin *jay_compile(const struct intel_device_info *devinfo,
                                    nir_shader *nir,
                                    union brw_any_prog_data *prog_data,
                                    union brw_any_prog_key *key,
-                                   debug_archiver *archiver);
+                                   debug_archiver *archiver,
+                                   const struct brw_mue_map *mue_map_for_fs);

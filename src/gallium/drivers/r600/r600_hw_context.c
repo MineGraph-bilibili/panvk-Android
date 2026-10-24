@@ -347,8 +347,11 @@ void r600_begin_new_cs(struct r600_context *ctx)
 	r600_mark_atom_dirty(ctx, &ctx->db_state.atom);
 	r600_mark_atom_dirty(ctx, &ctx->cb_state.atom);
 	if (ctx->b.gfx_level >= EVERGREEN) {
-		r600_mark_atom_dirty(ctx, &ctx->fragment_images.atom);
-		r600_mark_atom_dirty(ctx, &ctx->fragment_buffers.atom);
+		for (unsigned k = 0; k < ARRAY_SIZE(ctx->fragment_images); k++)
+			r600_mark_atom_dirty(ctx, &ctx->fragment_images[k].atom);
+		for (unsigned k = 0; k < ARRAY_SIZE(ctx->fragment_buffers); k++)
+			if (r600_check_buffer_shader_supported(k))
+				r600_mark_atom_dirty(ctx, &ctx->fragment_buffers[k].atom);
 		r600_mark_atom_dirty(ctx, &ctx->compute_images.atom);
 		r600_mark_atom_dirty(ctx, &ctx->compute_buffers.atom);
 	}

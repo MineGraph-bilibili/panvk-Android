@@ -916,11 +916,15 @@ static void *si_create_rs_state(struct pipe_context *ctx, const struct pipe_rast
                               SI_NGG_CULL_CLIP_PLANE_ENABLE(state->clip_plane_enable);
 
    if (!state->front_ccw) {
-      rs->ngg_cull_front = state->cull_face & PIPE_FACE_FRONT || rs->rasterizer_discard;
-      rs->ngg_cull_back = state->cull_face & PIPE_FACE_BACK || rs->rasterizer_discard;
+      rs->ngg_cull_face_negative_determinant = state->cull_face & PIPE_FACE_FRONT ||
+                                               rs->rasterizer_discard;
+      rs->ngg_cull_face_positive_determinant = state->cull_face & PIPE_FACE_BACK ||
+                                               rs->rasterizer_discard;
    } else {
-      rs->ngg_cull_front = state->cull_face & PIPE_FACE_BACK || rs->rasterizer_discard;
-      rs->ngg_cull_back = state->cull_face & PIPE_FACE_FRONT || rs->rasterizer_discard;
+      rs->ngg_cull_face_negative_determinant = state->cull_face & PIPE_FACE_BACK ||
+                                               rs->rasterizer_discard;
+      rs->ngg_cull_face_positive_determinant = state->cull_face & PIPE_FACE_FRONT ||
+                                               rs->rasterizer_discard;
    }
 
    /* Force gl_FrontFacing to true or false if the other face is culled. */
@@ -2476,10 +2480,8 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
     * when PA_SU_HARDWARE_SCREEN_OFFSET != 0 and any_scissor.BR_X/Y <= 0.
     * We could implement the full workaround here, but it's a useless case.
     */
-   if ((!state->width || !state->height) && (state->nr_cbufs || state->zsbuf.texture)) {
-      UNREACHABLE("the framebuffer shouldn't have zero area");
+   if ((!state->width || !state->height) && (state->nr_cbufs || state->zsbuf.texture))
       return;
-   }
 
    ASSERTED bool is_msaa_resolve = state->nr_cbufs == 2 &&
                                    state->cbufs[0].texture && state->cbufs[0].texture->nr_samples > 1 &&
@@ -4597,6 +4599,15 @@ static void si_set_vertex_buffers(struct pipe_context *ctx, unsigned count,
       si_vs_key_update_inputs(sctx);
 }
 
+static void si_vertex_state_destroy(struct pipe_screen *screen,
+                                    struct pipe_vertex_state *state)
+{
+   pipe_vertex_buffer_unreference(&state->input.vbuffer);
+   pipe_resource_reference(&state->input.indexbuf, NULL);
+   FREE(state);
+}
+
+
 static struct pipe_vertex_state *
 si_create_vertex_state(struct pipe_screen *screen,
                        struct pipe_vertex_buffer *buffer,
@@ -4608,6 +4619,9 @@ si_create_vertex_state(struct pipe_screen *screen,
    struct si_screen *sscreen = (struct si_screen *)screen;
    struct si_vertex_state *state = CALLOC_STRUCT(si_vertex_state);
 
+   if (!state)
+      return NULL;
+
    util_init_pipe_vertex_state(screen, buffer, elements, num_elements, indexbuf, full_velem_mask,
                                &state->b);
 
@@ -4617,6 +4631,12 @@ si_create_vertex_state(struct pipe_screen *screen,
    struct si_context ctx = {};
    ctx.b.screen = screen;
    struct si_vertex_elements *velems = si_create_vertex_elements(&ctx.b, num_elements, elements);
+
+   if (!velems) {
+      si_vertex_state_destroy(screen, &state->b);
+      return NULL;
+   }
+
    state->velems = *velems;
    si_delete_vertex_element(&ctx.b, velems);
 
@@ -4637,14 +4657,6 @@ si_create_vertex_state(struct pipe_screen *screen,
    }
 
    return &state->b;
-}
-
-static void si_vertex_state_destroy(struct pipe_screen *screen,
-                                    struct pipe_vertex_state *state)
-{
-   pipe_vertex_buffer_unreference(&state->input.vbuffer);
-   pipe_resource_reference(&state->input.indexbuf, NULL);
-   FREE(state);
 }
 
 static struct pipe_vertex_state *

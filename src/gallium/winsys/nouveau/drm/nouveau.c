@@ -1723,7 +1723,7 @@ nouveau_pushbuf_space(struct nouveau_pushbuf *push, uint32_t dwords, uint32_t re
    int ret = 0;
 
    /* switch to next buffer if insufficient space in the current one */
-   if (push->cur + dwords >= push->end) {
+   if (!push->cur || (push->cur + dwords >= push->end)) {
       if (nvpb->bo_next < nvpb->bo_nr) {
          nouveau_bo_ref(nvpb->bos[nvpb->bo_next++], &bo);
          if (nvpb->bo_next == nvpb->bo_nr)

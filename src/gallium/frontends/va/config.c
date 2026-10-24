@@ -38,6 +38,17 @@
 
 #include "util/u_handle_table.h"
 
+static bool
+vl_vpp_supported(struct pipe_screen *pscreen)
+{
+   return pscreen->get_video_param(pscreen,
+                                   PIPE_VIDEO_PROFILE_UNKNOWN,
+                                   PIPE_VIDEO_ENTRYPOINT_PROCESSING,
+                                   PIPE_VIDEO_CAP_SUPPORTED) ||
+          pscreen->caps.graphics || 
+          pscreen->caps.compute;
+}
+
 VAStatus
 vlVaQueryConfigProfiles(VADriverContextP ctx, VAProfile *profile_list, int *num_profiles)
 {
@@ -61,7 +72,8 @@ vlVaQueryConfigProfiles(VADriverContextP ctx, VAProfile *profile_list, int *num_
    }
 
    /* Support postprocessing through vl_compositor */
-   profile_list[(*num_profiles)++] = VAProfileNone;
+   if (vl_vpp_supported(pscreen))
+      profile_list[(*num_profiles)++] = VAProfileNone;
 
    return VA_STATUS_SUCCESS;
 }
@@ -80,6 +92,9 @@ vlVaQueryConfigEntrypoints(VADriverContextP ctx, VAProfile profile,
    *num_entrypoints = 0;
 
    if (profile == VAProfileNone) {
+      if (!vl_vpp_supported(VL_VA_PSCREEN(ctx)))
+         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+
       entrypoint_list[(*num_entrypoints)++] = VAEntrypointVideoProc;
       return VA_STATUS_SUCCESS;
    }
@@ -631,6 +646,11 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
       return VA_STATUS_ERROR_ALLOCATION_FAILED;
 
    if (profile == VAProfileNone) {
+      if (!vl_vpp_supported(pscreen)) {
+         FREE(config);
+         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+      }
+
       if (entrypoint != VAEntrypointVideoProc) {
          FREE(config);
          return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;

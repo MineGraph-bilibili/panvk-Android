@@ -34,6 +34,8 @@ layout (constant_id = SUBGROUP_SIZE_ID) const int SUBGROUP_SIZE = 64;
 layout (constant_id = BVH_BOUNDS_OFFSET_ID) const int BVH_BOUNDS_OFFSET = 0;
 layout (constant_id = BUILD_FLAGS_ID) const int BUILD_FLAGS = 0;
 layout (constant_id = ROOT_FLAGS_OFFSET_ID) const int ROOT_FLAGS_OFFSET = -1;
+layout (constant_id = MORTON_SORT_WORKGROUP_SIZE_ID) const int MORTON_SORT_WORKGROUP_SIZE = 512;
+layout (constant_id = MORTON_SORT_KVS_PER_THREAD_ID) const int MORTON_SORT_KVS_PER_THREAD = 2;
 
 /* copied from u_math.h */
 uint32_t

@@ -27,7 +27,7 @@ VkResult
 wsi_metal_layer_configure(const CAMetalLayer *metal_layer,
    uint32_t width, uint32_t height, uint32_t image_count,
    VkFormat format, VkColorSpaceKHR color_space,
-   bool enable_opaque, bool enable_immediate);
+   bool enable_opaque, bool enable_immediate, bool framebuffer_only);
 
 void
 wsi_metal_layer_set_hdr_metadata(const CAMetalLayer *metal_layer,

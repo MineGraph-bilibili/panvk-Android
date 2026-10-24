@@ -2301,15 +2301,13 @@ cs_flush_caches(struct cs_builder *b, enum mali_cs_flush_mode l2,
    }                                                                           \
                                                                                \
    static inline void cs_sync##__cnt_width##_wait(                             \
-      struct cs_builder *b, bool reject_error,                                 \
-      enum mali_cs_sync_scope scope, enum mali_cs_condition cond,              \
+      struct cs_builder *b, bool reject_error, enum mali_cs_condition cond,    \
       struct cs_index ref, struct cs_index addr)                               \
    {                                                                           \
       assert(cond == MALI_CS_CONDITION_LEQUAL ||                               \
              cond == MALI_CS_CONDITION_GREATER);                               \
       cs_emit(b, SYNC_WAIT##__cnt_width, I) {                                  \
          I.error_reject = reject_error;                                        \
-         I.scope = scope;                                                      \
          I.condition = cond;                                                   \
          I.data = cs_src##__cnt_width(b, ref);                                 \
          I.address = cs_src64(b, addr);                                        \

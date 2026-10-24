@@ -21,8 +21,7 @@
       },                                                                       \
       jay_lower_post_ra)
 
-#define PRE   jay_add_predicate_else
-#define POST  jay_add_predicate
+#define PRE   jay_add_predicate
 #define CFLAG jay_set_cond_flag
 
 #define NEGCASE(x) CASE(x, x)
@@ -55,17 +54,17 @@ class LowerPostRA : public testing::Test {
 TEST_F(LowerPostRA, Tied)
 {
    CASE(PRE(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), f0, z),
-        POST(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), f0));
+        PRE(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), f0, jay_null()));
 
    CASE(PRE(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), jay_negate(f0), z),
-        POST(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), jay_negate(f0)));
+        PRE(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), jay_negate(f0), jay_null()));
 }
 
 TEST_F(LowerPostRA, InsertMove)
 {
    CASE(PRE(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), f0, x), {
-      POST(b, jay_MOV(b, z, x), jay_negate(f0));
-      POST(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), f0);
+      PRE(b, jay_MOV(b, z, x), jay_negate(f0), jay_null());
+      PRE(b, jay_ADD(b, JAY_TYPE_U32, z, x, y), f0, jay_null());
    });
 }
 

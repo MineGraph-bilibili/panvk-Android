@@ -658,7 +658,8 @@ static void r300_query_memory_info(struct pipe_screen *pscreen,
 }
 
 struct pipe_screen* r300_screen_create(struct radeon_winsys *rws,
-                                       const struct pipe_screen_config *config)
+                                       const struct pipe_screen_config *config,
+                                       UNUSED uint64_t debug_flags)
 {
     struct r300_screen *r300screen = CALLOC_STRUCT(r300_screen);
 

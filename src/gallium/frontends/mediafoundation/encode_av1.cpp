@@ -27,8 +27,16 @@
 
 #include "encode_av1.tmh"
 
-extern DWORD
-CalculateQualityFromQP( DWORD QP );
+static constexpr uint8_t av1_quantizer_to_qindex[64] = {
+   0,   4,   8,   12,  16,  20,  24,  28,
+   32,  36,  40,  44,  48,  52,  56,  60,
+   64,  68,  72,  76,  80,  84,  88,  92,
+   96,  100, 104, 108, 112, 116, 120, 124,
+   128, 132, 136, 140, 144, 148, 152, 156,
+   160, 164, 168, 172, 176, 180, 184, 188,
+   192, 196, 200, 204, 208, 212, 216, 220,
+   224, 228, 232, 236, 240, 244, 249, 255,
+};
 
 // utility function to compute the cropping rectangle given texture and output dimensions
 static void
@@ -36,7 +44,7 @@ ComputeCroppingRect( const UINT32 textureWidth,
                      const UINT32 textureHeight,
                      const UINT uiOutputWidth,
                      const UINT uiOutputHeight,
-                     const enum pipe_video_profile outputPipeProfile,
+                     const eAVEncAV1VProfile av1Profile,
                      BOOL &bFrameCroppingFlag,
                      UINT32 &uiFrameCropRightOffset,
                      UINT32 &uiFrameCropBottomOffset )
@@ -46,7 +54,7 @@ ComputeCroppingRect( const UINT32 textureWidth,
 
    if( iCropRight || iCropBottom )
    {
-      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertProfileToFormat( outputPipeProfile ) );
+      UINT32 chromaFormatIdc = GetChromaFormatIdc( ConvertAVEncVProfileToPipeFormat( av1Profile ) );
       UINT32 cropUnitX = 1;
       UINT32 cropUnitY = 1;
       switch( chromaFormatIdc )
@@ -95,7 +103,7 @@ CDX12EncHMFT::UpdateAV1EncPictureDesc( pipe_av1_enc_picture_desc *pPicInfo,
    pPicInfo->seq.num_temporal_layers = 0;
    pPicInfo->seq.intra_period = intra_period;
    pPicInfo->seq.ip_period = ip_period;
-   pPicInfo->seq.bit_depth_minus8 = 0;
+   pPicInfo->seq.bit_depth_minus8 = pPicInfo->base.input_format == PIPE_FORMAT_P010 ? 2 : 0;
    pPicInfo->seq.pic_width_in_luma_samples = pic_width_in_luma_samples;
    pPicInfo->seq.pic_height_in_luma_samples = pic_height_in_luma_samples;
 
@@ -122,7 +130,7 @@ CDX12EncHMFT::UpdateAV1EncPictureDesc( pipe_av1_enc_picture_desc *pPicInfo,
    pPicInfo->seq.seq_bits.initial_display_delay_present_flag = 0;
    pPicInfo->seq.seq_bits.still_picture = 0;
    pPicInfo->seq.seq_bits.reduced_still_picture_header = 0;
-   pPicInfo->seq.seq_bits.high_bitdepth = 0;
+   pPicInfo->seq.seq_bits.high_bitdepth = pPicInfo->base.input_format == PIPE_FORMAT_P010;
 
    pPicInfo->seq.num_units_in_display_tick = 0;
    pPicInfo->seq.time_scale = 0;
@@ -266,17 +274,6 @@ CDX12EncHMFT::UpdateAV1EncPictureDesc( pipe_av1_enc_picture_desc *pPicInfo,
 
    pPicInfo->requested_metadata = m_EncoderCapabilities.m_HWSupportedMetadataFlags;
 
-   pPicInfo->metadata_flags.hdr_cll = 0;
-   pPicInfo->metadata_flags.hdr_mdcv = 0;
-
-   pPicInfo->metadata_hdr_cll.max_cll = 0;
-   pPicInfo->metadata_hdr_cll.max_fall = 0;
-
-   pPicInfo->metadata_hdr_mdcv.white_point_chromaticity_x = 0;
-   pPicInfo->metadata_hdr_mdcv.white_point_chromaticity_y = 0;
-   pPicInfo->metadata_hdr_mdcv.luminance_max = 0;
-   pPicInfo->metadata_hdr_mdcv.luminance_min = 0;
-
    pPicInfo->dpb_size = 0;
    pPicInfo->dpb_curr_pic = 0;
 
@@ -394,13 +391,13 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext,
          pPicInfo->rc[rate_ctrl_active_layer_index].rate_ctrl_method = PIPE_H2645_ENC_RATE_CONTROL_METHOD_DISABLE;
          if( m_bEncodeQPSet )
          {
-            pPicInfo->rc[0].qp = m_uiEncodeFrameTypeIQP[rate_ctrl_active_layer_index];
-            pPicInfo->rc[0].qp_inter = m_uiEncodeFrameTypePQP[rate_ctrl_active_layer_index];
+            pPicInfo->rc[0].qp = av1_quantizer_to_qindex[m_uiEncodeFrameTypeIQP[rate_ctrl_active_layer_index]];
+            pPicInfo->rc[0].qp_inter = av1_quantizer_to_qindex[m_uiEncodeFrameTypePQP[rate_ctrl_active_layer_index]];
          }
          else
          {
-            pPicInfo->rc[0].qp = m_uiEncodeFrameTypeIQP[0];
-            pPicInfo->rc[0].qp_inter = m_uiEncodeFrameTypePQP[0];
+            pPicInfo->rc[0].qp = av1_quantizer_to_qindex[m_uiEncodeFrameTypeIQP[0]];
+            pPicInfo->rc[0].qp_inter = av1_quantizer_to_qindex[m_uiEncodeFrameTypePQP[0]];
          }
       }
    }
@@ -428,8 +425,8 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext,
 
    // Optional Rate control params for all RC modes
    pPicInfo->rc[rate_ctrl_active_layer_index].app_requested_qp_range = m_bMinQPSet || m_bMaxQPSet;
-   pPicInfo->rc[rate_ctrl_active_layer_index].min_qp = m_uiMinQP;
-   pPicInfo->rc[rate_ctrl_active_layer_index].max_qp = m_uiMaxQP;
+   pPicInfo->rc[rate_ctrl_active_layer_index].min_qp = av1_quantizer_to_qindex[m_uiMinQP];
+   pPicInfo->rc[rate_ctrl_active_layer_index].max_qp = av1_quantizer_to_qindex[m_uiMaxQP];
 
    if( m_bBufferSizeSet )
    {
@@ -471,6 +468,7 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
 
    pipe_av1_enc_picture_desc av1_pic_desc = {};
 
+   av1_pic_desc.base.input_format = ConvertAVEncVProfileToPipeFormat( m_uiProfile );
    av1_pic_desc.frame_type = PIPE_AV1_ENC_FRAME_TYPE_KEY;
    av1_pic_desc.order_hint = 0;
    av1_pic_desc.frame_num = 0;
@@ -485,7 +483,7 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
                         alignedHeight,
                         m_uiOutputWidth,
                         m_uiOutputHeight,
-                        m_outputPipeProfile,
+                        m_uiProfile,
                         m_bFrameCroppingFlag,
                         m_uiFrameCropRightOffset,
                         m_uiFrameCropBottomOffset );
@@ -510,8 +508,8 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
       av1_pic_desc.rc[0].frame_rate_den = m_FrameRate.Denominator;
       av1_pic_desc.rc[0].vbr_quality_factor = static_cast<unsigned int>( ( ( ( 100 - m_uiQuality[0] ) / 100.0 ) * 50 ) + 1 );
    }
-   av1_pic_desc.rc[0].qp = m_uiEncodeFrameTypeIQP[0];
-   av1_pic_desc.rc[0].qp_inter = m_uiEncodeFrameTypeIQP[0];
+   av1_pic_desc.rc[0].qp = av1_quantizer_to_qindex[m_uiEncodeFrameTypeIQP[0]];
+   av1_pic_desc.rc[0].qp_inter = av1_quantizer_to_qindex[m_uiEncodeFrameTypeIQP[0]];
 
    ret = m_pPipeVideoCodec->get_encode_headers( m_pPipeVideoCodec, &av1_pic_desc.base, pSPSPPSData, &buf_size );
    CHECKHR_GOTO( ConvertErrnoRetToHR( ret ), done );
@@ -647,7 +645,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
          m_pPipeVideoCodec,
          static_cast<unsigned>( std::ceil( textureWidth / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
          static_cast<unsigned>( std::ceil( textureHeight / ( 1 << m_pPipeVideoCodec->two_pass.pow2_downscale_factor ) ) ),
-         ConvertProfileToFormat( m_pPipeVideoCodec->profile ),
+         ConvertAVEncVProfileToPipeFormat( m_uiProfile ),
          m_pPipeVideoCodec->max_references + 1 /*curr pic*/ +
             ( m_bLowLatency ? 0 : MFT_INPUT_QUEUE_DEPTH ) /*MFT process input queue depth for delayed in flight recon pic release*/,
          hr );
@@ -656,6 +654,7 @@ CDX12EncHMFT::CreateGOPTracker( uint32_t textureWidth, uint32_t textureHeight )
 
    m_pGOPTracker = new reference_frames_tracker_av1( this,
                                                      m_pPipeVideoCodec,
+                                                     m_uiProfile,
                                                      textureWidth,
                                                      textureHeight,
                                                      m_uiGopSize,

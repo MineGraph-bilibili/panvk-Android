@@ -17,21 +17,3 @@ dEQP-VK.wsi.xlib.maintenance1.present_fence.fifo.*
 # OpenCL-CTS OpenCL-GL sharing needs explicit Rusticl/Panfrost interop
 # enablement before this is a valid CTS target for the G610 job
 OpenCL-GL Sharing
-
-# OpenCL-CTS SPIR exits cleanly after reporting that cl_khr_spir is unsupported,
-# but deqp-runner cannot parse that message as a skip
-^SPIR$
-
-# OpenCL-CTS tests that time out
-^Images \(Kernel max size\)$
-^Images \(Kernel pitch\)$
-^Images \(Kernel\)$
-^Images \(clCopyImage\)$
-^Images \(clFillImage max size\)$
-^Images \(clFillImage pitch\)$
-^Images \(clFillImage\)$
-^Select$
-
-# The OpenCL spec does not define relative error or precision requirements for
-# CL_FILTER_LINEAR sampler combinations
-CL_FILTER_LINEAR

@@ -1,19 +1,4 @@
-glx@glx-buffer-age vblank_mode=0,Crash
-glx@glx-buffer-age,Crash
-glx@glx-destroycontext-1,Crash
-glx@glx-destroycontext-2,Crash
-glx@glx-destroycontext-3,Crash
-glx@glx-make-current,Crash
-glx@glx-multi-context-front,Crash
-glx@glx-multi-context-ib-1,Crash
-glx@glx-multi-context-single-window,Crash
-glx@glx-multi-window-single-context,Crash
-glx@glx-multithread,Crash
-glx@glx-multithread-buffer,Crash
-glx@glx-multithread-buffer-busy-tracking-bug,Crash
-glx@glx-multithread-texture,Crash
-glx@glx-shader-sharing,Crash
-glx@glx-shader-sharing-uniforms,Crash
+glx@glx-multi-window-single-context,Fail
 
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT,Fail
@@ -39,9 +24,6 @@ spec@!opengl 1.0@rasterpos@glsl_vs_tes_linked,Fail
 
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yuv420,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvu420,Fail
-
-# Introduced with the uprev of piglit (70ce1dcacc92 - "ci: Update piglit with s3 support")
-spec@egl 1.4@egl-ext_egl_image_storage,Fail
 
 KHR-GL46.geometry_shader.rendering.rendering.triangles_with_adjacency_input_line_strip_output_triangle_strip_adjacency_drawcall,Fail
 KHR-GL46.geometry_shader.rendering.rendering.triangles_with_adjacency_input_triangle_strip_output_triangle_strip_adjacency_drawcall,Fail
@@ -165,7 +147,6 @@ spec@arb_texture_rg@texwrap formats-int bordercolor-swizzled@GL_RG8UI- swizzled-
 spec@arb_texture_rgb10_a2ui@texwrap formats bordercolor-swizzled,Fail
 spec@arb_texture_rgb10_a2ui@texwrap formats bordercolor-swizzled@GL_RGB10_A2UI- swizzled- border color only,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-export,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-export-tex,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_p010,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_p012,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_p016,Fail
@@ -229,5 +210,6 @@ spec@ext_texture_array@copyteximage 1d_array samples=4,Fail
 spec@ext_texture_array@copyteximage 1d_array samples=6,Fail
 spec@ext_texture_array@copyteximage 1d_array samples=8,Fail
 
-# Nightly run expectations update
-vulkan@shaders@cmat-uniform-ctor,Fail
+# uprev Piglit in Mesa
+spec@arb_texture_view@tex-view,Fail
+

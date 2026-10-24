@@ -33,6 +33,60 @@ static inline struct radeon_bo *radeon_bo(struct pb_buffer_lean *bo)
    return (struct radeon_bo *)bo;
 }
 
+static bool
+radeon_bo_ref_existing(struct radeon_bo *bo)
+{
+   if (unlikely(p_atomic_inc_return(&bo->base.reference.count) == 1)) {
+      p_atomic_dec(&bo->base.reference.count);
+      assert(p_atomic_read(&bo->base.reference.count) == 0);
+      return false;
+   }
+
+   return true;
+}
+
+/* GEM handles are only valid for the DRM file that created/imported them.
+ * When internal work uses a render-node FD, KMS/shared exports still need a
+ * handle for the original app FD, so translate it once and cache the result.
+ */
+static bool
+radeon_bo_get_display_handle(struct radeon_bo *bo, uint32_t *handle)
+{
+   struct radeon_drm_winsys *ws = bo->rws;
+   int dma_fd;
+
+   if (ws->fd == ws->ioctl_fd) {
+      *handle = bo->handle;
+      return true;
+   }
+
+   /* The flink import path can adopt or close an app-fd handle for this BO.
+    * Serialize the PRIME import with that decision because FDToHandle may
+    * return the handle which was exported by GEM_OPEN.
+    */
+   mtx_lock(&ws->bo_handles_mutex);
+
+   if (!bo->display_handle) {
+      if (drmPrimeHandleToFD(ws->ioctl_fd, bo->handle,
+                             DRM_CLOEXEC | DRM_RDWR, &dma_fd)) {
+         mtx_unlock(&ws->bo_handles_mutex);
+         return false;
+      }
+
+      if (drmPrimeFDToHandle(ws->fd, dma_fd, &bo->display_handle)) {
+         close(dma_fd);
+         mtx_unlock(&ws->bo_handles_mutex);
+         return false;
+      }
+
+      close(dma_fd);
+   }
+
+   *handle = bo->display_handle;
+   mtx_unlock(&ws->bo_handles_mutex);
+   return true;
+}
+
 struct radeon_bo_va_hole {
    struct list_head list;
    uint64_t         offset;
@@ -44,7 +98,7 @@ static bool radeon_real_bo_is_busy(struct radeon_bo *bo)
    struct drm_radeon_gem_busy args = {0};
 
    args.handle = bo->handle;
-   return drmCommandWriteRead(bo->rws->fd, DRM_RADEON_GEM_BUSY,
+   return drmCommandWriteRead(bo->rws->ioctl_fd, DRM_RADEON_GEM_BUSY,
                               &args, sizeof(args)) != 0;
 }
 
@@ -77,7 +131,7 @@ static void radeon_real_bo_wait_idle(struct radeon_bo *bo)
    struct drm_radeon_gem_wait_idle args = {0};
 
    args.handle = bo->handle;
-   while (drmCommandWrite(bo->rws->fd, DRM_RADEON_GEM_WAIT_IDLE,
+   while (drmCommandWrite(bo->rws->ioctl_fd, DRM_RADEON_GEM_WAIT_IDLE,
                           &args, sizeof(args)) == -EBUSY);
 }
 
@@ -163,7 +217,7 @@ static enum radeon_bo_domain radeon_bo_get_initial_domain(
    args.handle = bo->handle;
    args.op = RADEON_GEM_OP_GET_INITIAL_DOMAIN;
 
-   if (drmCommandWriteRead(bo->rws->fd, DRM_RADEON_GEM_OP,
+   if (drmCommandWriteRead(bo->rws->ioctl_fd, DRM_RADEON_GEM_OP,
                            &args, sizeof(args))) {
       fprintf(stderr, "radeon: failed to get initial domain: %p 0x%08X\n",
               bo, bo->handle);
@@ -360,7 +414,7 @@ void radeon_bo_destroy(void *winsys, struct pb_buffer_lean *_buf)
                     RADEON_VM_PAGE_SNOOPED;
          va.offset = bo->va;
 
-         if (drmCommandWriteRead(rws->fd, DRM_RADEON_GEM_VA, &va,
+         if (drmCommandWriteRead(rws->ioctl_fd, DRM_RADEON_GEM_VA, &va,
                                  sizeof(va)) != 0 &&
              va.operation == RADEON_VA_RESULT_ERROR) {
             fprintf(stderr, "radeon: Failed to deallocate virtual address for buffer:\n");
@@ -376,7 +430,12 @@ void radeon_bo_destroy(void *winsys, struct pb_buffer_lean *_buf)
 
    /* Close object. */
    args.handle = bo->handle;
-   drmIoctl(rws->fd, DRM_IOCTL_GEM_CLOSE, &args);
+   drmIoctl(rws->ioctl_fd, DRM_IOCTL_GEM_CLOSE, &args);
+
+   if (bo->display_handle) {
+      args.handle = bo->display_handle;
+      drmIoctl(rws->fd, DRM_IOCTL_GEM_CLOSE, &args);
+   }
 
    mtx_destroy(&bo->u.real.map_mutex);
 
@@ -437,7 +496,7 @@ void *radeon_bo_do_map(struct radeon_bo *bo)
    args.handle = bo->handle;
    args.offset = 0;
    args.size = (uint64_t)bo->base.size;
-   if (drmCommandWriteRead(bo->rws->fd,
+   if (drmCommandWriteRead(bo->rws->ioctl_fd,
                            DRM_RADEON_GEM_MMAP,
                            &args,
                            sizeof(args))) {
@@ -448,13 +507,13 @@ void *radeon_bo_do_map(struct radeon_bo *bo)
    }
 
    ptr = os_mmap(0, args.size, PROT_READ|PROT_WRITE, MAP_SHARED,
-                 bo->rws->fd, args.addr_ptr);
+                 bo->rws->ioctl_fd, args.addr_ptr);
    if (ptr == MAP_FAILED) {
       /* Clear the cache and try again. */
       pb_cache_release_all_buffers(&bo->rws->bo_cache);
 
       ptr = os_mmap(0, args.size, PROT_READ|PROT_WRITE, MAP_SHARED,
-                    bo->rws->fd, args.addr_ptr);
+                    bo->rws->ioctl_fd, args.addr_ptr);
       if (ptr == MAP_FAILED) {
          mtx_unlock(&bo->u.real.map_mutex);
          fprintf(stderr, "radeon: mmap failed, errno: %i\n", errno);
@@ -624,7 +683,7 @@ static struct radeon_bo *radeon_create_bo(struct radeon_drm_winsys *rws,
    if (flags & RADEON_FLAG_NO_CPU_ACCESS)
       args.flags |= RADEON_GEM_NO_CPU_ACCESS;
 
-   if (drmCommandWriteRead(rws->fd, DRM_RADEON_GEM_CREATE,
+   if (drmCommandWriteRead(rws->ioctl_fd, DRM_RADEON_GEM_CREATE,
                            &args, sizeof(args))) {
       fprintf(stderr, "radeon: Failed to allocate a buffer:\n");
       fprintf(stderr, "radeon:    size      : %u bytes\n", size);
@@ -677,7 +736,7 @@ static struct radeon_bo *radeon_create_bo(struct radeon_drm_winsys *rws,
                  RADEON_VM_PAGE_WRITEABLE |
                  RADEON_VM_PAGE_SNOOPED;
       va.offset = bo->va;
-      r = drmCommandWriteRead(rws->fd, DRM_RADEON_GEM_VA, &va, sizeof(va));
+      r = drmCommandWriteRead(rws->ioctl_fd, DRM_RADEON_GEM_VA, &va, sizeof(va));
       if (r && va.operation == RADEON_VA_RESULT_ERROR) {
          fprintf(stderr, "radeon: Failed to allocate virtual address for buffer:\n");
          fprintf(stderr, "radeon:    size      : %d bytes\n", size);
@@ -854,7 +913,7 @@ static void radeon_bo_get_metadata(struct radeon_winsys *rws,
 
    args.handle = bo->handle;
 
-   drmCommandWriteRead(bo->rws->fd,
+   drmCommandWriteRead(bo->rws->ioctl_fd,
                        DRM_RADEON_GEM_GET_TILING,
                        &args,
                        sizeof(args));
@@ -963,7 +1022,7 @@ static void radeon_bo_set_metadata(struct radeon_winsys *rws,
 
    args.handle = bo->handle;
 
-   drmCommandWriteRead(bo->rws->fd,
+   drmCommandWriteRead(bo->rws->ioctl_fd,
                        DRM_RADEON_GEM_SET_TILING,
                        &args,
                        sizeof(args));
@@ -1085,7 +1144,7 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_ptr(struct radeon_winsys *rw
                 RADEON_GEM_USERPTR_REGISTER |
                 RADEON_GEM_USERPTR_VALIDATE;
 
-   if (drmCommandWriteRead(ws->fd, DRM_RADEON_GEM_USERPTR,
+   if (drmCommandWriteRead(ws->ioctl_fd, DRM_RADEON_GEM_USERPTR,
                            &args, sizeof(args))) {
       FREE(bo);
       return NULL;
@@ -1124,7 +1183,7 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_ptr(struct radeon_winsys *rw
                  RADEON_VM_PAGE_WRITEABLE |
                  RADEON_VM_PAGE_SNOOPED;
       va.offset = bo->va;
-      r = drmCommandWriteRead(ws->fd, DRM_RADEON_GEM_VA, &va, sizeof(va));
+      r = drmCommandWriteRead(ws->ioctl_fd, DRM_RADEON_GEM_VA, &va, sizeof(va));
       if (r && va.operation == RADEON_VA_RESULT_ERROR) {
          fprintf(stderr, "radeon: Failed to assign virtual address space\n");
          radeon_bo_destroy(NULL, &bo->base);
@@ -1173,8 +1232,10 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_handle(struct radeon_winsys 
       /* First check if there already is an existing bo for the handle. */
       bo = util_hash_table_get(ws->bo_names, (void*)(uintptr_t)whandle->handle);
    } else if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
-      /* We must first get the GEM handle, as fds are unreliable keys */
-      r = drmPrimeFDToHandle(ws->fd, whandle->handle, &handle);
+      /* dma-buf FDs are process-local and unsuitable as cache keys.
+       * Look up the imported BO via its GEM handle on ws->ioctl_fd.
+       */
+      r = drmPrimeFDToHandle(ws->ioctl_fd, whandle->handle, &handle);
       if (r)
          goto fail;
       bo = util_hash_table_get(ws->bo_handles, (void*)(uintptr_t)handle);
@@ -1184,13 +1245,8 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_handle(struct radeon_winsys 
    }
 
    if (bo) {
-      /* Increase the refcount. */
-      if (unlikely(p_atomic_inc_return(&bo->base.reference.count) == 1)) {
-         p_atomic_dec(&bo->base.reference.count);
-         assert(p_atomic_read(&bo->base.reference.count) == 0);
-      } else {
+      if (radeon_bo_ref_existing(bo))
          goto done;
-      }
    }
 
    /* There isn't, create a new one. */
@@ -1201,8 +1257,9 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_handle(struct radeon_winsys 
 
    if (whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
       struct drm_gem_open open_arg = {};
+      struct drm_gem_close close_arg = {};
       memset(&open_arg, 0, sizeof(open_arg));
-      /* Open the BO. */
+      /* GEM flink names are tied to the original app FD, so open on ws->fd. */
       open_arg.name = whandle->handle;
       if (drmIoctl(ws->fd, DRM_IOCTL_GEM_OPEN, &open_arg)) {
          FREE(bo);
@@ -1211,6 +1268,62 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_handle(struct radeon_winsys 
       handle = open_arg.handle;
       size = open_arg.size;
       bo->flink_name = whandle->handle;
+
+      if (ws->fd != ws->ioctl_fd) {
+         int dma_fd;
+
+         /* Internal BO tracking and command submission use ws->ioctl_fd.
+          * When that differs from ws->fd, convert the temporary GEM handle
+          * from ws->fd into a dma-buf and re-import it on ws->ioctl_fd, so
+          * bo->handle always names the object on the internal ioctl fd.
+          */
+         if (drmPrimeHandleToFD(ws->fd, open_arg.handle, DRM_CLOEXEC | DRM_RDWR,
+                                &dma_fd)) {
+            close_arg.handle = open_arg.handle;
+            drmIoctl(ws->fd, DRM_IOCTL_GEM_CLOSE, &close_arg);
+            FREE(bo);
+            goto fail;
+         }
+
+         r = drmPrimeFDToHandle(ws->ioctl_fd, dma_fd, &handle);
+         close(dma_fd);
+
+         if (r) {
+            close_arg.handle = open_arg.handle;
+            drmIoctl(ws->fd, DRM_IOCTL_GEM_CLOSE, &close_arg);
+            FREE(bo);
+            goto fail;
+         }
+
+         /* Mixed legacy-name and dma-buf imports of the same object should
+          * still resolve to a single winsys BO keyed by the ioctl_fd handle.
+          */
+         struct radeon_bo *existing = util_hash_table_get(ws->bo_handles,
+                                                          (void*)(uintptr_t)handle);
+         if (existing) {
+            if (radeon_bo_ref_existing(existing)) {
+               FREE(bo);
+               assert(!existing->flink_name ||
+                      existing->flink_name == whandle->handle);
+               if (!existing->display_handle) {
+                  existing->display_handle = open_arg.handle;
+               } else {
+                  close_arg.handle = open_arg.handle;
+                  drmIoctl(ws->fd, DRM_IOCTL_GEM_CLOSE, &close_arg);
+               }
+               if (!existing->flink_name) {
+                  existing->flink_name = whandle->handle;
+                  _mesa_hash_table_insert(ws->bo_names,
+                                          (void*)(uintptr_t)existing->flink_name,
+                                          existing);
+               }
+               bo = existing;
+               goto done;
+            }
+         }
+
+         bo->display_handle = open_arg.handle;
+      }
    } else if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
       size = lseek(whandle->handle, 0, SEEK_END);
       /*
@@ -1226,6 +1339,7 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_handle(struct radeon_winsys 
 
    assert(handle != 0);
 
+   /* bo->handle is always the GEM handle valid on ws->ioctl_fd. */
    bo->handle = handle;
 
    /* Initialize it. */
@@ -1258,7 +1372,7 @@ done:
                  RADEON_VM_PAGE_WRITEABLE |
                  RADEON_VM_PAGE_SNOOPED;
       va.offset = bo->va;
-      r = drmCommandWriteRead(ws->fd, DRM_RADEON_GEM_VA, &va, sizeof(va));
+      r = drmCommandWriteRead(ws->ioctl_fd, DRM_RADEON_GEM_VA, &va, sizeof(va));
       if (r && va.operation == RADEON_VA_RESULT_ERROR) {
          fprintf(stderr, "radeon: Failed to assign virtual address space\n");
          radeon_bo_destroy(NULL, &bo->base);
@@ -1310,8 +1424,13 @@ static bool radeon_winsys_bo_get_handle(struct radeon_winsys *rws,
    bo->u.real.use_reusable_pool = false;
 
    if (whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
+      uint32_t handle;
+
       if (!bo->flink_name) {
-         flink.handle = bo->handle;
+         if (!radeon_bo_get_display_handle(bo, &handle))
+            return false;
+
+         flink.handle = handle;
 
          if (ioctl(ws->fd, DRM_IOCTL_GEM_FLINK, &flink)) {
             return false;
@@ -1325,9 +1444,15 @@ static bool radeon_winsys_bo_get_handle(struct radeon_winsys *rws,
       }
       whandle->handle = bo->flink_name;
    } else if (whandle->type == WINSYS_HANDLE_TYPE_KMS) {
-      whandle->handle = bo->handle;
+      uint32_t handle;
+
+      if (!radeon_bo_get_display_handle(bo, &handle))
+         return false;
+
+      whandle->handle = handle;
    } else if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
-      if (drmPrimeHandleToFD(ws->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR, (int*)&whandle->handle))
+      if (drmPrimeHandleToFD(ws->ioctl_fd, bo->handle,
+                             DRM_CLOEXEC | DRM_RDWR, (int*)&whandle->handle))
          return false;
    }
 

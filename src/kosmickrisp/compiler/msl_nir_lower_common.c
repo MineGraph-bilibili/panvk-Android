@@ -27,9 +27,8 @@ msl_nir_vs_remove_point_size_write(nir_builder *b, nir_intrinsic_instr *intrin,
    return false;
 }
 
-bool
-msl_nir_fs_remove_depth_write(nir_builder *b, nir_intrinsic_instr *intrin,
-                              void *data)
+static bool
+fs_remove_depth_write(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 {
    if (intrin->intrinsic != nir_intrinsic_store_output)
       return false;
@@ -40,6 +39,15 @@ msl_nir_fs_remove_depth_write(nir_builder *b, nir_intrinsic_instr *intrin,
    }
 
    return false;
+}
+
+bool
+msl_nir_fs_remove_depth_write(nir_shader *s)
+{
+   bool progress = nir_shader_intrinsics_pass(s, fs_remove_depth_write,
+                                              nir_metadata_control_flow, NULL);
+   s->info.outputs_written &= ~BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+   return progress;
 }
 
 static bool
@@ -286,6 +294,72 @@ msl_lower_static_sample_mask(nir_shader *nir, uint32_t sample_mask)
    return true;
 }
 
+static bool
+is_color_output(const nir_intrinsic_instr *intr)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   const unsigned location = nir_intrinsic_io_semantics(intr).location;
+   return location == FRAG_RESULT_COLOR ||
+          (location >= FRAG_RESULT_DATA0 && location <= FRAG_RESULT_DATA7);
+}
+
+/* See issue: https://github.com/KhronosGroup/Vulkan-Portability/issues/54
+ * Writing sample mask is more expensive than using barycentric coordinates.
+ * Find a color store and "rewrite" store value to be a bcsel based on a false
+ * value using barycentric coordinates so the MSL compiler does not optimise it.
+ * Use sample mask write as a fallback when no color is present.
+ */
+bool
+msl_disable_triangle_merge(nir_shader *nir)
+{
+   assert(nir->info.stage == MESA_SHADER_FRAGMENT);
+
+   nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
+
+   nir_intrinsic_instr *store = NULL;
+   nir_foreach_block(block, entrypoint) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (is_color_output(intr)) {
+            store = intr;
+            break;
+         }
+      }
+      if (store)
+         break;
+   }
+
+   if (store == NULL)
+      return msl_lower_static_sample_mask(nir, 0xFFFFFFFF);
+
+   nir_builder b = nir_builder_at(nir_before_impl(entrypoint));
+
+   nir_def *barycentric = nir_load_barycentric_coord_pixel(
+      &b, 32u, .interp_mode = INTERP_MODE_SMOOTH);
+   BITSET_SET(nir->info.system_values_read,
+              SYSTEM_VALUE_BARYCENTRIC_PERSP_COORD);
+
+   nir_def *all_negative =
+      nir_flt_imm(&b, nir_channel(&b, barycentric, 0u), 0.0);
+   for (unsigned i = 1u; i < 3u; ++i) {
+      nir_def *weight = nir_channel(&b, barycentric, i);
+      all_negative = nir_iand(&b, all_negative, nir_flt_imm(&b, weight, 0.0));
+   }
+
+   b.cursor = nir_before_instr(&store->instr);
+   nir_def *value = store->src[0u].ssa;
+   nir_def *unchanged = nir_bcsel(
+      &b, all_negative,
+      nir_imm_zero(&b, value->num_components, value->bit_size), value);
+   nir_src_rewrite(&store->src[0u], unchanged);
+
+   return nir_progress(true, entrypoint, nir_metadata_control_flow);
+}
+
 bool
 msl_ensure_depth_write(nir_shader *nir)
 {
@@ -322,9 +396,9 @@ msl_ensure_vertex_position_output(nir_shader *nir)
    bool has_position_write =
       nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_POS);
    if (!has_position_write) {
-      /* Write to depth at the very beginning */
+      /* Write to position at the very end, consistent with sunk stores */
       nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
-      nir_builder b = nir_builder_at(nir_before_impl(entrypoint));
+      nir_builder b = nir_builder_at(nir_after_impl(entrypoint));
 
       struct nir_io_semantics io_semantics = {
          .location = VARYING_SLOT_POS,
@@ -351,8 +425,9 @@ msl_ensure_vertex_point_size_output(nir_shader *nir)
    bool has_point_size_write =
       nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_PSIZ);
    if (!has_point_size_write) {
+      /* Write to point size at the very end, consistent with sunk stores */
       nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
-      nir_builder b = nir_builder_at(nir_before_impl(entrypoint));
+      nir_builder b = nir_builder_at(nir_after_impl(entrypoint));
 
       struct nir_io_semantics io_semantics = {
          .location = VARYING_SLOT_PSIZ,
@@ -695,4 +770,180 @@ msl_nir_lower_instance_id(nir_shader *nir)
 {
    return nir_shader_intrinsics_pass(nir, lower_instance_id,
                                      nir_metadata_control_flow, NULL);
+}
+
+static void
+collect_viewport_z_transform_data(nir_shader *s,
+                                  nir_intrinsic_instr **pos_store,
+                                  nir_intrinsic_instr **viewport_idx_store)
+{
+   /* Fetch necessary stores from the last block */
+   nir_foreach_instr(instr, nir_impl_last_block(nir_shader_get_entrypoint(s))) {
+      if (instr->type != nir_instr_type_intrinsic)
+         continue;
+
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      if (intr->intrinsic != nir_intrinsic_store_output)
+         continue;
+
+      switch (nir_intrinsic_io_semantics(intr).location) {
+      case VARYING_SLOT_POS:
+         *pos_store = intr;
+         break;
+      case VARYING_SLOT_VIEWPORT:
+         *viewport_idx_store = intr;
+         break;
+      default:
+         break;
+      }
+   }
+}
+
+/* Inserts manual viewport Z transform into the vertex stage to aid in
+ * supporting disabling both depth clamp and depth clip simultaneously,
+ * by configuring the hardware viewport Z range to [0, 1].
+ *
+ * Expects I/O to be sunk to the last block and phis to be lowered after.
+ */
+bool
+msl_nir_lower_vs_disabled_depth_clamp_clip(nir_shader *s)
+{
+   /* Hardware vertex stage */
+   assert(s->info.stage == MESA_SHADER_VERTEX ||
+          s->info.stage == MESA_SHADER_GEOMETRY ||
+          s->info.stage == MESA_SHADER_TESS_EVAL);
+
+   /* Collect outputs from shader to use in transform */
+   nir_intrinsic_instr *pos_store = NULL;
+   nir_intrinsic_instr *viewport_idx_store = NULL;
+   collect_viewport_z_transform_data(s, &pos_store, &viewport_idx_store);
+   assert(pos_store && "missing vs pos store");
+
+   /* End of entrypoint to be after both position and viewport index stores */
+   nir_builder b_ =
+      nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(s)));
+   nir_builder *b = &b_;
+
+   nir_def *pos = pos_store->src[0].ssa;
+   nir_def *pos_emulated = NULL;
+
+   nir_def *emulated = nir_load_is_viewport_z_transform_emulated_kk(b);
+   nir_if *transform_if = nir_push_if(b, emulated);
+   {
+      /* Load the viewport index if applicable */
+      nir_def *viewport_idx = viewport_idx_store
+                                 ? viewport_idx_store->src[0].ssa
+                                 : nir_imm_int(b, 0u);
+
+      /* Load the correct depth clamp range */
+      nir_def *zrange = nir_load_viewport_z_range_kk(b, 2, 32, viewport_idx);
+      nir_def *zmin = nir_channel(b, zrange, 0);
+      nir_def *zmax = nir_channel(b, zrange, 1);
+      nir_def *zscale = nir_fsub(b, zmax, zmin);
+
+      /* Manually perform viewport Z transform. This is safe to do since this
+       * emulation assumes clip is disabled.
+       *
+       * `z * zscale + w * zmin`, when translated to NDC coordinates after the
+       * vertex stage, will result in the intended `(z / w) * zscale + zmin`.
+       */
+      nir_def *z = nir_channel(b, pos, 2);
+      nir_def *w = nir_channel(b, pos, 3);
+      nir_def *transformed =
+         nir_fadd(b, nir_fmul(b, z, zscale), nir_fmul(b, w, zmin));
+
+      pos_emulated = nir_vector_insert_imm(b, pos, transformed, 2);
+   }
+   nir_pop_if(b, transform_if);
+
+   /* Construct a phi with the emulated result and replace the store. We can't
+    * use nir_def_rewrite_uses_after on phis */
+   nir_def *phi = nir_if_phi(b, pos_emulated, pos);
+   nir_store_output(b, phi, nir_imm_int(b, 0),
+                    .io_semantics.location = VARYING_SLOT_POS,
+                    .src_type = nir_type_float32);
+   nir_instr_remove(&pos_store->instr);
+
+   return nir_progress(true, b->impl, nir_metadata_none);
+}
+
+static void
+collect_depth_clamp_data(nir_shader *s, nir_intrinsic_instr **depth_store)
+{
+   /* Fetch necessary stores. May not be in the last block, for example if a
+    * missing depth write is inserted at the start */
+   nir_foreach_block(block, nir_shader_get_entrypoint(s)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_output ||
+             nir_intrinsic_io_semantics(intr).location != FRAG_RESULT_DEPTH)
+            continue;
+
+         *depth_store = intr;
+         break;
+      }
+   }
+}
+
+/* Inserts manual depth clamping into the fragment stage to aid in supporting
+ * enabling both depth clamp and depth clip simultaneously, using hardware
+ * to perform clipping.
+ *
+ * Expects only a single depth write and phis to be lowered after.
+ */
+bool
+msl_nir_lower_fs_combined_depth_clamp_clip(nir_shader *s)
+{
+   assert(s->info.stage == MESA_SHADER_FRAGMENT);
+
+   /* If the shader does not write depth, there is nothing to clamp, since we
+    * only apply it on top of native depth clipping. Anything outside the range
+    * [0, w] would be clipped, and anything inside would come out of the
+    * viewport transform in the range [z_min, z_max], making clamping a no-op.
+    * Thus, clamping only matters for fragment depth writes.
+    *
+    * This also ensures the emulation does not conflict with forced early
+    * fragment tests, which disallows depth writes. */
+   if (!(s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)))
+      return false;
+
+   /* Collect outputs from shader to use in transform */
+   nir_intrinsic_instr *depth_store = NULL;
+   collect_depth_clamp_data(s, &depth_store);
+   assert(depth_store && "missing fs depth store");
+
+   nir_builder b_ = nir_builder_at(nir_before_instr(&depth_store->instr));
+   nir_builder *b = &b_;
+
+   nir_def *depth = depth_store->src[0].ssa;
+   nir_def *depth_emulated = NULL;
+
+   nir_def *emulated = nir_load_is_depth_clamp_emulated_kk(b);
+   nir_if *clamp_if = nir_push_if(b, emulated);
+   {
+      /* Load the depth clamp range for the correct viewport */
+      nir_def *viewport_idx = nir_load_input(
+         b, 1, 32, nir_imm_int(b, 0), .dest_type = nir_type_uint32,
+         .io_semantics.location = VARYING_SLOT_VIEWPORT);
+      nir_def *zrange = nir_load_viewport_z_range_kk(b, 2, 32, viewport_idx);
+      nir_def *zmin = nir_channel(b, zrange, 0);
+      nir_def *zmax = nir_channel(b, zrange, 1);
+
+      /* Manually clamp the output depth to the provided range */
+      depth_emulated = nir_fclamp(b, depth, zmin, zmax);
+   }
+   nir_pop_if(b, clamp_if);
+
+   /* Construct a phi with the emulated result and replace the store. We can't
+    * use nir_def_rewrite_uses_after on phis */
+   nir_def *phi = nir_if_phi(b, depth_emulated, depth);
+   nir_store_output(b, phi, nir_imm_int(b, 0),
+                    .io_semantics.location = FRAG_RESULT_DEPTH,
+                    .src_type = nir_type_float32);
+   nir_instr_remove(&depth_store->instr);
+
+   return nir_progress(true, b->impl, nir_metadata_none);
 }

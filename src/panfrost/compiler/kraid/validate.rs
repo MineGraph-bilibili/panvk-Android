@@ -60,7 +60,20 @@ fn validate_instr(instr: &Instr, ssa_vals: &mut FxHashSet<SSAValue>) {
     }
 
     for (dst, dst_type) in instr.dsts_types() {
-        if dst.dst_ref.is_none() {
+        match &dst.dst_ref {
+            DstRef::None => continue,
+            DstRef::SSA(vec) => {
+                for ssa in vec {
+                    ssa_vals.insert(*ssa);
+                }
+            }
+            DstRef::Reg(_) => (),
+            DstRef::Mem(_) => (),
+        }
+
+        if dst.lanes.is_f16_narrow() {
+            assert_eq!(dst_type, DataType::F32);
+            assert_eq!(dst.dst_ref.bytes_written(), 2);
             continue;
         }
 
@@ -76,12 +89,6 @@ fn validate_instr(instr: &Instr, ssa_vals: &mut FxHashSet<SSAValue>) {
             let lane_bytes = dst.lanes.bytes(dst_type_bytes);
             assert!(dst_type_bytes <= lane_bytes * 8);
             assert_eq!(lane_bytes, dst.dst_ref.bytes_written());
-        }
-
-        if let DstRef::SSA(ssa) = &dst.dst_ref {
-            for val in ssa {
-                ssa_vals.insert(*val);
-            }
         }
     }
 }

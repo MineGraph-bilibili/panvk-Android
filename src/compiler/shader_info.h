@@ -483,6 +483,19 @@ typedef struct shader_info {
          bool uses_sample_shading:1;
 
          /**
+          * Whether the fragment shader outputs YUV color, ie. it has an output
+          * qualified with the EXT_YUV_target `yuv` layout qualifier.
+          *
+          * Note that the extension only allows this on a shader with a single
+          * color output and no depth write, so there is never a mix of YUV and
+          * RGB outputs: if this is set, the FS has exactly one output and it is
+          * YUV.  See detect_conflicting_assignments() in ast_to_hir.cpp, which
+          * rejects yuv-layout combined with gl_FragDepth or MRT at compile
+          * time.
+          */
+         bool yuv_color:1;
+
+         /**
           * Whether early fragment tests are enabled as defined by
           * ARB_shader_image_load_store.
           */

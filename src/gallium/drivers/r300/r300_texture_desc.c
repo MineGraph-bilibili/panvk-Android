@@ -599,11 +599,22 @@ void r300_texture_desc_init(struct r300_screen *rscreen,
 
     r300_setup_flags(tex);
 
-    /* Align a 3D NPOT texture to POT. */
+    /* Align NPOT texture targets which require a POT hardware layout. */
     if (base->target == PIPE_TEXTURE_3D && tex->tex.is_npot) {
         tex->tex.width0 = util_next_power_of_two(tex->tex.width0);
         tex->tex.height0 = util_next_power_of_two(tex->tex.height0);
         tex->tex.depth0 = util_next_power_of_two(tex->tex.depth0);
+    } else if (base->target == PIPE_TEXTURE_CUBE && tex->tex.is_npot) {
+        unsigned size = util_next_power_of_two(MAX2(tex->tex.width0,
+                                                    tex->tex.height0));
+        tex->tex.width0 = size;
+        tex->tex.height0 = size;
+
+        /* The padded POT layout doesn't need stride addressing, which would
+         * unnecessarily trigger the macro-tiled stride rounding workaround.
+         * Preserve it only for a resource with an explicit stride. */
+        if (!tex->tex.stride_in_bytes_override)
+            tex->tex.uses_stride_addressing = false;
     }
 
     /* Setup tiling. */

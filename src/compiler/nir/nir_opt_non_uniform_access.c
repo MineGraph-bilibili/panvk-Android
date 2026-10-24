@@ -117,7 +117,29 @@ is_image_query_intrinsic(nir_intrinsic_instr *intrin)
 }
 
 static bool
-has_non_uniform_tex_access(nir_tex_instr *tex, enum nir_lower_non_uniform_access_type types)
+is_offset_non_uniform(nir_function_impl *impl, nir_tex_instr *tex)
+{
+   int idx = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (idx < 0)
+      return false;
+
+   nir_src *src = &tex->src[idx].src;
+   for (unsigned i = 0; i < src->ssa->num_components; i++) {
+      nir_scalar s = nir_scalar_resolved(src->ssa, i);
+      if (nir_scalar_is_const(s))
+         continue;
+
+      if (impl)
+         nir_metadata_require(impl, nir_metadata_divergence);
+      return nir_src_is_divergent(src);
+   }
+
+   return false;
+}
+
+static bool
+has_non_uniform_tex_access(nir_function_impl *impl, nir_tex_instr *tex,
+                           enum nir_lower_non_uniform_access_type types)
 {
    bool ret = false;
 
@@ -140,7 +162,7 @@ has_non_uniform_tex_access(nir_tex_instr *tex, enum nir_lower_non_uniform_access
       if (types & nir_lower_non_uniform_texture_access)
          ret |= tex->texture_non_uniform || tex->sampler_non_uniform;
       if (types & nir_lower_non_uniform_texture_offset_access)
-         ret |= tex->offset_non_uniform;
+         ret |= is_offset_non_uniform(impl, tex);
       break;
    }
 
@@ -161,7 +183,7 @@ nir_has_non_uniform_access_impl(nir_function_impl *impl, enum nir_lower_non_unif
          switch (instr->type) {
          case nir_instr_type_tex: {
             nir_tex_instr *tex = nir_instr_as_tex(instr);
-            if (has_non_uniform_tex_access(tex, types))
+            if (has_non_uniform_tex_access(impl, tex, types))
                return true;
             break;
          }
@@ -218,7 +240,7 @@ nir_has_non_uniform_access(nir_shader *shader, enum nir_lower_non_uniform_access
 static bool
 opt_non_uniform_tex_access(nir_tex_instr *tex)
 {
-   if (!has_non_uniform_tex_access(tex,
+   if (!has_non_uniform_tex_access(NULL, tex,
                                    nir_lower_non_uniform_texture_access |
                                    nir_lower_non_uniform_texture_query |
                                    nir_lower_non_uniform_texture_offset_access))
@@ -244,13 +266,6 @@ opt_non_uniform_tex_access(nir_tex_instr *tex)
       case nir_tex_src_sampler_heap_offset:
          if (tex->sampler_non_uniform && !nir_src_is_divergent(&tex->src[i].src)) {
             tex->sampler_non_uniform = false;
-            progress = true;
-         }
-         break;
-
-      case nir_tex_src_offset:
-         if (tex->offset_non_uniform && !nir_src_is_divergent(&tex->src[i].src)) {
-            tex->offset_non_uniform = false;
             progress = true;
          }
          break;

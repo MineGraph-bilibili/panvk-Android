@@ -367,15 +367,15 @@ build_a_matrix(nir_builder *b, const struct dp_entry *ent0, nir_def *loc,
    const nir_intrinsic_instr *load_a0 = nir_def_as_intrinsic(ent0->key.a[0]);
    nir_def *load_a0_addr = hoist_def(load_a0->src[1].ssa, loc);
    if (!load_a0_addr)
-      return false;
+      return NULL;
 
    if (nir_def_instr(load_a0->src[0].ssa)->index > loc->index)
-      return false;
+      return NULL;
 
    /* Calculate stride between sequential memory loads in the chain. */
    const unsigned delta = stride_of_a_linear_offsets(ent0, load_a0);
    if (!delta)
-      return false;
+      return NULL;
 
    /* Calculate the address for the vectorized load starting with the
     * offset of the base component.
@@ -453,7 +453,7 @@ build_b_matrix(nir_builder *b, const struct dp_entry *ent0, nir_def *loc,
     for (unsigned i = 0; i < m; i++) {
        struct nir_def *def = hoist_def(ent0->key.b[i], loc);
        if (!def)
-          return false;
+          return NULL;
 
        defs_b[i] = nir_channel(b, ent0->key.b[i], ent0->key.b_comp[i]);
     }

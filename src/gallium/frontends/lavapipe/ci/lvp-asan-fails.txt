@@ -59,3 +59,13 @@ dEQP-VK.shader_object.misc.state.pipeline.vert_tess_frag.sample_locations.disabl
 dEQP-VK.shader_object.misc.state.pipeline.vert_tess_frag.sample_locations.enabled,Fail
 dEQP-VK.shader_object.misc.state.pipeline.vert_tess_geom_frag.logic_op.copy,Fail
 dEQP-VK.shader_object.misc.state.pipeline.vert_tess_geom_frag.logic_op.enabled,Fail
+
+dEQP-VK.multiview.renderpass2.multisample_resolve.no_queries.8,Crash
+dEQP-VK.pipeline.fast_linked_library.extended_dynamic_state.before_good_static.tess_domain_origin_lower_left,Fail
+dEQP-VK.pipeline.fast_linked_library.extended_dynamic_state.between_pipelines.large_stride_with_offset_and_padding,Fail
+dEQP-VK.pipeline.fast_linked_library.extended_dynamic_state.three_draws_dynamic.stride_with_offset_and_padding,Fail
+dEQP-VK.pipeline.monolithic.extended_dynamic_state.before_draw.large_stride_with_offset_and_padding,Fail
+dEQP-VK.pipeline.monolithic.extended_dynamic_state.cmd_buffer_start.stride_with_offset_and_padding,Fail
+dEQP-VK.pipeline.pipeline_library.extended_dynamic_state.three_draws_dynamic.stride_with_offset_and_padding,Fail
+dEQP-VK.pipeline.shader_object_linked_spirv.bind_buffers_2.maintenance5.robustness2.triangle_strip.buffers5.stride_offset_rnd654.true_size.beyond_size,Fail
+dEQP-VK.shader_object.misc.state.pipeline.vert_tess_geom_frag.color_write.false,Fail

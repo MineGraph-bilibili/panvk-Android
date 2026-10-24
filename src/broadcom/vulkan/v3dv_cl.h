@@ -70,8 +70,8 @@ static inline struct v3dv_cl_reloc
 __unpack_address(const uint8_t *cl, uint32_t s, uint32_t e)
 {
     struct v3dv_cl_reloc reloc =
-            { NULL, __gen_unpack_uint(cl, s, e) << (31 - (e - s)) };
-    return reloc;
+      { NULL, (uint32_t)(__gen_unpack_uint(cl, s, e) << (31 - (e - s))) };
+   return reloc;
 }
 
 static inline uint32_t

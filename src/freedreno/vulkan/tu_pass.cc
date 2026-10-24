@@ -58,6 +58,11 @@ tu_render_pass_add_subpass_dep(struct tu_render_pass *pass,
       }
    }
 
+   /* Dependencies with an EXTERNAL destination need a full WFI, but others
+    * don't unless there's a non-framebuffer-local dependency.
+    */
+   bool non_fb_local = dst == VK_SUBPASS_EXTERNAL;
+
    /* We can conceptually break down the process of rewriting a sysmem
     * renderpass into a gmem one into two parts:
     *
@@ -82,13 +87,16 @@ tu_render_pass_add_subpass_dep(struct tu_render_pass *pass,
     */
 
    if (!vk_subpass_dependency_is_fb_local(dep, src_stage_mask, dst_stage_mask)) {
+      non_fb_local = false;
       perf_debug((struct tu_device *)pass->base.device, "Disabling gmem rendering due to invalid subpass dependency");
       for (int i = 0; i < ARRAY_SIZE(pass->gmem_pixels); i++)
          pass->gmem_pixels[i] = 0;
    }
 
    struct tu_subpass_barrier *dst_barrier;
-   if (dst == VK_SUBPASS_EXTERNAL) {
+   if (src == VK_SUBPASS_EXTERNAL) {
+      dst_barrier = &pass->subpasses[0].start_barrier;
+   } else if (dst == VK_SUBPASS_EXTERNAL) {
       dst_barrier = &pass->end_barrier;
    } else {
       dst_barrier = &pass->subpasses[dst].start_barrier;
@@ -100,6 +108,25 @@ tu_render_pass_add_subpass_dep(struct tu_render_pass *pass,
    dst_barrier->dst_access_mask |= dst_access_mask;
    dst_barrier->src_access_mask2 |= src_access_mask2;
    dst_barrier->dst_access_mask2 |= dst_access_mask2;
+   dst_barrier->non_fb_local |= non_fb_local;
+
+   /* Check if INPUT_ATTACHMENT_READ_BIT in the barrier could refer to a
+    * read-only input attachment, i.e. an input attachment which does not come
+    * from GMEM.
+    */
+   if (dst != VK_SUBPASS_EXTERNAL) {
+      for (unsigned i = dst; i < pass->subpass_count; i++) {
+         const struct tu_subpass *subpass = &pass->subpasses[i];
+         for (unsigned j = 0; j < subpass->input_count; j++) {
+            if (!subpass->input_attachments[j].patch_input_gmem) {
+               dst_barrier->read_only_input_attachments = true;
+               break;
+            }
+         }
+      }
+   } else {
+      dst_barrier->read_only_input_attachments = true;
+   }
 }
 
 /* We currently only care about undefined layouts, because we have to
@@ -175,7 +202,7 @@ tu_render_pass_add_implicit_deps(struct tu_render_pass *pass,
    const VkAttachmentDescription2* att = info->pAttachments;
    bool has_external_src[info->subpassCount];
    bool has_external_dst[info->subpassCount];
-   bool att_used[pass->attachment_count];
+   STACK_ARRAY(bool, att_used, pass->attachment_count);
 
    memset(has_external_src, 0, sizeof(has_external_src));
    memset(has_external_dst, 0, sizeof(has_external_dst));
@@ -193,7 +220,7 @@ tu_render_pass_add_implicit_deps(struct tu_render_pass *pass,
          has_external_dst[src] = true;
    }
 
-   memset(att_used, 0, sizeof(att_used));
+   memset(att_used, 0, pass->attachment_count);
 
    for (unsigned i = 0; i < info->subpassCount; i++) {
       const VkSubpassDescription2 *subpass = &info->pSubpasses[i];
@@ -288,7 +315,7 @@ tu_render_pass_add_implicit_deps(struct tu_render_pass *pass,
       }
    }
 
-   memset(att_used, 0, sizeof(att_used));
+   memset(att_used, 0, pass->attachment_count);
 
    for (int i = info->subpassCount - 1; i >= 0; i--) {
       const VkSubpassDescription2 *subpass = &info->pSubpasses[i];
@@ -358,7 +385,7 @@ tu_render_pass_add_implicit_deps(struct tu_render_pass *pass,
 
             if ((att[a].finalLayout != subpass->pDepthStencilAttachment->layout ||
                 stencil_final_layout != stencil_layout) &&
-                !att_used[a] && !has_external_src[i])
+                !att_used[a] && !has_external_dst[i])
                dst_implicit_dep = true;
             att_used[a] = true;
       }
@@ -394,6 +421,8 @@ tu_render_pass_add_implicit_deps(struct tu_render_pass *pass,
          }
       }
    }
+
+   STACK_ARRAY_FINISH(att_used);
 }
 
 /* If an input attachment is used without an intervening write to the same
@@ -412,9 +441,9 @@ tu_render_pass_patch_input_gmem(struct tu_render_pass *pass)
    if (pass->attachment_count == 0)
       return;
 
-   bool written[pass->attachment_count];
+   STACK_ARRAY(bool, written, pass->attachment_count);
 
-   memset(written, 0, sizeof(written));
+   memset(written, 0, pass->attachment_count);
 
    for (unsigned i = 0; i < pass->subpass_count; i++) {
       struct tu_subpass *subpass = &pass->subpasses[i];
@@ -475,6 +504,8 @@ tu_render_pass_patch_input_gmem(struct tu_render_pass *pass)
          }
       }
    }
+
+   STACK_ARRAY_FINISH(written);
 }
 
 static void
@@ -751,6 +782,9 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
       }
    }
 
+   STACK_ARRAY(struct tu_gmem_alloc, gmem_alloc, 2 * pass->attachment_count);
+   STACK_ARRAY(struct tu_gmem_alloc *, att_gmem_alloc, 2 * pass->attachment_count);
+
    for (enum tu_gmem_layout layout = (enum tu_gmem_layout) 0;
         layout < TU_GMEM_LAYOUT_COUNT;
         layout = (enum tu_gmem_layout)(layout + 1)) {
@@ -762,10 +796,8 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
       /* gmem allocations to make, possibly shared between attachments. Each
        * attachment may have 2 allocations, to handle separate stencil.
        */
-      struct tu_gmem_alloc gmem_alloc[2 * pass->attachment_count];
       uint32_t num_gmem_alloc = 0;
-      struct tu_gmem_alloc *att_gmem_alloc[2 * pass->attachment_count];
-      for (int i = 0; i < ARRAY_SIZE(att_gmem_alloc); i++)
+      for (int i = 0; i < 2 * pass->attachment_count; i++)
          att_gmem_alloc[i] = NULL;
 
       for (uint32_t i = 0; i < pass->attachment_count; i++) {
@@ -810,7 +842,7 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
          /* any non-zero value so tiling config works with no attachments */
          for (int i = 0; i < ARRAY_SIZE(pass->gmem_pixels); i++)
             pass->gmem_pixels[i] = 1024*1024;
-         return;
+         goto out;
       }
 
       /* TODO: this algorithm isn't optimal
@@ -864,6 +896,9 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
             att->gmem_offset_stencil[layout] = att_gmem_alloc[2 * i + 1]->gmem_offset;
       }
    }
+out:
+   STACK_ARRAY_FINISH(gmem_alloc);
+   STACK_ARRAY_FINISH(att_gmem_alloc);
 }
 
 static void
@@ -1429,7 +1464,8 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
       resolve_subpass->samples = VK_SAMPLE_COUNT_1_BIT;
       resolve_subpass->color_count = info->colorAttachmentCount;
       resolve_subpass->input_count = info->colorAttachmentCount + 1;
-      resolve_subpass->color_attachments = cmd_buffer->dynamic_resolve_attachments;
+      resolve_subpass->color_attachments =
+         cmd_buffer->dynamic_custom_resolve_attachments;
       resolve_subpass->input_attachments = cmd_buffer->dynamic_input_attachments;
       resolve_subpass->multiview_mask = info->viewMask;
       resolve_subpass->legacy_dithering_enabled = info->flags &
@@ -1442,12 +1478,16 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
 
       resolve_subpass->depth_stencil_attachment.attachment = VK_ATTACHMENT_UNUSED;
       pass->subpass_count = 2;
-      subpass->resolve_count = 0;
    } else {
-      subpass->resolve_attachments = cmd_buffer->dynamic_resolve_attachments;
-      subpass->resolve_count = info->colorAttachmentCount;
       pass->subpass_count = 1;
    }
+
+   /* The main subpass keeps its own resolve list either way: a pass with
+    * custom resolves can still resolve other attachments through the
+    * fixed-function path.
+    */
+   subpass->resolve_attachments = cmd_buffer->dynamic_resolve_attachments;
+   subpass->resolve_count = info->colorAttachmentCount;
 
    pass->attachments = cmd_buffer->dynamic_rp_attachments;
 
@@ -1484,6 +1524,10 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
          subpass->input_attachments[i + 1].attachment = VK_ATTACHMENT_UNUSED;
          if (subpass->resolve_attachments)
             subpass->resolve_attachments[i].attachment = VK_ATTACHMENT_UNUSED;
+         if (pass->subpass_count > 1) {
+            resolve_subpass->color_attachments[i].attachment =
+               VK_ATTACHMENT_UNUSED;
+         }
          subpass->unresolve_attachments[i].attachment = VK_ATTACHMENT_UNUSED;
          continue;
       }
@@ -1549,11 +1593,16 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
                resolve_att->used_views = info->viewMask;
                resolve_att->resolve_views = 0;
                resolve_subpass->color_attachments[i].attachment = a++;
+               subpass->resolve_attachments[i].attachment = VK_ATTACHMENT_UNUSED;
             } else {
                subpass->resolve_attachments[i].attachment = a++;
                att->will_be_resolved = true;
                resolve_att->resolve_views = info->viewMask;
                resolve_att->used_views = 0;
+               if (pass->subpass_count > 1) {
+                  resolve_subpass->color_attachments[i].attachment =
+                     VK_ATTACHMENT_UNUSED;
+               }
             }
          } else {
             if (subpass->resolve_count)
@@ -1561,6 +1610,9 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
             att->will_be_resolved = false;
          }
       }
+
+      /* Color attachments in the main subpass may be used as input attachments in the custom resolve subpass */
+      att->last_subpass_idx = (info->flags & VK_RENDERING_CUSTOM_RESOLVE_BIT_EXT) ? 1 : 0;
 
       if (att_is_msrtss)
          pass->has_msrtss = true;
@@ -1669,21 +1721,36 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
                   subpass->resolve_depth_stencil = true;
                   resolve_att->resolve_views = info->viewMask;
                   resolve_att->used_views = 0;
+                  if (pass->subpass_count > 1) {
+                     resolve_subpass->depth_stencil_attachment.attachment =
+                        VK_ATTACHMENT_UNUSED;
+                  }
                }
             } else {
                att->will_be_resolved = false;
             }
          }
 
+         /* Color attachments in the main subpass may be used as input attachments in the custom resolve subpass */
+         att->last_subpass_idx = (info->flags & VK_RENDERING_CUSTOM_RESOLVE_BIT_EXT) ? 1 : 0;
+
          if (att_is_msrtss)
             pass->has_msrtss = true;
       } else {
          subpass->depth_stencil_attachment.attachment = VK_ATTACHMENT_UNUSED;
          subpass->input_attachments[0].attachment = VK_ATTACHMENT_UNUSED;
+         if (pass->subpass_count > 1) {
+            resolve_subpass->depth_stencil_attachment.attachment =
+               VK_ATTACHMENT_UNUSED;
+         }
       }
    } else {
       subpass->depth_stencil_attachment.attachment = VK_ATTACHMENT_UNUSED;
       subpass->input_attachments[0].attachment = VK_ATTACHMENT_UNUSED;
+      if (pass->subpass_count > 1) {
+         resolve_subpass->depth_stencil_attachment.attachment =
+            VK_ATTACHMENT_UNUSED;
+      }
    }
 
    /* We have to set this early for tu_render_pass_disable_fdm() to work. We
@@ -1737,14 +1804,6 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
       resolve_subpass->fsr_attachment_texel_size =
          subpass->fsr_attachment_texel_size;
       resolve_subpass->fsr_attachment = subpass->fsr_attachment;
-
-      /* We don't do stores on vkCmdBeginCustomResolveEXT, so move them
-       * after custom resolve.
-       */
-      for (uint32_t i = 0; i < pass->user_attachment_count; i++) {
-         struct tu_render_pass_attachment *att = &pass->attachments[i];
-         att->last_subpass_idx = 1;
-      }
 
       /* Even though content of any depth/stencil resolve attachment is
        * undefined at the start of custom resolve, we still have to be

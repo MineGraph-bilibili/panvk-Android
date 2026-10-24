@@ -39,7 +39,6 @@
 #include "pvr_macros.h"
 #include "pvr_mrt.h"
 #include "pvr_pass.h"
-#include "pvr_pds.h"
 #include "pvr_physical_device.h"
 #include "pvr_transfer_frag_store.h"
 #include "pvr_types.h"

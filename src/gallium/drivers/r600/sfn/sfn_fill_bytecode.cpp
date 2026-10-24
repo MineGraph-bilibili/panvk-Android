@@ -98,6 +98,7 @@ fill_bytecode_tex(const TexInstr& tex_instr)
    tex.offset_z = tex_instr.get_offset(2);
    tex.resource_index_mode = tex_instr.resource_index_mode();
    tex.sampler_index_mode = tex_instr.sampler_index_mode();
+   tex.alt_const = tex_instr.has_tex_flag(TexInstr::alt_const);
 
    if (tex_instr.opcode() == TexInstr::get_gradient_h ||
        tex_instr.opcode() == TexInstr::get_gradient_v)
@@ -263,6 +264,7 @@ fill_bytecode_fetch(const FetchInstr& fetch_instr)
    vtx.array_base = fetch_instr.array_base();
    vtx.array_size = fetch_instr.array_size();
    vtx.srf_mode_all = fetch_instr.has_fetch_flag(FetchInstr::srf_mode);
+   vtx.alt_const = fetch_instr.has_fetch_flag(FetchInstr::alt_const);
 
    return vtx;
 }

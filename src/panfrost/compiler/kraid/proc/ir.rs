@@ -181,8 +181,18 @@ pub fn derive_opcode(input: TokenStream) -> TokenStream {
                 }
             };
 
+            // Check at compile time MAX_SRC_COUNT is respected
+            let error_message = format!("{ident} has too many sources");
+            let error_message = syn::LitStr::new(&error_message, ident.span());
+
             quote! {
                 #op
+
+                const _: () = assert!(
+                    <#ident as compiler::as_slice::AsArrayLen<Src>>::LEN <=
+                    crate::ir::Instr::MAX_SRC_COUNT,
+                    #error_message
+                );
 
                 impl ::std::fmt::Debug for #ident {
                     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {

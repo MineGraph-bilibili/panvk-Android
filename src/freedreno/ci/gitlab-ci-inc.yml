@@ -25,6 +25,7 @@
         - src/freedreno/ci/$GPU_VERSION-fails.txt
         - src/freedreno/ci/$GPU_VERSION-flakes.txt
         - src/freedreno/ci/$GPU_VERSION-skips.txt
+        - src/freedreno/ci/$GPU_VERSION-single-thread.txt
         - src/freedreno/ci/$GPU_VERSION-slow-skips.txt
         - src/freedreno/ci/$PIGLIT_TRACES_FILE
         - src/freedreno/ci/$REPLAY_CONFIG
@@ -166,6 +167,7 @@
 .valve-turnip-restricted-rules:
   stage: freedreno
   rules:
+    - !reference [.enforce-hw-jobs-turnip-rules, rules]
     - !reference [.test, rules]
     - !reference [.restricted-rules, rules]
     - !reference [.valve-turnip-rules, rules]
@@ -227,6 +229,7 @@
 .qualcomm-freedreno-rules:
   stage: freedreno
   rules:
+    - !reference [.enforce-hw-jobs-freedreno-rules, rules]
     - !reference [.test, rules]
     - !reference [.qualcomm-farm-rules, rules]
     - !reference [.freedreno-rules, rules]
@@ -235,6 +238,7 @@
   stage: freedreno-nightly
   extends: .no-auto-retry
   rules:
+    - !reference [.enforce-hw-jobs-freedreno-rules, rules]
     - !reference [.test, rules]
     - !reference [.qualcomm-farm-manual-rules, rules]
     - !reference [.freedreno-manual-rules, rules]
@@ -243,6 +247,7 @@
 .qualcomm-turnip-rules:
   stage: freedreno
   rules:
+    - !reference [.enforce-hw-jobs-turnip-rules, rules]
     - !reference [.test, rules]
     - !reference [.qualcomm-farm-rules, rules]
     - !reference [.turnip-rules, rules]
@@ -250,6 +255,7 @@
 .qualcomm-turnip-restricted-rules:
   stage: freedreno
   rules:
+    - !reference [.enforce-hw-jobs-turnip-rules, rules]
     - !reference [.test, rules]
     - !reference [.restricted-rules, rules]
     - !reference [.qualcomm-turnip-rules, rules]
@@ -258,6 +264,7 @@
   stage: freedreno-nightly
   extends: .no-auto-retry
   rules:
+    - !reference [.enforce-hw-jobs-turnip-rules, rules]
     - !reference [.test, rules]
     - !reference [.qualcomm-farm-manual-rules, rules]
     - !reference [.turnip-manual-rules, rules]
@@ -266,6 +273,7 @@
 .qualcomm-freedreno-turnip-rules:
   stage: freedreno
   rules:
+    - !reference [.enforce-hw-jobs-turnip-rules, rules]
     - !reference [.test, rules]
     - !reference [.qualcomm-freedreno-rules, rules]
     - !reference [.qualcomm-turnip-rules, rules]
@@ -274,9 +282,19 @@
   stage: freedreno-nightly
   extends: .no-auto-retry
   rules:
+    - !reference [.enforce-hw-jobs-turnip-rules, rules]
     - !reference [.test, rules]
     - !reference [.qualcomm-freedreno-manual-rules, rules]
     - !reference [.qualcomm-turnip-manual-rules, rules]
+
+.freedreno-opencl-cts:
+  extends:
+    - .test-opencl-cts
+  timeout: 2h
+  variables:
+    DEQP_SUITE: freedreno-opencl-cts-quick
+    FREEDRENO_HANGCHECK_MS: 50000
+    HWCI_START_WESTON: 1
 
 # Status: https://lava.collabora.dev/scheduler/device_type/dragonboard-410c
 .lava-dragonboard-410c:arm64:
@@ -393,11 +411,11 @@
   variables:
     FDO_CI_CONCURRENT: 2
     CI_TRON_DUT_SETUP_TAGS: dt_gpu:codename:a200
+    CI_TRON_KERNEL__URL: '$KERNEL_IMAGE_BASE/arm32/zImage'
     CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__0__URL: 'https://${S3_BASE_PATH}/${FIRMWARE_REPO}/qcom-${FIRMWARE_TAG}.tar'
     CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__0__FORMAT__0__ARCHIVE__EXTENSION: 'cpio'
     CI_TRON_INITRAMFS_CATEGORY__50_PLATFORM__0__FORMAT__0__ARCHIVE__KEEP__0__PATH: '(./lib/firmware/qcom/yamato.*)'
-    # as good as anything else, works for now
-    CI_TRON_DTB__0__URL: '$KERNEL_IMAGE_BASE/armhf/imx53-qsrb.dtb'
+    CI_TRON_DTB__0__URL: '$KERNEL_IMAGE_BASE/arm32/imx53-qsrb.dtb'
     CI_TRON__B2C_SWAP_SIZE: '4g'
     CI_TRON_TIMEOUT__FIRST_CONSOLE_ACTIVITY__MINUTES: 0.5
     CI_TRON_TIMEOUT__FIRST_CONSOLE_ACTIVITY__RETRIES: 3

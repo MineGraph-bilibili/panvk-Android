@@ -1648,7 +1648,8 @@ static int r600_bytecode_vtx_build(struct r600_bytecode *bc, struct r600_bytecod
 				S_SQ_VTX_WORD1_SRF_MODE_ALL(vtx->srf_mode_all) |
 				S_SQ_VTX_WORD1_GPR_DST_GPR(vtx->dst_gpr);
 	bc->bytecode[id] = S_SQ_VTX_WORD2_OFFSET(vtx->offset)|
-				S_SQ_VTX_WORD2_ENDIAN_SWAP(vtx->endian);
+				S_SQ_VTX_WORD2_ENDIAN_SWAP(vtx->endian) |
+				S_SQ_VTX_WORD2_ALT_CONST(vtx->alt_const);
 	if (bc->gfx_level >= EVERGREEN)
 		bc->bytecode[id] |= ((vtx->buffer_index_mode & 0x3) << 21); // S_SQ_VTX_WORD2_BIM(vtx->buffer_index_mode);
 	if (bc->gfx_level < CAYMAN)
@@ -1666,7 +1667,8 @@ static int r600_bytecode_tex_build(struct r600_bytecode *bc, struct r600_bytecod
 			    EG_S_SQ_TEX_WORD0_INST_MOD(tex->inst_mod) |
 				S_SQ_TEX_WORD0_RESOURCE_ID(tex->resource_id) |
 				S_SQ_TEX_WORD0_SRC_GPR(tex->src_gpr) |
-				S_SQ_TEX_WORD0_SRC_REL(tex->src_rel);
+				S_SQ_TEX_WORD0_SRC_REL(tex->src_rel) |
+				S_SQ_TEX_WORD0_ALT_CONST(tex->alt_const);
 	if (bc->gfx_level >= EVERGREEN)
 		bc->bytecode[id] |= ((tex->sampler_index_mode & 0x3) << 27) | // S_SQ_TEX_WORD0_SIM(tex->sampler_index_mode);
 				((tex->resource_index_mode & 0x3) << 25); // S_SQ_TEX_WORD0_RIM(tex->resource_index_mode)
@@ -2527,6 +2529,9 @@ void r600_bytecode_disasm(struct r600_bytecode *bc)
 			if (tex->offset_z)
 				fprintf(stderr, "OZ:%d ", tex->offset_z);
 
+			if (tex->alt_const)
+				fprintf(stderr, "AC ");
+
 			id += 4;
 			fprintf(stderr, "\n");
 		}
@@ -2584,6 +2589,7 @@ void r600_bytecode_disasm(struct r600_bytecode *bc)
 			fprintf(stderr, "FMT(DTA:%d ", vtx->data_format);
 			fprintf(stderr, "NUM:%d ", vtx->num_format_all);
 			fprintf(stderr, "COMP:%d ", vtx->format_comp_all);
+			fprintf(stderr, "AC:%d ", vtx->alt_const);
 			fprintf(stderr, "MODE:%d)\n", vtx->srf_mode_all);
 
 			id += 4;

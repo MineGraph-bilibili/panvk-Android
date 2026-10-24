@@ -243,6 +243,7 @@ spec@!opengl 1.1@fog-modes
 spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_lines
 spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_quads
 spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_triangle_strip
+spec@!opengl 1.1@gl-1.2-texture-base-level
 spec@!opengl 1.1@texsubimage
 spec@!opengl 1.2@levelclamp
 spec@!opengl 1.4@tex-miplevel-selection
@@ -544,3 +545,9 @@ spec@mesa_pack_invert@mesa_pack_invert-readpixels
 spec@mesa_pack_invert@mesa_pack_invert-readpixels@PBO float RGBA
 spec@mesa_pack_invert@mesa_pack_invert-readpixels@PBO unorm BGRA
 spec@mesa_pack_invert@mesa_pack_invert-readpixels@non-PBO float RGBA
+
+spec@glsl-1.10@execution@samplers@glsl-fs-sampler-numbering-2
+spec@glsl-1.10@execution@samplers@glsl-fs-shadow1d-bias
+spec@ext_texture_array@render-1darray-1slice
+spec@ext_packed_depth_stencil@fbo-depthstencil-gl_depth24_stencil8-copypixels
+spec@ext_packed_depth_stencil@texwrap formats

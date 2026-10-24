@@ -31,6 +31,10 @@ panvk_per_arch(dispatch_precomp)(struct panvk_precomp_ctx *ctx,
 
 
    struct panvk_cmd_buffer *cmdbuf = ctx->cmdbuf;
+   /* Internal kernels: emit any deferred compute wait (see lazy_wait in
+    * panvk_vX_cmd_buffer.c). */
+   panvk_per_arch(cmd_lazy_flush)(cmdbuf, PANVK_SUBQUEUE_COMPUTE,
+                                  PANVK_LAZY_VT_DISPATCH);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(dev->vk.physical);

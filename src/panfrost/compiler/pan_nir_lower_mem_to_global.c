@@ -64,14 +64,16 @@ lower_shared_intrin_to_global(nir_builder *b, nir_intrinsic_instr *intr,
       def = nir_global_atomic(b, intr->def.bit_size,
                               build_shared_addr(b, intr),
                               intr->src[1].ssa,
-                              .atomic_op = nir_intrinsic_atomic_op(intr));
+                              .atomic_op = nir_intrinsic_atomic_op(intr),
+                              .access = nir_intrinsic_access(intr));
       break;
 
    case nir_intrinsic_shared_atomic_swap:
       def = nir_global_atomic_swap(b, intr->def.bit_size,
                                    build_shared_addr(b, intr),
                                    intr->src[1].ssa, intr->src[2].ssa,
-                                   .atomic_op = nir_intrinsic_atomic_op(intr));
+                                   .atomic_op = nir_intrinsic_atomic_op(intr),
+                                   .access = nir_intrinsic_access(intr));
       break;
 
    case nir_intrinsic_store_scratch:

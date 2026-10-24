@@ -1,0 +1,484 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+/* BC1 -> ETC2 RGB8 (BC1 RGB) or RGB8A1 (BC1 RGBA), BC2/BC3 -> ETC2 RGBA8,
+ * one invocation per 4x4 block. The ETC2 blocks have the BC block sizes,
+ * so the transcode keeps the source size.
+ * Every BC1 texel is one of four palette colours, so all fits work on the
+ * palette weighted by how many texels use each entry. Candidates are
+ * scored with the luminance shortcut |p - b - m|^2 = |p - b|^2 - 2 m s +
+ * 3 m^2 (s = channel sum of p - b); the best one is then encoded:
+ *  - differential (or individual) mode on the flip whose halves vary
+ *    least, with the best modifier table per half;
+ *  - T and H modes on the split of the palette (contiguous in luminance)
+ *    whose two groups scatter least.
+ * For BC1 RGBA, texels of transparent palette entry 3 get the RGB8A1
+ * transparent code and are left out of the colour fits. BC2/BC3 alpha
+ * becomes an 8-bit EAC block (see alpha_to_eac8()). */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer InBuf {
+    uint data[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer OutBuf {
+    uint data[];
+};
+
+layout(push_constant) uniform Registers
+{
+    uvec2 src;
+    uvec2 dst;
+    uint src_row_B;
+    uint src_slice_B;
+    uint dst_row_B;
+    uint dst_slice_B;
+    int width;
+    int height;
+    int depth;
+    int format;
+    uint dst_x0;    /* region origin in blocks, tiled planes only */
+    uint dst_y0;
+    uint dst_tiled;
+    uint src_x0;
+    uint src_y0;
+    uint lut_lo;    /* BC4 -> EAC table, see panvk_bc_eac_lutgen.c */
+    uint lut_hi;
+} registers;
+
+uint spread4(uint v)
+{
+    v = (v | (v << 2u)) & 0x33u;
+    return (v | (v << 1u)) & 0x55u;
+}
+
+/* Byte offset of block (x, y) in a U-interleaved plane of 4x4-block tiles. */
+uint utile_offset_B(uint x, uint y, uint elem_B)
+{
+    uint sy = spread4(y & 3u);
+    uint idx = (sy | (sy << 1u)) ^ spread4(x & 3u);
+    return (y >> 2u) * registers.dst_row_B + (x >> 2u) * (elem_B << 4u) + idx * elem_B;
+}
+
+layout(constant_id = 0) const int SPEC_FORMAT = 0;
+
+#define VK_FORMAT_BC1_RGBA_UNORM_BLOCK 133
+#define VK_FORMAT_BC1_RGBA_SRGB_BLOCK 134
+#define VK_FORMAT_BC2_SRGB_BLOCK 136
+
+const vec2 ETAB[8] = vec2[8](vec2(2, 8), vec2(5, 17), vec2(9, 29), vec2(13, 42),
+                             vec2(18, 60), vec2(24, 80), vec2(33, 106), vec2(47, 183));
+const float TDIST[8] = float[8](3.0, 6.0, 11.0, 16.0, 23.0, 32.0, 41.0, 64.0);
+const uint SM[4] = uint[4](0x05050505u, 0x50505050u, 0x00005555u, 0x55550000u);
+
+vec3 dec565(uint c)
+{
+   uvec3 v = uvec3(c >> 11u, (c >> 5u) & 63u, c & 31u);
+   return vec3((v.x << 3u) | (v.x >> 2u), (v.y << 2u) | (v.y >> 4u), (v.z << 3u) | (v.z >> 2u));
+}
+
+uint bswap(uint x) { return (x >> 24u) | ((x >> 8u) & 0xff00u) | ((x << 8u) & 0xff0000u) | (x << 24u); }
+ivec3 q444(vec3 c) { return ivec3(clamp(round(c * (15.0 / 255.0)), 0.0, 15.0)); }
+
+/* Cost of luminance modifier m for an entry with channel-sum offset s:
+ * |p - b - m|^2 - |p - b|^2 = 3 m^2 - 2 m s. Per-entry terms are computed
+ * once; each table then costs a few vec4 ops. */
+float best_tab(vec3 p[4], vec4 cnt, vec3 base, bool transp, out uint tab, out uint codes)
+{
+   vec4 s, e;
+   for (int k = 0; k < 4; k++) {
+      const vec3 d = p[k] - base;
+      s[k] = d.x + d.y + d.z;
+      e[k] = dot(d, d);
+   }
+   const vec4 as = abs(s);
+   const float E = dot(cnt, e);
+   float best = 1e30; tab = 0u;
+   /* Punch-through blocks with transparency (RGB8A1, opaque bit 0) offer
+    * only 0 and +-b: code 0 is the base itself, 2 is transparent. */
+   for (uint t = 0u; t < 8u; t++) {
+      const float a = ETAB[t].x, b = ETAB[t].y;
+      const vec4 cb = 3.0 * b * b - 2.0 * b * as;
+      const float err = dot(cnt, min(transp ? vec4(0.0) : 3.0 * a * a - 2.0 * a * as, cb));
+      if (err < best) { best = err; tab = t; }
+   }
+   const float a = ETAB[tab].x, b = ETAB[tab].y;
+   const vec4 cb = 3.0 * b * b - 2.0 * b * as;
+   const uvec4 neg = uvec4(lessThan(s, vec4(0.0))) * 2u;
+   uvec4 c;
+   if (transp)
+      c = uvec4(lessThan(cb, vec4(0.0))) * (1u + neg);
+   else
+      c = uvec4(lessThan(cb, 3.0 * a * a - 2.0 * a * as)) + neg;
+   codes = c.x | c.y << 2u | c.z << 4u | c.w << 6u;
+   return E + best;
+}
+
+vec4 sub_counts(uint idx, uint sm)
+{
+   const uint lo = idx & 0x55555555u, hi = (idx >> 1u) & 0x55555555u;
+   return vec4(bitCount(~hi & ~lo & sm), bitCount(~hi & lo & sm), bitCount(hi & ~lo & sm), bitCount(hi & lo & sm));
+}
+
+/* ETC1-style sub-block bases for one flip: differential if the 5-bit
+ * bases are close enough, else individual 4-bit. */
+bool etc1_bases(vec3 p[4], vec4 n0, vec4 n1, bool punch, out vec3 b0, out vec3 b1, out uint hdr)
+{
+   const vec3 a0 = (n0.x * p[0] + n0.y * p[1] + n0.z * p[2] + n0.w * p[3]) * 0.125;
+   const vec3 a1 = (n1.x * p[0] + n1.y * p[1] + n1.z * p[2] + n1.w * p[3]) * 0.125;
+   const ivec3 q0 = ivec3(clamp(round(a0 * (31.0 / 255.0)), 0.0, 31.0));
+   const ivec3 q1 = ivec3(clamp(round(a1 * (31.0 / 255.0)), 0.0, 31.0));
+   /* RGB8A1 has no individual mode: clamp the second base into reach. */
+   const ivec3 dq = punch ? clamp(q1 - q0, ivec3(-4), ivec3(3)) : q1 - q0;
+   const bool diff = all(greaterThanEqual(dq, ivec3(-4))) && all(lessThanEqual(dq, ivec3(3)));
+   if (diff) {
+      const ivec3 q1c = q0 + dq;
+      b0 = vec3((q0 << 3) | (q0 >> 2)); b1 = vec3((q1c << 3) | (q1c >> 2));
+      const uvec3 d = uvec3(dq) & 7u;
+      hdr = uint(q0.r) << 27u | d.r << 24u | uint(q0.g) << 19u | d.g << 16u | uint(q0.b) << 11u | d.b << 8u | 2u;
+   } else {
+      const ivec3 r0 = q444(a0), r1 = q444(a1);
+      b0 = vec3(r0 * 17); b1 = vec3(r1 * 17);
+      hdr = uint(r0.r) << 28u | uint(r1.r) << 24u | uint(r0.g) << 20u | uint(r1.g) << 16u | uint(r0.b) << 12u | uint(r1.b) << 8u;
+   }
+   return diff;
+}
+
+uvec4 lum_rank(vec4 cnt, vec3 p[4])
+{
+   const vec4 lum = vec4(dot(p[0], vec3(1.0)), dot(p[1], vec3(1.0)), dot(p[2], vec3(1.0)), dot(p[3], vec3(1.0))) +
+                    vec4(0.001, 0.002, 0.003, 0.004) - 1e4 * vec4(equal(cnt, vec4(0.0)));
+   uvec4 r;
+   for (int k = 0; k < 4; k++)
+      r[k] = uint(lum[k] > lum.x) + uint(lum[k] > lum.y) + uint(lum[k] > lum.z) + uint(lum[k] > lum.w);
+   return r;
+}
+
+/* Spaced 2-bit-per-pixel mask (bit 2i) -> 16-bit mask (bit i). */
+uint compact(uint m)
+{
+   m &= 0x55555555u;
+   m = (m | (m >> 1u)) & 0x33333333u;
+   m = (m | (m >> 2u)) & 0x0f0f0f0fu;
+   m = (m | (m >> 4u)) & 0x00ff00ffu;
+   return (m | (m >> 8u)) & 0xffffu;
+}
+
+/* 4x4 bit matrix transpose: bit y*4+x -> bit x*4+y. */
+uint transpose4(uint m)
+{
+   uint t = (m ^ (m >> 3u)) & 0x0a0au; m ^= t ^ (t << 3u);
+   t = (m ^ (m >> 6u)) & 0x00ccu; m ^= t ^ (t << 6u);
+   return m;
+}
+
+/* ETC index bits for all pixels: codes / codes1 hold a 2-bit code per BC1
+ * palette entry for sub-block 0 / 1; sub-block 1 is x >= 2 (flip 0) or
+ * y >= 2 (flip 1). */
+uint pix_bits(uint idx, uint codes, uint flip, uint codes1)
+{
+   const uint lo = idx & 0x55555555u, hi = (idx >> 1u) & 0x55555555u;
+   const uint m[4] = uint[4](~hi & ~lo & 0x55555555u, ~hi & lo, hi & ~lo & 0x55555555u, hi & lo);
+   const uint s1 = flip != 0u ? 0x55550000u : 0x50505050u;
+   uint msb = 0u, lsb = 0u;
+   for (uint k = 0u; k < 4u; k++) {
+      const uint c0 = (codes >> (2u * k)) & 3u, c1 = (codes1 >> (2u * k)) & 3u;
+      const uint sel0 = m[k] & ~s1, sel1 = m[k] & s1;
+      msb |= ((c0 & 2u) != 0u ? sel0 : 0u) | ((c1 & 2u) != 0u ? sel1 : 0u);
+      lsb |= ((c0 & 1u) != 0u ? sel0 : 0u) | ((c1 & 1u) != 0u ? sel1 : 0u);
+   }
+   return transpose4(compact(msb)) << 16u | transpose4(compact(lsb));
+}
+
+uvec2 bc1_to_etc(uvec2 s, int format, bool four)
+{
+   const uint c0 = s.x & 0xffffu, c1 = s.x >> 16u, idx = s.y;
+   vec3 p[4];
+   p[0] = dec565(c0); p[1] = dec565(c1);
+   if (four || c0 > c1) { p[2] = (2.0 * p[0] + p[1]) / 3.0; p[3] = (p[0] + 2.0 * p[1]) / 3.0; }
+   else { p[2] = (p[0] + p[1]) * 0.5; p[3] = vec3(0.0); }
+   const bool punch = format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK || format == VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+   /* BC1 RGBA index 3 in 3-colour mode is transparent black: it takes the
+    * RGB8A1 transparent code and is left out of every colour fit. */
+   const bool transp = punch && !four && c0 <= c1 && (idx & (idx >> 1u) & 0x55555555u) != 0u;
+   const vec4 fit = transp ? vec4(1.0, 1.0, 1.0, 0.0) : vec4(1.0);
+   const vec4 nall = sub_counts(idx, 0x55555555u) * fit;
+
+   /* Score every candidate; mode 0/1 = ETC1 flip, 2 = T, 3 = H. */
+   float best = 1e30; uint bmode = 0u, bg = 0u, bi = 0u;
+   /* One flip only: the split whose halves vary least about their means. */
+   const vec4 pp = vec4(dot(p[0], p[0]), dot(p[1], p[1]), dot(p[2], p[2]), dot(p[3], p[3]));
+   float sse[2];
+   for (uint f = 0u; f < 2u; f++) {
+      const vec4 m0 = sub_counts(idx, SM[2u * f]) * fit, m1 = sub_counts(idx, SM[2u * f + 1u]) * fit;
+      const vec3 a0 = m0.x * p[0] + m0.y * p[1] + m0.z * p[2] + m0.w * p[3];
+      const vec3 a1 = m1.x * p[0] + m1.y * p[1] + m1.z * p[2] + m1.w * p[3];
+      sse[f] = -(dot(a0, a0) + dot(a1, a1)) * 0.125;
+   }
+   const uint hflip = sse[1] < sse[0] ? 1u : 0u;
+   uint e1hdr, ek0, ek1;
+   {
+      const uint flip = hflip;
+      const vec4 n0 = sub_counts(idx, SM[2u * flip]) * fit, n1 = sub_counts(idx, SM[2u * flip + 1u]) * fit;
+      vec3 b0, b1; uint t0, t1;
+      etc1_bases(p, n0, n1, punch, b0, b1, e1hdr);
+      if (transp)
+         e1hdr &= ~2u;
+      best = best_tab(p, n0, b0, transp, t0, ek0) + best_tab(p, n1, b1, transp, t1, ek1);
+      e1hdr |= t0 << 5u | t1 << 2u | flip;
+      bmode = flip;
+   }
+   const uvec4 rank = lum_rank(nall, p);
+   /* Pick the split whose two group colours alone fit best, then run
+    * the T distance search and the H fit only on it. */
+   uint gsel = 0u; float esel = 1e30;
+   vec3 msa = vec3(0.0), msb = vec3(0.0);
+   for (uint c = 0u; c < 3u; c++) {
+      const uvec4 inb4 = uvec4(greaterThanEqual(rank, uvec4(3u - c)));
+      const vec4 inb = vec4(inb4);
+      const vec4 wa = nall * (1.0 - inb), wb = nall * inb;
+      const float na = wa.x + wa.y + wa.z + wa.w, nb = wb.x + wb.y + wb.z + wb.w;
+      if (na == 0.0 || nb == 0.0) continue;
+      const vec3 ma = (wa.x * p[0] + wa.y * p[1] + wa.z * p[2] + wa.w * p[3]) * (1.0 / na);
+      const vec3 mb = (wb.x * p[0] + wb.y * p[1] + wb.z * p[2] + wb.w * p[3]) * (1.0 / nb);
+      /* within-group scatter = sum w |p|^2 - n |mean|^2 */
+      const float e = -(na * dot(ma, ma) + nb * dot(mb, mb));
+      if (e < esel) {
+         esel = e; msa = ma; msb = mb;
+         gsel = inb4.x | inb4.y << 1u | inb4.z << 2u | inb4.w << 3u;
+      }
+   }
+   /* Group colours of the chosen split, shared by scoring and encoding. */
+   const ivec3 sqa = q444(msa), sqb = q444(msb);
+   if (esel != 1e30) {
+      const uint g = gsel;
+      const ivec3 qa = sqa, qb = sqb;
+      const vec4 inb = vec4(uvec4(g) >> uvec4(0u, 1u, 2u, 3u) & 1u);
+      const vec4 wa = nall * (1.0 - inb), wb = nall * inb;
+      const vec3 ca = vec3(qa * 17), cb = vec3(qb * 17);
+      vec4 sa, sb, ea, eb;
+      for (int k = 0; k < 4; k++) {
+         vec3 d = p[k] - ca; ea[k] = dot(d, d); sa[k] = abs(d.x + d.y + d.z);
+         d = p[k] - cb; eb[k] = dot(d, d); sb[k] = abs(d.x + d.y + d.z);
+      }
+      const float e0 = dot(wa, ea) + dot(wb, eb);
+      /* T: one group is the single colour, the other uses C2 and C2 +- d.
+       * Each side tries the two distances bracketing sum(w s^2) / (3 sum(w s)),
+       * which leans towards the entries that need the +-d levels. */
+      for (uint o = 0u; o < 2u; o++) {
+         const vec4 w = o == 0u ? wb : wa, sv = o == 0u ? sb : sa;
+         const float dstar = dot(w, sv * sv) / (3.0 * max(dot(w, sv), 1e-6));
+         const uint i0 = uint(dstar > TDIST[1]) + uint(dstar > TDIST[2]) + uint(dstar > TDIST[3]) +
+                         uint(dstar > TDIST[4]) + uint(dstar > TDIST[5]) + uint(dstar > TDIST[6]);
+         const uint gg = o == 0u ? g : g ^ 15u;
+         for (uint j = 0u; j < 2u; j++) {
+            const uint i = i0 + j;
+            const float d = TDIST[i];
+            const vec4 cd = 3.0 * d * d - 2.0 * d * sv;
+            const float et = e0 + dot(w, transp ? cd : min(vec4(0.0), cd));
+            if (et < best) { best = et; bmode = 2u; bg = gg; bi = i; }
+         }
+      }
+      if (!transp && any(notEqual(qa, qb))) {
+         /* H error e0 + 48 d^2 - 2 d S is a parabola with its minimum at S / 48 */
+         const float S = dot(wa, sa) + dot(wb, sb);
+         const float dstar = S / 48.0;
+         uint i = 0u;
+         for (uint j = 1u; j < 8u; j++)
+            i += uint(dstar > 0.5 * (TDIST[j - 1u] + TDIST[j]));
+         const float d = TDIST[i];
+         const float eh = e0 + 48.0 * d * d - 2.0 * d * S;
+         if (eh < best) { best = eh; bmode = 3u; bg = g; bi = i; }
+      }
+   }
+
+   /* Encode the winner. */
+   uint hdr, codes, codes1 = 0u, flip = 0u;
+   if (bmode < 2u) {
+      flip = bmode; hdr = e1hdr; codes = ek0; codes1 = ek1;
+   } else {
+      /* bg is the chosen split or (T with the other group single) its
+       * complement, which swaps the two group colours. */
+      const bool same = bg == gsel;
+      const ivec3 qa = same ? sqa : sqb, qb = same ? sqb : sqa;
+      const vec3 ca = vec3(qa * 17), cb = vec3(qb * 17);
+      const float d = TDIST[bi];
+      codes = 0u;
+      if (bmode == 2u) {
+         for (int k = 0; k < 4; k++) {
+            uint ck = 0u;
+            if (((bg >> uint(k)) & 1u) != 0u) {
+               const vec3 dd = p[k] - cb;
+               const float sk = dd.x + dd.y + dd.z;
+               ck = transp || 3.0 * d * d - 2.0 * d * abs(sk) < 0.0 ? (sk > 0.0 ? 1u : 3u) : 2u;
+            }
+            codes |= ck << (2u * uint(k));
+         }
+         const uint r1 = uint(qa.r), a = r1 >> 2u, rb = r1 & 3u;
+         const uint fill = a + rb >= 4u ? 7u << 29u : 1u << 26u;
+         hdr = fill | a << 27u | rb << 24u | uint(qa.g) << 20u | uint(qa.b) << 16u |
+               uint(qb.r) << 12u | uint(qb.g) << 8u | uint(qb.b) << 4u | (bi >> 1u) << 2u |
+               (transp ? 0u : 2u) | (bi & 1u);
+      } else {
+         const uint va = uint(qa.r) << 8u | uint(qa.g) << 4u | uint(qa.b), vb = uint(qb.r) << 8u | uint(qb.g) << 4u | uint(qb.b);
+         /* distance index LSB is implied by C1 >= C2: swap groups to match */
+         const bool sw = (va >= vb) != ((bi & 1u) != 0u);
+         const ivec3 k1 = sw ? qb : qa, k2 = sw ? qa : qb;
+         for (int k = 0; k < 4; k++) {
+            const bool inB = ((bg >> uint(k)) & 1u) != 0u;
+            const vec3 dd = p[k] - (inB ? cb : ca);
+            codes |= ((inB == sw ? 0u : 2u) + (dd.x + dd.y + dd.z >= 0.0 ? 0u : 1u)) << (2u * uint(k));
+         }
+         const uint R1 = uint(k1.r), G1 = uint(k1.g), B1 = uint(k1.b);
+         const int dR = int(G1 >> 1u) - (((G1 >> 1u) & 4u) != 0u ? 8 : 0);
+         const uint b63 = int(R1) + dR < 0 ? 1u : 0u;
+         const uint x = (G1 & 1u) * 2u + (B1 >> 3u), y = (B1 >> 1u) & 3u;
+         const uint gfill = x + y >= 4u ? 7u << 21u : 1u << 18u;
+         hdr = b63 << 31u | R1 << 27u | (G1 >> 1u) << 24u | gfill | (G1 & 1u) << 20u | (B1 >> 3u) << 19u |
+               (B1 & 7u) << 15u | uint(k2.r) << 11u | uint(k2.g) << 7u | uint(k2.b) << 3u |
+               (bi >> 2u) << 2u | 2u | ((bi >> 1u) & 1u);
+      }
+      codes1 = codes;
+   }
+   if (transp) {
+      codes = (codes & 0x3fu) | 0x80u;
+      codes1 = (codes1 & 0x3fu) | 0x80u;
+   }
+   return uvec2(bswap(hdr), bswap(pix_bits(idx, codes, flip, codes1)));
+}
+
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer LutBuf {
+    uint data[];
+};
+
+const ivec4 EAC_NEG[16] = ivec4[16](
+    ivec4(-3, -6, -9, -15), ivec4(-3, -7, -10, -13), ivec4(-2, -5, -8, -13), ivec4(-2, -4, -6, -13),
+    ivec4(-3, -6, -8, -12), ivec4(-3, -7, -9, -11), ivec4(-4, -7, -8, -11), ivec4(-3, -5, -8, -11),
+    ivec4(-2, -6, -8, -10), ivec4(-2, -5, -8, -10), ivec4(-2, -4, -8, -10), ivec4(-2, -5, -7, -10),
+    ivec4(-3, -4, -7, -10), ivec4(-1, -2, -3, -10), ivec4(-4, -6, -8, -9), ivec4(-3, -5, -7, -9));
+const ivec4 EAC_POS[16] = ivec4[16](
+    ivec4(2, 5, 8, 14), ivec4(2, 6, 9, 12), ivec4(1, 4, 7, 12), ivec4(1, 3, 5, 12),
+    ivec4(2, 5, 7, 11), ivec4(2, 6, 8, 10), ivec4(3, 6, 7, 10), ivec4(2, 4, 7, 10),
+    ivec4(1, 5, 7, 9), ivec4(1, 4, 7, 9), ivec4(1, 3, 7, 9), ivec4(1, 4, 6, 9),
+    ivec4(2, 3, 6, 9), ivec4(0, 1, 2, 9), ivec4(3, 5, 7, 8), ivec4(2, 4, 6, 8));
+
+uint eac_nearest(float p, vec4 vn, vec4 vp)
+{
+    vec4 a = abs(vn - p), b = abs(vp - p);
+    uint j = 0u; float e = a.x;
+    if (a.y < e) { e = a.y; j = 1u; }
+    if (a.z < e) { e = a.z; j = 2u; }
+    if (a.w < e) { e = a.w; j = 3u; }
+    if (b.x < e) { e = b.x; j = 4u; }
+    if (b.y < e) { e = b.y; j = 5u; }
+    if (b.z < e) { e = b.z; j = 6u; }
+    if (b.w < e) { j = 7u; }
+    return j;
+}
+
+/* 8-bit EAC alpha block for 16 texel alphas (4 per word, texel i = y*4+x).
+ * The base/multiplier/table come from the BC4 table entry for eight levels
+ * spanning the block's alpha range (8-bit EAC levels are the 11-bit ones
+ * scaled by 255/2047 * 8 = 0.9966); a flat block is encoded exactly. */
+uvec2 alpha_to_eac8(uvec4 a, LutBuf lut)
+{
+    uint lo = 255u, hi = 0u;
+    for (uint i = 0u; i < 16u; i++) {
+        const uint v = (a[i >> 2u] >> (8u * (i & 3u))) & 0xffu;
+        lo = min(lo, v); hi = max(hi, v);
+    }
+    uint base, m, tab;
+    if (lo == hi) {
+        base = lo; m = 1u; tab = 13u;   /* table 13 has a 0 modifier (code 4) */
+    } else {
+        const uint prm = lut.data[hi | lo << 8u] & 0xffffu;
+        base = prm & 0xffu; m = (prm >> 8u) & 0xfu; tab = prm >> 12u;
+    }
+    const vec4 vn = clamp(vec4(int(base) + EAC_NEG[tab] * int(m)), 0.0, 255.0);
+    const vec4 vp = clamp(vec4(int(base) + EAC_POS[tab] * int(m)), 0.0, 255.0);
+    uint ih = 0u, il = 0u;
+    for (uint i = 0u; i < 16u; i++) {
+        const uint v = eac_nearest(float((a[i >> 2u] >> (8u * (i & 3u))) & 0xffu), vn, vp);
+        const uint pos = 45u - 3u * ((i & 3u) * 4u + (i >> 2u));
+        if (pos >= 32u) ih |= v << (pos - 32u);
+        else if (pos + 3u <= 32u) il |= v << pos;
+        else { il |= v << pos; ih |= v >> (32u - pos); }
+    }
+    return uvec2(base | ((m << 4u | tab) << 8u) | ((ih >> 8u) & 0xffu) << 16u | (ih & 0xffu) << 24u,
+                 (il >> 24u) | ((il >> 16u) & 0xffu) << 8u | ((il >> 8u) & 0xffu) << 16u | (il & 0xffu) << 24u);
+}
+
+/* BC2 explicit 4-bit alpha -> 16 8-bit alphas. */
+uvec4 bc2_alpha(uvec2 w)
+{
+    uvec4 r;
+    for (uint q = 0u; q < 4u; q++) {
+        const uint h = (w[q >> 1u] >> (16u * (q & 1u))) & 0xffffu;
+        uint o = 0u;
+        for (uint k = 0u; k < 4u; k++)
+            o |= (((h >> (4u * k)) & 15u) * 17u) << (8u * k);
+        r[q] = o;
+    }
+    return r;
+}
+
+/* BC3 alpha (a BC4 block) -> 16 8-bit alphas, D3D palette rounding. */
+uvec4 bc3_alpha(uvec2 w)
+{
+    const uint a0 = w.x & 0xffu, a1 = (w.x >> 8u) & 0xffu;
+    const uint lo = (w.x >> 16u) | (w.y << 16u), hi = w.y >> 16u;
+    uvec4 r = uvec4(0u);
+    for (uint i = 0u; i < 16u; i++) {
+        const uint b = 3u * i;
+        const uint k = b + 3u <= 32u ? (lo >> b) & 7u : b >= 32u ? (hi >> (b - 32u)) & 7u : ((lo >> b) | (hi << (32u - b))) & 7u;
+        uint v;
+        if (k < 2u) v = k == 0u ? a0 : a1;
+        else if (a0 > a1) v = ((a0 * (8u - k) + a1 * (k - 1u) + 3u) * 9363u) >> 16u;
+        else if (k > 5u) v = k == 6u ? 0u : 255u;
+        else v = ((a0 * (6u - k) + a1 * (k - 1u) + 2u) * 13108u) >> 16u;
+        r[i >> 2u] |= v << (8u * (i & 3u));
+    }
+    return r;
+}
+void main()
+{
+    uint bx = gl_GlobalInvocationID.x;
+    uint by = gl_GlobalInvocationID.y;
+    uint bz = gl_GlobalInvocationID.z;
+
+    if (bx >= uint((registers.width + 3) / 4) || by >= uint((registers.height + 3) / 4) ||
+        bz >= uint(registers.depth))
+        return;
+
+    InBuf ibuf = InBuf(registers.src);
+    OutBuf obuf = OutBuf(registers.dst);
+    int format = SPEC_FORMAT != 0 ? SPEC_FORMAT : registers.format;
+    const bool rgba = format > VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    const uint nw = rgba ? 4u : 2u;
+
+    uint in_word = (bz * registers.src_slice_B + by * registers.src_row_B) / 4u + bx * nw;
+    uint out_word = registers.dst_tiled != 0u
+        ? (bz * registers.dst_slice_B +
+           utile_offset_B(registers.dst_x0 + bx, registers.dst_y0 + by, nw * 4u)) / 4u
+        : (bz * registers.dst_slice_B + by * registers.dst_row_B) / 4u + bx * nw;
+
+    if (rgba) {
+        /* ETC2 RGBA8: EAC alpha block, then the colour block (BC2/BC3
+         * colour is always in 4-colour mode). */
+        const uvec2 aw = uvec2(ibuf.data[in_word], ibuf.data[in_word + 1u]);
+        const uvec4 al = format <= VK_FORMAT_BC2_SRGB_BLOCK ? bc2_alpha(aw) : bc3_alpha(aw);
+        const uvec2 a = alpha_to_eac8(al, LutBuf(uvec2(registers.lut_lo, registers.lut_hi)));
+        const uvec2 c = bc1_to_etc(uvec2(ibuf.data[in_word + 2u], ibuf.data[in_word + 3u]), format, true);
+        obuf.data[out_word] = a.x;
+        obuf.data[out_word + 1u] = a.y;
+        obuf.data[out_word + 2u] = c.x;
+        obuf.data[out_word + 3u] = c.y;
+    } else {
+        uvec2 r = bc1_to_etc(uvec2(ibuf.data[in_word], ibuf.data[in_word + 1u]), format, false);
+        obuf.data[out_word] = r.x;
+        obuf.data[out_word + 1u] = r.y;
+    }
+}

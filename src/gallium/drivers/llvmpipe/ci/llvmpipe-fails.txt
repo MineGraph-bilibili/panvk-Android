@@ -22,9 +22,7 @@ glx@glx-swap-pixmap-bad,Fail
 # X Error of failed request:  BadDrawable (invalid Pixmap or Window parameter)
 #   Major opcode of failed request:  130 (MIT-SHM)
 #   Minor opcode of failed request:  3 (X_ShmPutImage)
-glx@glx-visuals-depth,Crash
 glx@glx-visuals-depth -pixmap,Crash
-glx@glx-visuals-stencil,Crash
 glx@glx-visuals-stencil -pixmap,Crash
 
 glx@glx_arb_create_context@invalid flag,Fail
@@ -45,9 +43,6 @@ spec@arb_shader_image_load_store@execution@image-array-out-of-bounds-access-stor
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
 
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-
-# "error: main:90: eglChooseConfig() returned no configs"
-spec@egl 1.4@eglterminate then unbind context,Fail
 
 # "eglChooseConfig failed"
 spec@egl_khr_surfaceless_context@viewport,Fail
@@ -102,7 +97,6 @@ spec@ovr_multiview@compiler@multiple-num-views-in-single-declaration-mismatch.ve
 spec@glsl-1.50@execution@geometry@dynamic_input_array_index,Crash
 
 spec@!opengl 1.1@large-tex,Crash
-spec@glsl-1.30@execution@glsl-packed-back-color,Fail
 
 # Nightly run expectations update
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-transcode-nv12-as-r8-gr88,Fail

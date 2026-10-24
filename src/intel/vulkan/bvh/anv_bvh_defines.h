@@ -68,7 +68,10 @@ struct anv_accel_struct_header {
 
    uint32_t instance_leaves_offset;
 
-   uint32_t padding[42];
+   /* Copy of the root node's box flags */
+   uint32_t root_flags;
+
+   uint32_t padding[41];
 };
 
 /* Mixed internal node with type per child */
@@ -394,7 +397,7 @@ struct update_args {
 
 #define ANV_ENCODE_BUILD_FLAGS (VK_BUILD_FLAG_HAS_QUADS | ANV_BUILD_FLAG_WRITE_LOOKUP_MAPS_FOR_UPDATE)
 
-struct encode_args {
+struct anv_batch_args {
    /* Address within the IR BVH, marking the start of leaves/internal nodes. */
    VOID_REF intermediate_bvh;
 
@@ -412,6 +415,16 @@ struct encode_args {
    VOID_REF parent_child_map;
    VOID_REF leaf_block_offset_map;
    VOID_REF parent_child_count_map;
+};
+
+#ifdef VULKAN
+TYPE(anv_batch_args, 4);
+#endif
+
+struct encode_args {
+   REF(anv_batch_args) batch_args;
+   uint32_t batch_offset;
+   uint32_t start_node_offset;
 };
 
 struct header_args {

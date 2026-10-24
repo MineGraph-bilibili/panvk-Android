@@ -154,8 +154,10 @@ static const struct {
 
    /* GFX register numbers. */
    { "mov (4) r127 r127",        VALID,                                                      { .lt = 200 } },
-   { "mov (4) r128 r1",          "Destination GRF register number 128 exceeds maximum 127.", { .lt = 200 } },
-   { "mov (4) r0 r128",          "Source 0 GRF register number 128 exceeds maximum 127.",    { .lt = 200 } },
+   { "mov (4) r128 r1",          "Destination GRF register number 128 exceeds maximum 127.", { .lt = 125 } },
+   { "mov (4) r0 r128",          "Source 0 GRF register number 128 exceeds maximum 127.",    { .lt = 125 } },
+   { "mov (4) r256 r1",          "Destination GRF register number 256 exceeds maximum 255.", { .ge = 125 } },
+   { "mov (4) r0 r256",          "Source 0 GRF register number 256 exceeds maximum 255.",    { .ge = 125 } },
    { "mov (4) r[a0.0 + 128] r1", VALID,                                                      { .lt = 200 } },
    { "mov (4) r0 r[a0.0 + 128]", VALID,                                                      { .lt = 200 } },
 
@@ -1498,15 +1500,16 @@ static const struct {
    },
    { "math.fdiv (8) r0:f r1:f r2<16;8,2>:hf", VALID, { .lt = 125 } },
    { "math.fdiv (8) r0:f r1:f r2<16;8,2>:hf",
-     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125 }
+     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125, .lt = 350 }
    },
    { "math.fdiv (8) r0:f r1:f r2",
      "Before Gfx12.5, 2-source MATH src1 type must be F or HF.", { .lt = 125 }
    },
    { "math.fdiv (8) r0:f r1:f r2",
-     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125 }
+     "MATH POW and FDIV are not supported on Gfx12.5+.", { .ge = 125, .lt = 350 }
    },
 
+   { "math.tanh (8) r0:f r1:f null", VALID, { .ge = 350 } },
 
    { "math.sqt (8) r0:f r1:f null",         VALID },
    { "math.sqt (8) r0<2>:hf r1<2>:hf null", VALID },
@@ -1762,7 +1765,7 @@ static const struct {
    { "mul (8) acc0<2>:d r1<8;4,2>:d r2<8;4,2>:d",
      "Architecture registers cannot be used for 64-bit and integer DW-multiply operations on Gfx9 LP.", { .is_9lp = true }
    },
-   { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d", VALID, { .lt = 350 } },
+   { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d", VALID },
    { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d {AccWrEn}", VALID, { .lt = 200, .is_not_9lp = true } },
    { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d {AccWrEn}",
      "Architecture registers cannot be used for 64-bit and integer DW-multiply operations on Gfx9 LP.", { .is_9lp = true }
@@ -1980,7 +1983,7 @@ static const struct {
    { "mov (1) (eq)f0.0 s0:uw 0:uw",
      "Scalar-register MOV with an immediate source cannot use a condition modifier.", { .ge = 300 }
    },
-   { "mov (1) s0.28 r1<0>",
+   { "mov (1) s0.60:uq r1<0>:uq",
      "Scalar-register destinations must not cross the lower/upper 8-dword boundary.", { .ge = 300 }
    },
    { "mov (8) r0:uw s0<0>:uw", VALID, { .ge = 300 } },
@@ -2135,7 +2138,6 @@ static const struct {
    { "mad (8) r0:f r1:f r2:bf r3:f",      SAME_ERROR, { .ge = 350 } },
    { "add (8) r0<2>:bf r1:f r2.16:bf",    SAME_ERROR, { .ge = 350 } },
    { "mul (8) r0 -r1 r2:uw",              SAME_ERROR, { .ge = 350 } },
-   { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d", SAME_ERROR, { .ge = 350 } },
    { "add (8) r0:d r2:d r4:w",            SAME_ERROR, { .ge = 350 } },
    { "add (8) r0<2>:w r2:d r4:w",         SAME_ERROR, { .ge = 350 } },
    { "add (8) r0.1:w r2:w r4.2<2>:w",     SAME_ERROR, { .ge = 350 } },

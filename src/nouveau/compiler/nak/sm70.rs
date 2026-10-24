@@ -145,8 +145,21 @@ impl ShaderModel for ShaderModel70 {
             | Op::Pin(_)
             | Op::Unpin(_)
             | Op::Ldcg(_) => true,
+            Op::F2FP(_) => self.sm() >= 86,
             Op::Ldc(op) => op.offset.is_zero(),
-            // UCLEA  USHL  USHR
+            Op::FAdd(_)
+            | Op::FFma(_)
+            | Op::FMnMx(_)
+            | Op::FMul(_)
+            | Op::F2F(_)
+            | Op::F2I(_)
+            | Op::I2F(_)
+            | Op::FRnd(_)
+            | Op::FSet(_)
+            | Op::FSetP(_)
+            | Op::IAbs(_)
+            | Op::IMnMx(_) => self.is_blackwell_b() && !op.is_fp64(),
+            // UCLEA
             _ => false,
         }
     }

@@ -38,7 +38,8 @@ struct radeon_drm_winsys {
    struct pb_cache bo_cache;
    struct pb_slabs bo_slabs;
 
-   int fd; /* DRM file descriptor */
+   int fd; /* Application-facing DRM file descriptor. */
+   int ioctl_fd; /* Render-capable DRM file descriptor for GEM and CS ioctls. */
    int num_cs; /* The number of command streams created. */
    uint64_t allocated_vram;
    uint64_t allocated_gtt;

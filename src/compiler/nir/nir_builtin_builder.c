@@ -420,6 +420,8 @@ nir_build_texture_query(nir_builder *b, nir_tex_instr *tex, nir_texop texop,
    query->texture_index = tex->texture_index;
    query->sampler_index = tex->sampler_index;
    query->can_speculate = tex->can_speculate;
+   query->texture_non_uniform = tex->texture_non_uniform;
+   query->sampler_non_uniform = tex->sampler_non_uniform;
    query->dest_type = dest_type;
 
    if (include_coord) {
@@ -473,4 +475,38 @@ nir_get_texture_lod(nir_builder *b, nir_tex_instr *tex)
 
    /* The LOD is the y component of the result */
    return nir_channel(b, tql, 1);
+}
+
+nir_def *
+nir_tanh_emulated(struct nir_builder *b, nir_def *src)
+{
+   /* tanh(x) := (e^x - e^(-x)) / (e^x + e^(-x))
+    *
+    * We only calculate tanh(abs(x)), and copy the input sign. This has the benifit
+    * that we only have to clamp the input for the e^x term to avoid precision
+    * problems, the e^(-x) will underflow to zero.
+    *
+    * The copysign also gives us signed zero correctness.
+    *
+    * Clamping in both directions would not give 1.0 for infinities with
+    * toward zero rounding, and it would prevent NaN propagation.
+    */
+   nir_def *x = nir_fabs(b, src);
+
+   /* Translate from e^x to 2^(x * log_e).
+    *
+    * We do this early instead of using nir_fexp because
+    * we need to clamp infinities to a value that doesn't
+    * cause RTZ precision issues in the division.
+    */
+   x = nir_fmul_imm(b, x, M_LOG2E);
+
+   nir_def *clamped_x = nir_fmin_imm(b, x, src->bit_size > 16 ? 16.0 : 8.0);
+
+   nir_def *exp_x = nir_fexp2(b, clamped_x);
+   nir_def *exp_neg_x = nir_fexp2(b, nir_fneg(b, x));
+   nir_def *abs_tanh = nir_fdiv(b, nir_fsub(b, exp_x, exp_neg_x),
+                                nir_fadd(b, exp_x, exp_neg_x));
+
+   return nir_copysign(b, abs_tanh, src);
 }

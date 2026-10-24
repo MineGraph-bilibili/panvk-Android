@@ -85,4 +85,3 @@ dEQP-VK.texture.filtering.3d.combinations.linear.nearest.clamp_to_edge.clamp_to_
 dEQP-VK.texture.filtering.3d.combinations.linear_mipmap_nearest.linear.mirror_clamp_to_edge.mirrored_repeat.clamp_to_edge
 dEQP-VK.ubo.instance_array_basic_type.std140.column_major_mat4x3.both
 dEQP-VK.ubo.single_basic_type.std430.mediump.mat3.vertex
-dEQP-VK.ycbcr.conversion.g8_b8_r8_3plane_420_unorm.color_conversion.ycbcr_2020_itu_full_tiling_optimal_cosited

@@ -61,11 +61,13 @@ build_atomic(nir_builder *b, nir_intrinsic_instr *intr)
                              intr->src[0].ssa,
                              .align_mul = intr->def.bit_size / 8,
                              .align_offset = 0,
-                             .access = ACCESS_ATOMIC);
+                             .access = nir_intrinsic_access(intr) |
+                                       ACCESS_ATOMIC);
       break;
    case nir_intrinsic_global_atomic:
       load = nir_load_global(b, 1, intr->def.bit_size, intr->src[0].ssa,
-                             .access = ACCESS_ATOMIC | ACCESS_COHERENT);
+                             .access = nir_intrinsic_access(intr) |
+                                       ACCESS_ATOMIC | ACCESS_COHERENT);
       break;
    case nir_intrinsic_bindless_image_atomic:
       load = nir_bindless_image_load(
@@ -105,13 +107,15 @@ build_atomic(nir_builder *b, nir_intrinsic_instr *intr)
          xchg = nir_shared_atomic_swap(b, intr->def.bit_size,
                                        intr->src[0].ssa,
                                        before, expected,
-                                       .atomic_op = nir_atomic_op_cmpxchg);
+                                       .atomic_op = nir_atomic_op_cmpxchg,
+                                       .access = nir_intrinsic_access(intr));
          break;
       case nir_intrinsic_global_atomic:
          xchg = nir_global_atomic_swap(b, intr->def.bit_size,
                                        intr->src[0].ssa,
                                        before, expected,
-                                       .atomic_op = nir_atomic_op_cmpxchg);
+                                       .atomic_op = nir_atomic_op_cmpxchg,
+                                       .access = nir_intrinsic_access(intr));
          break;
       case nir_intrinsic_bindless_image_atomic:
          xchg = nir_bindless_image_atomic_swap(

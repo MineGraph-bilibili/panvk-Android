@@ -1595,6 +1595,18 @@ nvk_shader_get_executable_statistics(
       stat->value.u64 = shader->info.slm_size;
    }
 
+   uint16_t smem_size = 0;
+   if (shader->info.stage == MESA_SHADER_COMPUTE)
+      smem_size = shader->info.cs.smem_size;
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Shared size");
+      WRITE_STR(stat->description,
+                "Size of shader shared memory, in bytes");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = smem_size;
+   }
+
    return vk_outarray_status(&out);
 }
 

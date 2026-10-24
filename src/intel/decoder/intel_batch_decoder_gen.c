@@ -12,7 +12,7 @@
 
 static void
 ctx_disassemble_program_gen(struct intel_batch_decode_ctx *ctx,
-                            uint32_t ksp,
+                            uint64_t ksp,
                             const char *short_name,
                             const char *name)
 {
@@ -21,7 +21,7 @@ ctx_disassemble_program_gen(struct intel_batch_decode_ctx *ctx,
    if (!bo.map)
       return;
 
-   fprintf(ctx->fp, "\nReferenced %s (ksp: 0x%" PRIx32, name, ksp);
+   fprintf(ctx->fp, "\nReferenced %s (ksp: 0x%" PRIx64, name, ksp);
    if (ctx->shader_hash.last_inst &&
        !strcmp(ctx->shader_hash.last_inst->name, "MI_STORE_DATA_IMM")) {
       /* We only consider a recorded hash valid when the previously parsed
@@ -50,6 +50,7 @@ ctx_disassemble_program_gen(struct intel_batch_decode_ctx *ctx,
          .raw_bytes = bo.map,
          .raw_bytes_size = size,
          .mem_ctx = tmp_ctx,
+         .use_efficient_64bit = ctx->use_efficient_64bit,
       };
       gen_decode(&decode);
 

@@ -181,6 +181,7 @@ etna_compile_rs_state(struct etna_context *ctx, struct compiled_rs_state *cs,
    }
    cs->source_ts_valid = rs->source_ts_valid;
    cs->single_buffer = screen->specs.single_buffer;
+   cs->downsample_one_sample = rs->downsample_one_sample;
 
    if (cs->single_buffer)
       assert(!src_multi && !dst_multi);
@@ -213,6 +214,7 @@ etna_submit_rs_state(struct etna_context *ctx,
 
    if (cs->RS_KICKER_INPLACE) {
       etna_cmd_stream_reserve(stream, 6);
+      ETNA_CONTEXT_ATOMIC_EMIT(ctx);
       etna_coalesce_start(stream, &coalesce);
       /* 0/1 */ EMIT_STATE(RS_EXTRA_CONFIG, cs->RS_EXTRA_CONFIG);
       /* 2/3 */ EMIT_STATE(RS_SOURCE_STRIDE, cs->RS_SOURCE_STRIDE);
@@ -221,6 +223,7 @@ etna_submit_rs_state(struct etna_context *ctx,
    } else if (screen->specs.pixel_pipes > 1 ||
               VIV_FEATURE(screen, ETNA_FEATURE_RS_NEW_BASEADDR)) {
       etna_cmd_stream_reserve(stream, 34); /* worst case - both pipes multi=1 */
+      ETNA_CONTEXT_ATOMIC_EMIT(ctx);
       etna_coalesce_start(stream, &coalesce);
       /* 0/1 */ EMIT_STATE(RS_CONFIG, cs->RS_CONFIG);
       /* 2/3 */ EMIT_STATE(RS_SOURCE_STRIDE, cs->RS_SOURCE_STRIDE);
@@ -249,14 +252,18 @@ etna_submit_rs_state(struct etna_context *ctx,
       /*29   */ EMIT_STATE(RS_FILL_VALUE(3), cs->RS_FILL_VALUE[3]);
       /*30/31*/ EMIT_STATE(RS_EXTRA_CONFIG, cs->RS_EXTRA_CONFIG);
 
-      if (cs->single_buffer)
-         EMIT_STATE(RS_SINGLE_BUFFER, VIVS_RS_SINGLE_BUFFER_ENABLE);
+      if (cs->single_buffer || cs->downsample_one_sample)
+         EMIT_STATE(RS_SINGLE_BUFFER,
+                    COND(cs->single_buffer, VIVS_RS_SINGLE_BUFFER_ENABLE) |
+                    COND(cs->downsample_one_sample, VIVS_RS_SINGLE_BUFFER_DOWNSAMPLE_ONE_SAMPLE));
+
       /*32/33*/ EMIT_STATE(RS_KICKER, 0xbeebbeeb);
-      if (cs->single_buffer)
+      if (cs->single_buffer || cs->downsample_one_sample)
          EMIT_STATE(RS_SINGLE_BUFFER, 0x0);
       etna_coalesce_end(stream, &coalesce);
    } else {
       etna_cmd_stream_reserve(stream, 22);
+      ETNA_CONTEXT_ATOMIC_EMIT(ctx);
       etna_coalesce_start(stream, &coalesce);
       /* 0/1 */ EMIT_STATE(RS_CONFIG, cs->RS_CONFIG);
       /* 2   */ EMIT_STATE_RELOC(RS_SOURCE_ADDR, &cs->source[0]);
@@ -367,7 +374,7 @@ etna_blit_clear_color_rs(struct pipe_context *pctx, unsigned idx,
    struct pipe_surface *dst = &ctx->framebuffer_s.base.cbufs[idx];
    struct etna_resource *dst_res = etna_resource_get_render_compatible(pctx, dst->texture);
    struct etna_resource_level *dst_level = &dst_res->levels[dst->level];
-   uint64_t new_clear_value = etna_clear_blit_pack_rgba(dst->format, color);
+   uint64_t new_clear_value = etna_clear_blit_pack_rgba(dst->format, color, ctx->screen);
    struct compiled_rs_state rs_state;
 
    if (use_ts && dst_level->ts_size) {
@@ -393,6 +400,7 @@ etna_blit_clear_color_rs(struct pipe_context *pctx, unsigned idx,
 
       etna_rs_gen_ts_clear_cmd(ctx, dst, dst_res, &rs_state);
 
+      dst_level->ts_needs_clear = false;
       etna_resource_level_ts_mark_valid(dst_level);
       etna_resource_level_mark_unflushed(dst_level);
       ctx->dirty |= ETNA_DIRTY_TS;
@@ -476,6 +484,7 @@ etna_blit_clear_zs_rs(struct pipe_context *pctx, struct pipe_surface *dst,
 
       etna_rs_gen_ts_clear_cmd(ctx, dst, dst_res, &rs_state);
 
+      dst_level->ts_needs_clear = false;
       etna_resource_level_ts_mark_valid(dst_level);
       etna_resource_level_mark_unflushed(dst_level);
       ctx->dirty |= ETNA_DIRTY_TS;
@@ -738,7 +747,7 @@ etna_try_rs_blit(struct pipe_context *pctx,
    }
 
    /* try to find a exact format match first */
-   uint32_t format = translate_rs_format(blit_info->dst.format);
+   uint32_t format = translate_rs_format(blit_info->dst.format, ctx->screen->info->halti >= 5);
    /* When not resolving MSAA, but only doing a layout conversion, we can get
     * away with a fallback format of matching size.
     */
@@ -748,6 +757,11 @@ etna_try_rs_blit(struct pipe_context *pctx,
       DBG("format not supported: %s", util_format_short_name(blit_info->dst.format));
       return false;
    }
+
+   if ((downsample_x || downsample_y) &&
+       util_format_is_pure_integer(blit_info->dst.format) &&
+       !VIV_FEATURE(ctx->screen, ETNA_FEATURE_HALTI5))
+      return false;
 
    if (blit_info->scissor_enable ||
        blit_info->swizzle_enable ||
@@ -910,11 +924,13 @@ etna_try_rs_blit(struct pipe_context *pctx,
       .dest_padded_height = dst_lev->padded_height,
       .downsample_x = downsample_x,
       .downsample_y = downsample_y,
+      .downsample_one_sample = (downsample_x || downsample_y) &&
+                               resolve_copies_one_sample(blit_info->dst.format),
       /* Swap R<->B when requested by the caller (shared resource flush) or
        * for transfer blits of RB_SWAP formats on non-shared resources. */
       .swap_rb = ctx->blit_rb_swap ||
                  (ctx->in_transfer_blit &&
-                  translate_pe_format_rb_swap(blit_info->src.format) &&
+                  translate_pe_format_rb_swap(blit_info->src.format, ctx->screen) &&
                   !src->shared && !dst->shared),
       .dither = {0xffffffff, 0xffffffff}, // XXX dither when going from 24 to 16 bit?
       .clear_mode = VIVS_RS_CLEAR_CONTROL_MODE_DISABLED,

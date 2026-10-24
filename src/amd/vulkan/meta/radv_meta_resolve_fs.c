@@ -76,7 +76,7 @@ get_gfx_resolve_pipeline(struct radv_device *device, VkFormat format, uint32_t s
       return VK_SUCCESS;
    }
 
-   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices();
+   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices(true);
    nir_shader *fs_module = radv_meta_nir_build_resolve_fs(pdev->use_fmask, key.samples, vk_format_is_int(key.format),
                                                           key.aspects, key.resolve_mode);
 
@@ -232,9 +232,8 @@ radv_gfx_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *sr
       return;
    }
 
-   /* Multi-layer resolves are handled by compute */
-   assert(vk_image_subresource_layer_count(&src_image->vk, &region->srcSubresource) == 1 &&
-          vk_image_subresource_layer_count(&dst_image->vk, &region->dstSubresource) == 1);
+   const uint32_t num_layers = vk_image_subresource_layer_count(&src_image->vk, &region->srcSubresource);
+   assert(num_layers == vk_image_subresource_layer_count(&dst_image->vk, &region->dstSubresource));
 
    const struct VkExtent3D extent = vk_image_sanitize_extent(&src_image->vk, region->extent);
    const struct VkOffset3D srcOffset = vk_image_sanitize_offset(&src_image->vk, region->srcOffset);
@@ -247,6 +246,10 @@ radv_gfx_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *sr
 
    radv_meta_set_viewport_and_scissor(cmd_buffer, resolve_area.offset.x, resolve_area.offset.y,
                                       resolve_area.extent.width, resolve_area.extent.height);
+
+   const uint32_t src_base_layer = region->srcSubresource.baseArrayLayer;
+   const uint32_t dst_base_layer =
+      dst_image->vk.image_type == VK_IMAGE_TYPE_3D ? region->dstOffset.z : region->dstSubresource.baseArrayLayer;
 
    const VkImageViewUsage2CreateInfoKHR src_iview_usage_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR,
@@ -267,8 +270,8 @@ radv_gfx_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *sr
                                  .aspectMask = region->srcSubresource.aspectMask,
                                  .baseMipLevel = 0,
                                  .levelCount = 1,
-                                 .baseArrayLayer = 0,
-                                 .layerCount = 1,
+                                 .baseArrayLayer = src_base_layer,
+                                 .layerCount = num_layers,
                               },
                         },
                         NULL);
@@ -287,15 +290,15 @@ radv_gfx_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *sr
                            .pNext = &dst_iview_usage_info,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                            .image = radv_image_to_handle(dst_image),
-                           .viewType = radv_meta_get_view_type(dst_image),
+                           .viewType = radv_meta_get_view_type(dst_image, true),
                            .format = dst_format,
                            .subresourceRange =
                               {
                                  .aspectMask = region->dstSubresource.aspectMask,
                                  .baseMipLevel = region->dstSubresource.mipLevel,
                                  .levelCount = 1,
-                                 .baseArrayLayer = 0,
-                                 .layerCount = 1,
+                                 .baseArrayLayer = dst_base_layer,
+                                 .layerCount = num_layers,
                               },
                         },
                         NULL);
@@ -312,7 +315,7 @@ radv_gfx_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *sr
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
       .flags = VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR,
       .renderArea = resolve_area,
-      .layerCount = 1,
+      .layerCount = num_layers,
    };
 
    switch (region->dstSubresource.aspectMask) {
@@ -355,7 +358,7 @@ radv_gfx_resolve_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *sr
 
    radv_meta_bind_graphics_pipeline(cmd_buffer, pipeline);
 
-   radv_CmdDraw(radv_cmd_buffer_to_handle(cmd_buffer), 3, 1, 0, 0);
+   radv_CmdDraw(radv_cmd_buffer_to_handle(cmd_buffer), 3, num_layers, 0, 0);
 
    const VkRenderingEndInfoKHR end_info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_END_INFO_KHR,

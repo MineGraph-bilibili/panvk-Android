@@ -29,7 +29,7 @@ static uint32_t
 debug_vrt_max_reg_count(struct brw_compiler *compiler, int debug)
 {
    if (unlikely(debug)) {
-      return ROUND_DOWN_TO(XE3_MAX_GRF * 2 / compiler->threads_per_eu_min, 32);
+      return ROUND_DOWN_TO(XE3_MAX_GRF * 2 / intel_threads_per_eu_min, 32);
    }
    return -1;
 }
@@ -236,6 +236,14 @@ void brw_shader::calculate_payload_ranges(bool allow_spilling,
       payload_last_use_ip[0] = ip - 1;
 }
 
+/* Offsets of the boundaries between regions of the GRF file that
+ * cause the EU to limit its thread count to a decreasingly lower
+ * number on xe3 platforms.
+ *
+ * XXX - Update for xe3p when 512 GRF mode is enabled.
+ */
+static const unsigned xe3_grf_region_offsets[] = { 0, 96, 128, 160, 192, 256 };
+
 class brw_reg_alloc {
 public:
    brw_reg_alloc(brw_shader *fs):
@@ -275,20 +283,13 @@ public:
       spill_vgrf_ip_alloc = 0;
       spill_node_count = 0;
       debug_limit_registers =
-         compiler->threads_per_eu_min != (uint32_t)-1 &&
-         (compiler->threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
-          compiler->threads_per_eu_srchash == fs->prog_data->source_hash);
+         intel_threads_per_eu_min != (uint32_t)-1 &&
+         (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
+          intel_threads_per_eu_srchash == fs->prog_data->source_hash);
       if (unlikely(debug_limit_registers)) {
-         if (compiler->threads_per_eu_min < 4 ||
-             compiler->threads_per_eu_min > 10) {
-            fprintf(stderr, "INTEL_THREADS_PER_EU_MIN = %u is outside valid "
-                    "range [4, 10]. Ignoring\n", compiler->threads_per_eu_min);
-            debug_limit_registers = false;
-         } else {
             fprintf(stderr,
                     "INTEL_THREADS_PER_EU: min=%u for src_hash=0x%" PRIx64 "\n",
-                    compiler->threads_per_eu_min, fs->prog_data->source_hash);
-         }
+                    intel_threads_per_eu_min, fs->prog_data->source_hash);
       }
 
       /* Manually managed scratch space (e.g. NIR scratch) is not used for
@@ -306,6 +307,54 @@ public:
 
    bool assign_regs(bool allow_spilling, bool spill_all);
 
+   static unsigned
+   xe3_select_reg(unsigned n, BITSET_WORD *regs, void *data, bool optimistic)
+   {
+      brw_reg_alloc *alloc = (brw_reg_alloc *)data;
+
+      for (unsigned rgn = 0; rgn < ARRAY_SIZE(alloc->next_regs); rgn++) {
+         const unsigned rgn_size = xe3_grf_region_offsets[rgn + 1]
+                                   - xe3_grf_region_offsets[rgn];
+
+         for (unsigned i = 0; i < rgn_size; i++) {
+            /* Scan the region for free registers, either starting
+             * from the beginning (tight packing) or from the last
+             * allocated node depending on whether the node is
+             * trivially or optimistically colorable.
+             */
+            const unsigned reg = xe3_grf_region_offsets[rgn] +
+                                 (optimistic ? i : (alloc->next_regs[rgn] + i) % rgn_size);
+
+            /* Size of the node if the call is allocating a VGRF node
+             * so that we can avoid nodes that straddle multiple
+             * regions during trivial allocation, which would have
+             * reduced thread parallelism in comparison to using any
+             * other available node fully contained within the region.
+             */
+            const unsigned delta =
+               (n >= unsigned(alloc->first_vgrf_node) &&
+                n < unsigned(alloc->first_spill_node) ?
+                DIV_ROUND_UP(alloc->fs->alloc.sizes[n - alloc->first_vgrf_node],
+                             reg_unit(alloc->devinfo)) :
+                1);
+
+            /* Select register and increase next_regs[rgn] pointer if
+             * the register is available.
+             */
+            if (BITSET_TEST(regs, reg) &&
+                (optimistic || reg + delta <= xe3_grf_region_offsets[rgn + 1])) {
+               alloc->next_regs[rgn] = reg + delta - xe3_grf_region_offsets[rgn];
+               if (alloc->next_regs[rgn] >= rgn_size)
+                  alloc->next_regs[rgn] = 0;
+               return reg;
+            }
+         }
+      }
+
+      /* Normally unreachable, caller guarantees there are enough registers. */
+      return ~0u;
+   }
+
 private:
    void setup_live_interference(unsigned node, brw_range ip_range);
    void setup_inst_interference(const brw_inst *inst);
@@ -313,9 +362,11 @@ private:
    bool build_interference_graph(bool allow_spilling);
 
    brw_reg build_lane_offsets(const brw_builder &bld,
-                              uint32_t spill_offset, int ip);
+                              uint32_t spill_offset, int ip,
+                              bool *out_use_base_offset);
    brw_reg build_single_offset(const brw_builder &bld,
-                              uint32_t spill_offset, int ip);
+                               uint32_t spill_offset, int ip,
+                               bool *out_use_base_offset);
    brw_reg build_legacy_scratch_header(const brw_builder &bld,
                                        uint32_t spill_offset, int ip);
 
@@ -382,6 +433,8 @@ private:
 
    unsigned spill_scratch_base;
    std::vector<spill_scratch_assignment> spill_scratch;
+
+   unsigned next_regs[ARRAY_SIZE(xe3_grf_region_offsets) - 1];
 };
 
 namespace {
@@ -784,6 +837,9 @@ brw_reg_alloc::build_interference_graph(bool allow_spilling)
    g = ra_alloc_interference_graph(reg_set->regs, node_count);
    ralloc_steal(mem_ctx, g);
 
+   if (devinfo->ver >= 30)
+      ra_set_select_reg_callback(g, xe3_select_reg, this);
+
    /* Set up the payload nodes */
    for (int i = 0; i < payload_node_count; i++)
       ra_set_node_reg(g, first_payload_node + i, i);
@@ -819,8 +875,11 @@ brw_reg_alloc::build_interference_graph(bool allow_spilling)
 }
 
 brw_reg
-brw_reg_alloc::build_single_offset(const brw_builder &bld, uint32_t spill_offset, int ip)
+brw_reg_alloc::build_single_offset(const brw_builder &bld, uint32_t spill_offset, int ip,
+                                   bool *out_use_base_offset)
 {
+   *out_use_base_offset = false;
+
    brw_reg offset = retype(alloc_spill_reg(1, ip), BRW_TYPE_UD);
    brw_inst *inst = bld.MOV(offset, brw_imm_ud(spill_offset));
    _mesa_set_add(spill_insts, inst);
@@ -828,25 +887,35 @@ brw_reg_alloc::build_single_offset(const brw_builder &bld, uint32_t spill_offset
 }
 
 brw_reg
-brw_reg_alloc::build_lane_offsets(const brw_builder &bld, uint32_t spill_offset, int ip)
+brw_reg_alloc::build_lane_offsets(const brw_builder &bld, uint32_t spill_offset, int ip,
+                                  bool *out_use_base_offset)
 {
-   assert(bld.dispatch_width() <= 16 * reg_unit(bld.shader->devinfo));
+   const intel_device_info *devinfo = bld.shader->devinfo;
+   assert(bld.dispatch_width() <= 16 * reg_unit(devinfo));
+
+   *out_use_base_offset =
+      brw_lsc_supports_base_offset(devinfo) &&
+      brw_lsc_can_use_instruction_offset(LSC_ADDR_SURFTYPE_SS,
+                                         bld.shader->key->use_efficient_64bit,
+                                         4, spill_offset);
 
    const brw_builder ubld = bld.exec_all();
    const unsigned reg_count = ubld.dispatch_width() / 8;
 
    brw_reg offset = retype(alloc_spill_reg(reg_count, ip), BRW_TYPE_UD);
+   brw_reg offset_uw = retype(offset, BRW_TYPE_UW);
    brw_inst *inst;
 
    /* Build an offset per lane in SIMD8 */
-   inst = ubld.group(8, 0).MOV(retype(offset, BRW_TYPE_UW),
+   inst = ubld.group(8, 0).MOV(offset_uw,
                                brw_imm_uv(0x76543210));
    _mesa_set_add(spill_insts, inst);
 
-   if (spill_offset > 0 && spill_offset <= 0xffffu) {
+   if (spill_offset > 0 && spill_offset <= 0xffffu && !*out_use_base_offset &&
+       devinfo->ver < 35) {
       inst = ubld.group(8, 0).MAD(offset,
                                   brw_imm_uw(spill_offset),
-                                  retype(offset, BRW_TYPE_UW),
+                                  offset_uw,
                                   brw_imm_uw(4));
       _mesa_set_add(spill_insts, inst);
    } else {
@@ -855,7 +924,7 @@ brw_reg_alloc::build_lane_offsets(const brw_builder &bld, uint32_t spill_offset,
       _mesa_set_add(spill_insts, inst);
 
       /* Add the base offset */
-      if (spill_offset) {
+      if (spill_offset && !*out_use_base_offset) {
          inst = ubld.group(8, 0).ADD(offset, offset, brw_imm_ud(spill_offset));
          _mesa_set_add(spill_insts, inst);
       }
@@ -931,10 +1000,11 @@ brw_reg_alloc::emit_unspill(const brw_builder &bld,
             bld.has_writemask_all();
          const brw_builder ubld = use_transpose ? bld.uniform() : bld;
          brw_reg offset;
+         bool use_base_offset = false;
          if (use_transpose) {
-            offset = build_single_offset(ubld, slot.offset, ip);
+            offset = build_single_offset(ubld, slot.offset, ip, &use_base_offset);
          } else {
-            offset = build_lane_offsets(ubld, slot.offset, ip);
+            offset = build_lane_offsets(ubld, slot.offset, ip, &use_base_offset);
          }
 
          const bool exec_all = use_transpose || bld.has_writemask_all();
@@ -945,6 +1015,7 @@ brw_reg_alloc::emit_unspill(const brw_builder &bld,
 
          unspill_inst->offset = slot.offset;
          unspill_inst->logical_offset = slot.logical_offset;
+         unspill_inst->use_base_offset = use_base_offset;
          unspill_inst->use_transpose = use_transpose;
          unspill_inst->size_written =
             brw_lsc_msg_dest_len(devinfo, LSC_DATA_SIZE_D32, bld.dispatch_width()) * REG_SIZE;
@@ -1006,7 +1077,8 @@ brw_reg_alloc::emit_spill(const brw_builder &bld,
       ++stats->spill_count;
 
       if (devinfo->verx10 >= 125) {
-         brw_reg offset = build_lane_offsets(bld, slot.offset, ip);
+         bool use_base_offset = false;
+         brw_reg offset = build_lane_offsets(bld, slot.offset, ip, &use_base_offset);
 
          brw_scratch_inst *spill_inst = bld.SPILL();
          spill_inst->dst = bld.null_reg_f();
@@ -1016,6 +1088,7 @@ brw_reg_alloc::emit_spill(const brw_builder &bld,
 
          spill_inst->offset = slot.offset;
          spill_inst->logical_offset = slot.logical_offset;
+         spill_inst->use_base_offset = use_base_offset;
          spill_inst->use_transpose = false;
 
          _mesa_set_add(spill_insts, spill_inst);
@@ -1267,6 +1340,15 @@ brw_reg_alloc::alloc_spill_scratch(unsigned spill_reg)
    return { offset, logical_offset };
 }
 
+/* Bitmask of \p count registers of a VGRF starting at register \p first. */
+static inline uint64_t
+reg_range(unsigned first, unsigned count)
+{
+   assert(count > 0);
+   assert(first + count <= 64);
+   return (~(uint64_t)0 >> (64 - count)) << first;
+}
+
 void
 brw_reg_alloc::spill_reg(unsigned spill_reg)
 {
@@ -1282,6 +1364,18 @@ brw_reg_alloc::spill_reg(unsigned spill_reg)
    ra_set_node_spill_cost(g, first_vgrf_node + spill_reg, 0);
    ra_reset_node_interference(g, first_vgrf_node + spill_reg);
 
+   /* Track which registers of the spilled VGRF may have been defined before
+    * the current write, so that only their first definition can skip filling
+    * the destination.  At block boundaries use reaching definitions rather
+    * than liveness: Inactive channels from a divergent path or a prior loop
+    * iteration may need to be preserved even though the value is not live-in.
+    * SHADER_OPCODE_UNDEF does not clear this state for the same reason.
+    */
+   const unsigned vgrf_size = fs->alloc.sizes[spill_reg];
+   uint64_t defined_regs = 0;
+   assert(vgrf_size <= 8 * sizeof(defined_regs));
+   const struct bblock_t *cur_block = NULL;
+
    /* Generate spill/unspill instructions for the objects being
     * spilled.  Right now, we spill or unspill the whole thing to a
     * virtual grf of the same size.  For most instructions, though, we
@@ -1292,6 +1386,19 @@ brw_reg_alloc::spill_reg(unsigned spill_reg)
       const brw_builder ibld = brw_builder(inst);
       brw_exec_node *before = inst->prev;
       brw_exec_node *after = inst->next;
+
+      if (block != cur_block) {
+         cur_block = block;
+
+         const BITSET_WORD *defin = live.block_data[block->num].defin;
+         const unsigned first_var = live.var_from_vgrf[spill_reg];
+
+         defined_regs = 0;
+         for (unsigned i = 0; i < vgrf_size; i++) {
+            if (BITSET_TEST(defin, first_var + i))
+               defined_regs |= (uint64_t)1 << i;
+         }
+      }
 
       for (unsigned int i = 0; i < inst->sources; i++) {
 	 if (inst->src[i].file == VGRF &&
@@ -1343,6 +1450,9 @@ brw_reg_alloc::spill_reg(unsigned spill_reg)
          /* Align the spilling offset the physical register size */
          const unsigned aligned_offset =
             ROUND_DOWN_TO(inst->dst.offset, reg_unit(devinfo) * REG_SIZE);
+         /* Taken before inst->dst.offset is adjusted below. */
+         const unsigned dst_first_reg = inst->dst.offset / REG_SIZE;
+         assert(dst_first_reg < vgrf_size);
          const spill_scratch_slot subset_slot =
             offset_spill_slot(spill_slot, aligned_offset);
          brw_reg spill_src = alloc_spill_reg(count, ip);
@@ -1384,14 +1494,32 @@ brw_reg_alloc::spill_reg(unsigned spill_reg)
           * instruction had force_writemask_all set and is not a partial
           * write, there should be no need for the unspill since the
           * instruction will be overwriting the whole destination in any case.
+          *
+          * A masked instruction whose spill cannot be per-channel also needs
+          * to preserve inactive channels whenever a definition can reach it.
+          *
+          * When no definition can reach the write, the scratch contents are
+          * undefined and the unspill can be skipped.
 	  */
-         if (inst->is_partial_write(reg_unit(devinfo) * REG_SIZE) ||
-             (!inst->force_writemask_all && !per_channel))
+         const unsigned first_reg = aligned_offset / REG_SIZE;
+         assert(first_reg < vgrf_size);
+         const bool dst_defined =
+            (defined_regs & reg_range(first_reg,
+                                      MIN2((unsigned)count,
+                                           vgrf_size - first_reg))) != 0;
+
+         if (dst_defined &&
+             (inst->is_partial_write(reg_unit(devinfo) * REG_SIZE) ||
+              (!inst->force_writemask_all && !per_channel)))
             emit_unspill(ubld, &fs->shader_stats, spill_src, subset_slot,
                          regs_written(inst), ip);
 
          emit_spill(ubld.after(inst), &fs->shader_stats, spill_src,
                     subset_slot, regs_written(inst), ip);
+
+         defined_regs |= reg_range(dst_first_reg,
+                                   MIN2(regs_written(inst),
+                                        vgrf_size - dst_first_reg));
       }
 
       for (brw_inst *inst = (brw_inst *)before->next;
@@ -1428,6 +1556,8 @@ brw_reg_alloc::assign_regs(bool allow_spilling, bool spill_all)
             continue;
          }
       }
+
+      memset(next_regs, 0, sizeof(next_regs));
 
       if (ra_allocate(g))
          break;

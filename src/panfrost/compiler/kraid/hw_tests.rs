@@ -6,6 +6,8 @@ use std::{io, iter, slice};
 
 use crate::builder::*;
 use crate::data_type::NumericType;
+use crate::debug::{DEBUG, DebugFlags};
+use crate::flow::FlowWaitBit;
 use crate::foldable::{FoldData, Foldable};
 use crate::ir::*;
 use crate::model::{Model, model_for_gpu_id};
@@ -23,7 +25,7 @@ const DEVICE_DEBUG: bool = false;
 
 /// Even when the test does not use the FAU directly, it is still needed
 /// to load CB0 args.
-const FAU_ONLY_ARGS: &'static [u32] = &[0u32; 4];
+const FAU_ONLY_ARGS: &[u32] = &[0u32; 4];
 
 struct RunSingleton {
     model: Box<dyn Model + Sync + Send>,
@@ -135,8 +137,9 @@ impl RunSingleton {
         let runner = TestRunner::new(DEVICE_DEBUG)?;
 
         let gpu_id = runner.gpu_id();
-        let model = model_for_gpu_id(gpu_id)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let gpu_variant = runner.gpu_variant();
+        let model =
+            model_for_gpu_id(gpu_id, gpu_variant).map_err(io::Error::other)?;
 
         Ok(RunSingleton { model, runner })
     }
@@ -151,18 +154,15 @@ impl RunSingleton {
         self.runner.run(info)
     }
 
-    fn execute(&self, info: InvocationInfo) {
-        self.try_execute(info).expect("Error on job submission");
+    fn execute(&self, info: InvocationArgs) {
+        self.try_execute(info.0).expect("Error on job submission");
     }
 }
 
 fn transmute_slice_to_u8<T: Sized>(data: &[T]) -> &[u8] {
     // SAFETY: we are just transmuting a [u32] to [u8] of same byte-length
     unsafe {
-        slice::from_raw_parts(
-            data.as_ptr() as *mut u8,
-            data.len() * size_of::<T>(),
-        )
+        slice::from_raw_parts(data.as_ptr() as *mut u8, size_of_val(data))
     }
 }
 
@@ -174,7 +174,7 @@ fn transmute_mut_slice_to_u8<T: Sized>(data: &mut [T]) -> &mut [u8] {
     unsafe {
         slice::from_raw_parts_mut(
             data.as_mut_ptr() as *mut u8,
-            data.len() * size_of::<T>(),
+            size_of_val(data),
         )
     }
 }
@@ -318,36 +318,39 @@ impl<'a> TestShaderBuilder<'a> {
         let mut info = ShaderInfo::default();
 
         // ABI: struct hw_runner_shader_args
-        let data_base_lo = FAURef::user_i32(0);
-        let data_base_hi = FAURef::user_i32(1);
+        let data_addr_base = FAURef::user_i64(0);
         let data_stride = FAURef::user_i32(2);
 
         let invoc_id: SSAValue = b.alloc_ssa(32);
         let global_id_reg = model.preload_reg(PreloadReg::GlobalId0).unwrap();
-        info.register_preload |= 1 << global_id_reg.idx;
+        info.add_preload(&global_id_reg);
         b.push_op(OpRegIn {
             dst: invoc_id.into(),
             dst_type: DataType::I32,
             reg: global_id_reg,
+            preload: Some(PreloadInfo {
+                set: PreloadRegSet::from_array([PreloadReg::GlobalId0]),
+                comp: 0,
+            }),
         });
 
-        let data_offset = b.alloc_ssa(32);
+        let data_offset = b.alloc_ref(64);
         b.push_op(OpIMul {
-            dst: data_offset.into(),
-            dst_type: DataType::U32,
+            dst: data_offset.clone().into(),
+            dst_type: DataType::U64,
             saturate: false,
-            srcs: [data_stride.into(), invoc_id.into()],
+            srcs: [
+                Src::from(data_stride).swizzle(Swizzle::widen_u32(0)),
+                Src::from(invoc_id).swizzle(Swizzle::widen_u32(0)),
+            ],
         });
 
-        // Just add the lower 32-bits, copy the higher bits and
-        // hope we don't test 4GiB of data.
         let data_addr = b.alloc_ref(64);
-        b.copy_i32_to(data_addr[1].into(), data_base_hi.into());
         b.push_op(OpIAdd {
-            dst: data_addr[0].into(),
-            dst_type: DataType::U32,
+            dst: data_addr.clone().into(),
+            dst_type: DataType::U64,
             saturate: false,
-            srcs: [data_base_lo.into(), data_offset.into()],
+            srcs: [data_addr_base.into(), data_offset.into()],
         });
 
         let start_block = BasicBlock {
@@ -374,6 +377,7 @@ impl<'a> TestShaderBuilder<'a> {
         self.push_op(OpLoad {
             dst: dst.clone().into(),
             dst_type: DataType::get(1, NumericType::Integer, bits),
+            is_tls: false,
             access: MemAccess::None,
             addr: self.data_addr.clone().into(),
             offset: offset.try_into().unwrap(),
@@ -387,6 +391,8 @@ impl<'a> TestShaderBuilder<'a> {
 
         self.push_op(OpStore {
             src_type: DataType::get(1, NumericType::Integer, data.bytes() * 8),
+            is_tls: false,
+            is_psiz: false,
             access: MemAccess::None,
             data: data.into(),
             addr: self.data_addr.clone().into(),
@@ -419,6 +425,7 @@ impl<'a> TestShaderBuilder<'a> {
             phi_alloc: Default::default(),
             blocks: cfg.as_cfg(false),
             info,
+            constant_pool: Default::default(),
         };
         s.validate();
 
@@ -466,43 +473,213 @@ impl AllocSSA for TestShaderBuilder<'_> {
     }
 }
 
+/// Similar to TestShaderBuilder, but useful for creating "raw" shaders, without
+/// passing through the compiler, useful if you want to test the hardware rather
+/// than the software.  Since the compiler no longer aids us, we need to specify
+/// an ABI and do more things manually, for example, load/stores of test data
+/// need a 64-bit register to always be alive, placement of this can be
+/// configured.  You must also always specify legal non-virtual instructions,
+/// and remember to set the correct messages and wait slots.
+pub struct RawTestShaderBuilder<'a> {
+    model: &'a dyn Model,
+    b: InstrBuilder<'a>,
+    info: ShaderInfo,
+    start_block: BasicBlock,
+    data_addr: RegRef,
+    max_data_offset: u16,
+}
+
+impl<'a> RawTestShaderBuilder<'a> {
+    pub fn new(model: &'a dyn Model) -> Self {
+        let mut label_alloc = LabelAllocator::default();
+        let mut b = InstrBuilder::new(model);
+        let mut info = ShaderInfo::default();
+
+        // ABI: struct hw_runner_shader_args
+        let data_addr_base = FAURef::user_i64(0);
+        let data_stride = FAURef::user_i32(2);
+
+        let invoc_id =
+            model.preload_reg(PreloadReg::GlobalId0).unwrap().word(0);
+        info.register_preload |= 1 << invoc_id.idx;
+
+        // Those don't intersect, we can use r0 for both
+        let data_offset = RegRef::new(0, RegRange::Regs(2));
+        let data_addr = RegRef::new(0, RegRange::Regs(2));
+
+        b.push_op(OpIMul {
+            dst: data_offset.into(),
+            dst_type: DataType::U64,
+            saturate: false,
+            srcs: [
+                Src::from(data_stride).swizzle(Swizzle::widen_u32(0)),
+                Src::from(invoc_id).swizzle(Swizzle::widen_u32(0)),
+            ],
+        });
+
+        b.push_op(OpIAdd {
+            dst: data_addr.into(),
+            dst_type: DataType::U64,
+            saturate: false,
+            srcs: [data_addr_base.into(), data_offset.into()],
+        });
+
+        let start_block = BasicBlock {
+            label: label_alloc.alloc(),
+            instrs: b.into_vec(),
+        };
+
+        // Some high defaults, shaders will override this if necessary
+        info.registers_used = 64;
+
+        RawTestShaderBuilder {
+            model,
+            b: InstrBuilder::new(model),
+            info,
+            start_block,
+            data_addr,
+            max_data_offset: 0,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn ld_test_data_to(&mut self, dst: Dst, offset: u16, bits: u8) {
+        self.max_data_offset = self.max_data_offset.max(offset);
+
+        let instr = self.push_op(OpLoad {
+            dst,
+            dst_type: DataType::get(1, NumericType::Integer, bits),
+            is_tls: false,
+            access: MemAccess::None,
+            addr: self.data_addr.into(),
+            offset: offset.try_into().unwrap(),
+        });
+        instr.flow.set_msg_slot_idx(0);
+        instr.flow.set_wait_bit(FlowWaitBit::Slot0);
+    }
+
+    pub fn st_test_data(&mut self, offset: u16, data: RegRef) {
+        self.max_data_offset = self.max_data_offset.max(offset);
+
+        let instr = self.push_op(OpStore {
+            src_type: DataType::get(1, NumericType::Integer, data.bytes() * 8),
+            is_tls: false,
+            is_psiz: false,
+            access: MemAccess::None,
+            data: data.into(),
+            addr: self.data_addr.into(),
+            offset: offset.try_into().unwrap(),
+        });
+        instr.flow.set_msg_slot_idx(0);
+        instr.flow.set_wait_bit(FlowWaitBit::Slot0);
+    }
+
+    fn compile(self) -> CompiledTestCase {
+        let Self {
+            model,
+            mut b,
+            info,
+            mut start_block,
+            max_data_offset,
+            ..
+        } = self;
+
+        let exit = b.push_op(OpNop {});
+        exit.flow.set_end_shader();
+
+        start_block.instrs.extend(b.into_mapped());
+        let mut cfg: CFGBuilder<Label, BasicBlock, FxBuildHasher> =
+            CFGBuilder::new();
+        cfg.add_node(start_block.label, start_block);
+
+        let s = Shader {
+            model,
+            ssa_alloc: Default::default(),
+            phi_alloc: Default::default(),
+            blocks: cfg.as_cfg(false),
+            info,
+            constant_pool: Default::default(),
+        };
+
+        if DEBUG.contains(DebugFlags::PRINT) {
+            eprintln!("Kraid raw shader before encoding:\n{s}");
+        }
+
+        let bin = model.encode_shader(&s);
+
+        CompiledTestCase {
+            code: bin,
+            max_data_offset,
+            // ABI: we always load the CB0 args at offset 0 for now
+            fau_args_offset: 0,
+            info: s.info,
+        }
+    }
+}
+
+impl Builder for RawTestShaderBuilder<'_> {
+    fn arch(&self) -> u8 {
+        self.b.arch()
+    }
+
+    fn model(&self) -> &dyn Model {
+        self.b.model()
+    }
+
+    fn push_instr(&mut self, instr: Instr) -> &mut Instr {
+        self.b.push_instr(instr)
+    }
+}
+
+/// Small helper struct around InvocationInfo to support builder arguments
+struct InvocationArgs<'a>(InvocationInfo<'a>);
+
+impl<'a> InvocationArgs<'a> {
+    #[allow(dead_code)]
+    pub fn with_fau(mut self, fau: &'a [u32]) -> Self {
+        self.0.fau = fau;
+        self
+    }
+
+    pub fn with_buffers(mut self, buffers: &'a mut [&'a mut [u8]]) -> Self {
+        self.0.buffers = buffers;
+        self
+    }
+}
+
 struct CompiledTestCase {
     code: Vec<u32>,
     info: ShaderInfo,
+    #[allow(dead_code)]
     max_data_offset: u16,
     fau_args_offset: usize,
 }
 
 impl CompiledTestCase {
-    fn with_args_raw<'a>(
+    fn with_data_raw<'a>(
         &'a self,
-        fau: &'a [u32],
         data: &'a mut [u8],
         data_stride: u32,
         invocations: u32,
-    ) -> InvocationInfo<'a> {
-        // We need preloaded registers support to distinguish between invocations
-        InvocationInfo {
+    ) -> InvocationArgs<'a> {
+        InvocationArgs(InvocationInfo {
             code: transmute_slice_to_u8(&self.code),
-            fau,
+            fau: FAU_ONLY_ARGS,
             fau_args_offset: self.fau_args_offset,
             data,
             data_stride,
+            buffers: &mut [],
             register_preload: self.info.register_preload,
             register_count: self.info.registers_used,
             invocations,
-        }
+        })
     }
 
-    fn with_args<'a, T>(
-        &'a self,
-        fau: &'a [u32],
-        data: &'a mut [T],
-    ) -> InvocationInfo<'a> {
+    fn with_data<'a, T>(&'a self, data: &'a mut [T]) -> InvocationArgs<'a> {
         let invocations = data.len().try_into().expect("Too many invocations");
         let data_stride = size_of::<T>().try_into().unwrap();
         let data_raw = transmute_mut_slice_to_u8(data);
-        self.with_args_raw(fau, data_raw, data_stride, invocations)
+        self.with_data_raw(data_raw, data_stride, invocations)
     }
 }
 
@@ -512,7 +689,7 @@ fn test_sanity() {
     let b = TestShaderBuilder::new(&*run.model);
     let bin = b.compile();
     let mut data = [0u32; WARP_SIZE as usize];
-    let case = bin.with_args(FAU_ONLY_ARGS, &mut data);
+    let case = bin.with_data(&mut data);
     run.execute(case);
 }
 
@@ -521,12 +698,32 @@ fn test_copy_single() {
     let run = RunSingleton::get();
     let mut b = TestShaderBuilder::new(&*run.model);
     let data = b.ld_test_data(0, 32);
+    b.st_test_data(4, data);
+
+    let bin = b.compile();
+    // First, do a small copy (32-bits)
+    let mut data = [42, 67, 31, 41, 0, 0, 0, 0];
+    let case = bin.with_data_raw(&mut data, 0, WARP_SIZE);
+
+    run.execute(case);
+    assert_eq!(&data[0..4], &data[4..8]);
+}
+
+#[test]
+fn test_copy_8bit() {
+    let run = RunSingleton::get();
+    let mut b = TestShaderBuilder::new(&*run.model);
+    let w = b.ld_test_data(3, 8);
+    let z = b.ld_test_data(2, 8);
+    let y = b.ld_test_data(1, 8);
+    let x = b.ld_test_data(0, 8);
+    let data = b.mkvec_v4i8(x.into(), y.into(), z.into(), w.into());
     b.st_test_data(4, data.into());
 
     let bin = b.compile();
     // First, do a small copy (32-bits)
     let mut data = [42, 67, 31, 41, 0, 0, 0, 0];
-    let case = bin.with_args_raw(FAU_ONLY_ARGS, &mut data, 0, WARP_SIZE);
+    let case = bin.with_data_raw(&mut data, 0, WARP_SIZE);
 
     run.execute(case);
     assert_eq!(&data[0..4], &data[4..8]);
@@ -537,7 +734,7 @@ fn test_copy_warp() {
     let run = RunSingleton::get();
     let mut b = TestShaderBuilder::new(&*run.model);
     let data = b.ld_test_data(0, 32);
-    b.st_test_data(4 * WARP_SIZE as u16, data.into());
+    b.st_test_data(4 * WARP_SIZE as u16, data);
 
     let bin = b.compile();
 
@@ -546,7 +743,7 @@ fn test_copy_warp() {
     for i in 0..READ_SIZE {
         data[i] = (i as u8) * 4 + 1;
     }
-    let case = bin.with_args_raw(FAU_ONLY_ARGS, &mut data, 4, WARP_SIZE);
+    let case = bin.with_data_raw(&mut data, 4, WARP_SIZE);
 
     run.execute(case);
     assert_eq!(&data[..READ_SIZE], &data[READ_SIZE..]);
@@ -558,7 +755,7 @@ fn test_copy_warp() {
         data[i] = (i as u8) * 4 + 1;
     }
     data[READ_SIZE..].fill(0);
-    let case = bin.with_args_raw(FAU_ONLY_ARGS, &mut data, 4, WARP_SIZE / 2);
+    let case = bin.with_data_raw(&mut data, 4, WARP_SIZE / 2);
 
     run.execute(case);
     assert_eq!(
@@ -574,7 +771,7 @@ fn test_copy_large() {
     let run = RunSingleton::get();
     let mut b = TestShaderBuilder::new(&*run.model);
     let data = b.ld_test_data(0, 32);
-    b.st_test_data(4 * 2 * WARP_SIZE as u16, data.into());
+    b.st_test_data(4 * 2 * WARP_SIZE as u16, data);
 
     let bin = b.compile();
 
@@ -583,10 +780,86 @@ fn test_copy_large() {
     for i in 0..READ_SIZE {
         data[i] = (i as u8) * 4 + 1;
     }
-    let case = bin.with_args_raw(FAU_ONLY_ARGS, &mut data, 4, 2 * WARP_SIZE);
+    let case = bin.with_data_raw(&mut data, 4, 2 * WARP_SIZE);
 
     run.execute(case);
     assert_eq!(&data[..READ_SIZE], &data[READ_SIZE..]);
+}
+
+/// Test all lanes for LD_PKA.8/16/32
+/// Uncovers LD_PKA.b1 hardware bug
+#[test]
+fn test_ld_pka() {
+    let run = RunSingleton::get();
+
+    const PKA_VAL: [u8; 4] = [0x89, 0xAB, 0xCD, 0xEF];
+
+    let mut failures = Vec::new();
+    for range in [
+        RegRange::Byte0,
+        RegRange::Byte1,
+        RegRange::Byte2,
+        RegRange::Byte3,
+        RegRange::Half0,
+        RegRange::Half1,
+        RegRange::Regs(1),
+    ] {
+        let bin = {
+            let mut b = RawTestShaderBuilder::new(&*run.model);
+            let dst = RegRef::new(2, RegRange::Regs(1));
+            let sub_dst = RegRef::new(2, range);
+
+            b.push_op(OpMov {
+                dst: dst.into(),
+                dst_type: DataType::I32,
+                src: SrcRef::Zero.into(),
+            });
+
+            let instr = b.push_op(OpLdPka {
+                dst: sub_dst.into(),
+                dst_type: DataType::i(range.bytes() * 8),
+                access: MemAccess::None,
+                offset: 0u32.into(),
+                handle: 0u32.into(),
+            });
+            instr.flow.set_msg_slot_idx(0);
+            instr.flow.set_wait_bit(FlowWaitBit::Slot0);
+
+            b.st_test_data(0, dst);
+            b.compile()
+        };
+
+        let mut data = [0u32; 1];
+        {
+            let mut buf = PKA_VAL;
+            let mut buffers: [&mut [u8]; 1] = [&mut buf];
+            let case = bin.with_data(&mut data).with_buffers(&mut buffers);
+            run.execute(case);
+        }
+
+        let off = usize::from(range.byte_offset());
+        let len = usize::from(range.bytes());
+        let mut expected = [0u8; 4];
+        expected[off..(off + len)].copy_from_slice(&PKA_VAL[..len]);
+        let got = data[0].to_le_bytes();
+
+        let lane = DstLanes::from(range);
+        println!(
+            "lane {lane} expected {expected:02x?} got {got:02x?}: {}",
+            if got != expected { "FAIL" } else { "PASS" }
+        );
+        if got != expected {
+            failures.push(lane);
+        }
+    }
+
+    // Expectations:
+    // - v9-v15 has a hardware bug where .b1 is treated as .b0, and .b3 as .b2
+    let expected = match run.model.arch() {
+        9..=15 => failures == vec![DstLanes::B1, DstLanes::B3],
+        _ => failures.is_empty(),
+    };
+    assert!(expected, "LD_PKA assumptions wrong for lanes: {failures:?}");
 }
 
 fn parse_folded(folded: &mut [u64], words: &[u32], types: DataTypeIter) {
@@ -710,8 +983,8 @@ pub fn test_foldable_op_with(
     }
     let src_words = usize::from(offset_words);
 
-    let mut fold_src = vec![0u64; op.srcs().len() as usize];
-    let mut fold_dst = vec![0u64; op.dsts().len() as usize];
+    let mut fold_src = vec![0u64; op.srcs().len()];
+    let mut fold_dst = vec![0u64; op.dsts().len()];
     for (dst, dst_type) in op.dsts_types_mut() {
         let write_bits = dst_type.total_bits();
         dst.dst_ref = b.alloc_ref(write_bits.into()).into();
@@ -758,8 +1031,7 @@ pub fn test_foldable_op_with(
     assert!(data.len() == invocations * (src_words + dst_words));
 
     let data_bytes = transmute_mut_slice_to_u8(&mut data);
-    let case = bin.with_args_raw(
-        FAU_ONLY_ARGS,
+    let case = bin.with_data_raw(
         data_bytes,
         4 * total_words as u32,
         invocations.try_into().unwrap(),
@@ -817,7 +1089,7 @@ fn test_op_bitrev() {
 
 #[test]
 fn test_op_clz() {
-    const DATA_TYPES: &'static [DataType] =
+    const DATA_TYPES: &[DataType] =
         &[DataType::U32, DataType::V2U16, DataType::V4U8];
 
     // The .mask modifier only outputs all-bits if the input value is 0
@@ -860,7 +1132,7 @@ fn test_op_clz() {
 
 #[test]
 fn test_op_csel() {
-    const DATA_TYPES: &'static [DataType] = &[
+    const DATA_TYPES: &[DataType] = &[
         DataType::S32,
         DataType::U32,
         DataType::F32,
@@ -869,7 +1141,7 @@ fn test_op_csel() {
         DataType::V2F16,
     ];
 
-    const CMP_OPS: &'static [CmpOp] = &[
+    const CMP_OPS: &[CmpOp] = &[
         CmpOp::Eq,
         CmpOp::Gt,
         CmpOp::Ge,
@@ -931,14 +1203,14 @@ fn test_op_f16_to_f32() {
 
 #[test]
 fn test_op_f32_to_f16() {
-    const ROUND_MODES: &'static [FRound] = &[
+    const ROUND_MODES: &[FRound] = &[
         FRound::NearestEven,
         FRound::Up,
         FRound::Down,
         FRound::TowardsZero,
     ];
 
-    const CLAMP_MODES: &'static [FClamp] = &[
+    const CLAMP_MODES: &[FClamp] = &[
         FClamp::None,
         FClamp::ZeroToInf,
         FClamp::NegOneToOne,
@@ -959,9 +1231,9 @@ fn test_op_f32_to_f16() {
 
 #[test]
 fn test_op_f32_to_i32() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::S32, DataType::U32];
+    const DATA_TYPES: &[DataType] = &[DataType::S32, DataType::U32];
 
-    const ROUND_MODES: &'static [FRound] = &[
+    const ROUND_MODES: &[FRound] = &[
         FRound::NearestEven,
         FRound::Up,
         FRound::Down,
@@ -983,16 +1255,16 @@ fn test_op_f32_to_i32() {
 
 #[test]
 fn test_op_fadd() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::V2F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
-    const ROUND_MODES: &'static [FRound] = &[
+    const ROUND_MODES: &[FRound] = &[
         FRound::NearestEven,
         FRound::Up,
         FRound::Down,
         FRound::TowardsZero,
     ];
 
-    const CLAMP_MODES: &'static [FClamp] = &[
+    const CLAMP_MODES: &[FClamp] = &[
         FClamp::None,
         FClamp::ZeroToInf,
         FClamp::NegOneToOne,
@@ -1019,14 +1291,14 @@ fn test_op_fadd() {
 
 #[test]
 fn test_op_fadd_lscale() {
-    const ROUND_MODES: &'static [FRound] = &[
+    const ROUND_MODES: &[FRound] = &[
         FRound::NearestEven,
         FRound::Up,
         FRound::Down,
         FRound::TowardsZero,
     ];
 
-    const CLAMP_MODES: &'static [FClamp] = &[
+    const CLAMP_MODES: &[FClamp] = &[
         FClamp::None,
         FClamp::ZeroToInf,
         FClamp::NegOneToOne,
@@ -1050,9 +1322,9 @@ fn test_op_fadd_lscale() {
 
 #[test]
 fn test_op_fcmp() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::V2F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
-    const CMP_OPS: &'static [CmpOp] = &[
+    const CMP_OPS: &[CmpOp] = &[
         CmpOp::Eq,
         CmpOp::Gt,
         CmpOp::Ge,
@@ -1063,10 +1335,10 @@ fn test_op_fcmp() {
         CmpOp::Total,
     ];
 
-    const ACCUM_OPS: &'static [CmpAccumOp] =
+    const ACCUM_OPS: &[CmpAccumOp] =
         &[CmpAccumOp::None, CmpAccumOp::And, CmpAccumOp::Or];
 
-    const RES_TYPES: &'static [CmpResultType] =
+    const RES_TYPES: &[CmpResultType] =
         &[CmpResultType::I1, CmpResultType::F1, CmpResultType::M1];
 
     let mut a = Acorn::new();
@@ -1098,9 +1370,9 @@ fn test_op_fcmp() {
 
 #[test]
 fn test_op_flush() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::V2F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
-    const NAN_MODES: &'static [FlushNanMode] = &[
+    const NAN_MODES: &[FlushNanMode] = &[
         FlushNanMode::None,
         FlushNanMode::FlushNan,
         FlushNanMode::QuietNan,
@@ -1127,16 +1399,16 @@ fn test_op_flush() {
 
 #[test]
 fn test_op_fma() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::V2F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
-    const ROUND_MODES: &'static [FRound] = &[
+    const ROUND_MODES: &[FRound] = &[
         FRound::NearestEven,
         FRound::Up,
         FRound::Down,
         FRound::TowardsZero,
     ];
 
-    const CLAMP_MODES: &'static [FClamp] = &[
+    const CLAMP_MODES: &[FClamp] = &[
         FClamp::None,
         FClamp::ZeroToInf,
         FClamp::NegOneToOne,
@@ -1162,9 +1434,9 @@ fn test_op_fma() {
 
 #[test]
 fn test_op_fmin() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::V2F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
-    const CLAMP_MODES: &'static [FClamp] = &[
+    const CLAMP_MODES: &[FClamp] = &[
         FClamp::None,
         FClamp::ZeroToInf,
         FClamp::NegOneToOne,
@@ -1189,7 +1461,7 @@ fn test_op_fmin() {
 
 #[test]
 fn test_op_fmul() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::V2F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
     for &dst_type in DATA_TYPES {
         let op = OpFMul {
@@ -1203,9 +1475,9 @@ fn test_op_fmul() {
 
 #[test]
 fn test_op_fmax() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::V2F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
-    const CLAMP_MODES: &'static [FClamp] = &[
+    const CLAMP_MODES: &[FClamp] = &[
         FClamp::None,
         FClamp::ZeroToInf,
         FClamp::NegOneToOne,
@@ -1230,7 +1502,7 @@ fn test_op_fmax() {
 
 #[test]
 fn test_op_frcp() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::F16];
 
     for &dst_type in DATA_TYPES {
         let op = OpFRcp {
@@ -1245,7 +1517,7 @@ fn test_op_frcp() {
 
 #[test]
 fn test_op_fround() {
-    const ROUND_MODES: &'static [FRound] = &[
+    const ROUND_MODES: &[FRound] = &[
         FRound::NearestEven,
         FRound::Up,
         FRound::Down,
@@ -1265,7 +1537,7 @@ fn test_op_fround() {
 
 #[test]
 fn test_op_frsq() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::F32, DataType::F16];
+    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::F16];
 
     for &dst_type in DATA_TYPES {
         let op = OpFRsq {
@@ -1280,9 +1552,9 @@ fn test_op_frsq() {
 
 #[test]
 fn test_op_iabs() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::V2S16, DataType::S32];
+    const DATA_TYPES: &[DataType] = &[DataType::V2S16, DataType::S32];
 
-    const WIDENS: &'static [AsmSwizzleWiden] = &[
+    const WIDENS: &[AsmSwizzleWiden] = &[
         AsmSwizzleWiden::None,
         AsmSwizzleWiden::H0,
         AsmSwizzleWiden::B0,
@@ -1307,7 +1579,7 @@ fn test_op_iabs() {
 
 #[test]
 fn test_op_iadd() {
-    const DATA_TYPES: &'static [DataType] = &[
+    const DATA_TYPES: &[DataType] = &[
         DataType::V2S16,
         DataType::V2U16,
         DataType::S32,
@@ -1316,7 +1588,7 @@ fn test_op_iadd() {
         DataType::U64,
     ];
 
-    const WIDENS: &'static [AsmSwizzleWiden] = &[
+    const WIDENS: &[AsmSwizzleWiden] = &[
         AsmSwizzleWiden::None,
         AsmSwizzleWiden::B00,
         AsmSwizzleWiden::B02,
@@ -1357,14 +1629,14 @@ fn test_op_iadd() {
 
 #[test]
 fn test_op_icmp() {
-    const DATA_TYPES: &'static [DataType] = &[
+    const DATA_TYPES: &[DataType] = &[
         DataType::V2S16,
         DataType::V2U16,
         DataType::S32,
         DataType::U32,
     ];
 
-    const CMP_OPS: &'static [CmpOp] = &[
+    const CMP_OPS: &[CmpOp] = &[
         CmpOp::Eq,
         CmpOp::Gt,
         CmpOp::Ge,
@@ -1373,10 +1645,10 @@ fn test_op_icmp() {
         CmpOp::Le,
     ];
 
-    const ACCUM_OPS: &'static [CmpAccumOp] =
+    const ACCUM_OPS: &[CmpAccumOp] =
         &[CmpAccumOp::None, CmpAccumOp::And, CmpAccumOp::Or];
 
-    const RES_TYPES: &'static [CmpResultType] =
+    const RES_TYPES: &[CmpResultType] =
         &[CmpResultType::I1, CmpResultType::F1, CmpResultType::M1];
 
     let mut a = Acorn::new();
@@ -1408,9 +1680,9 @@ fn test_op_icmp() {
 
 #[test]
 fn test_op_icmp_multi() {
-    const DATA_TYPES: &'static [DataType] = &[DataType::S32, DataType::U32];
+    const DATA_TYPES: &[DataType] = &[DataType::S32, DataType::U32];
 
-    const CMP_OPS: &'static [CmpOp] = &[
+    const CMP_OPS: &[CmpOp] = &[
         CmpOp::Eq,
         CmpOp::Gt,
         CmpOp::Ge,
@@ -1419,7 +1691,7 @@ fn test_op_icmp_multi() {
         CmpOp::Le,
     ];
 
-    const RES_TYPES: &'static [CmpResultType] = &[
+    const RES_TYPES: &[CmpResultType] = &[
         CmpResultType::I1,
         CmpResultType::F1,
         CmpResultType::M1,
@@ -1457,7 +1729,7 @@ fn test_op_icmp_multi() {
 fn test_op_idpadd() {
     let model = RunSingleton::get().model.as_ref();
 
-    const SRC_TYPES: &'static [DataType] = &[DataType::V4S8, DataType::V4U8];
+    const SRC_TYPES: &[DataType] = &[DataType::V4S8, DataType::V4U8];
 
     for saturate in [false, true] {
         let op = OpIDpAdd {
@@ -1495,14 +1767,14 @@ fn test_op_idpadd() {
 
 #[test]
 fn test_op_imul() {
-    const DATA_TYPES: &'static [DataType] = &[
+    const DATA_TYPES: &[DataType] = &[
         DataType::V2S16,
         DataType::V2U16,
         DataType::S32,
         DataType::U32,
     ];
 
-    const WIDENS: &'static [AsmSwizzleWiden] = &[
+    const WIDENS: &[AsmSwizzleWiden] = &[
         AsmSwizzleWiden::None,
         AsmSwizzleWiden::B00,
         AsmSwizzleWiden::B02,
@@ -1538,7 +1810,7 @@ fn test_op_imul() {
 
 #[test]
 fn test_op_isub() {
-    const DATA_TYPES: &'static [DataType] = &[
+    const DATA_TYPES: &[DataType] = &[
         DataType::V2S16,
         DataType::V2U16,
         DataType::S32,
@@ -1547,7 +1819,7 @@ fn test_op_isub() {
         DataType::U64,
     ];
 
-    const WIDENS: &'static [AsmSwizzleWiden] = &[
+    const WIDENS: &[AsmSwizzleWiden] = &[
         AsmSwizzleWiden::None,
         AsmSwizzleWiden::B00,
         AsmSwizzleWiden::B02,
@@ -1588,9 +1860,9 @@ fn test_op_isub() {
 
 #[test]
 fn test_op_mux() {
-    const DATA_TYPES: &'static [DataType] =
+    const DATA_TYPES: &[DataType] =
         &[DataType::V4I8, DataType::V2I16, DataType::I32];
-    const MUX_OPS: &'static [MuxOp] =
+    const MUX_OPS: &[MuxOp] =
         &[MuxOp::Neg, MuxOp::IntZero, MuxOp::FpZero, MuxOp::Bit];
 
     for &dst_type in DATA_TYPES {
@@ -1623,14 +1895,14 @@ fn test_op_popcount() {
 
 #[test]
 fn test_op_shift_lop() {
-    const DATA_TYPES: &'static [DataType] = &[
+    const DATA_TYPES: &[DataType] = &[
         DataType::V4U8,
         DataType::V2U16,
         DataType::U32,
         DataType::U64,
     ];
 
-    const SHIFT_OPS: &'static [ShiftOp] = &[
+    const SHIFT_OPS: &[ShiftOp] = &[
         ShiftOp::None,
         ShiftOp::LShift,
         ShiftOp::RShift,
@@ -1639,10 +1911,10 @@ fn test_op_shift_lop() {
         ShiftOp::LRot,
     ];
 
-    const LOGIC_OPS: &'static [LogicOp] =
+    const LOGIC_OPS: &[LogicOp] =
         &[LogicOp::None, LogicOp::Or, LogicOp::And, LogicOp::Xor];
 
-    const WIDENS: &'static [AsmSwizzleWiden] = &[
+    const WIDENS: &[AsmSwizzleWiden] = &[
         AsmSwizzleWiden::None,
         AsmSwizzleWiden::B0,
         AsmSwizzleWiden::H0,
@@ -1718,7 +1990,7 @@ mod builder {
             data.push([a.to_bits(), b.to_bits(), 0]);
         }
 
-        let case = shader.with_args(FAU_ONLY_ARGS, &mut data);
+        let case = shader.with_data(&mut data);
         run.execute(case);
         for arr in data {
             let [base_log2, arg, res] = arr.map(f32::from_bits);
@@ -1763,7 +2035,7 @@ mod builder {
             data.push([x.to_bits(), 0]);
         }
 
-        let case = shader.with_args(FAU_ONLY_ARGS, &mut data);
+        let case = shader.with_data(&mut data);
         run.execute(case);
         for arr in data {
             let [input, comp] = arr.map(f32::from_bits);
@@ -1812,7 +2084,7 @@ mod builder {
             data.push([x.to_bits(), 0, 0]);
         }
 
-        let case = shader.with_args(FAU_ONLY_ARGS, &mut data);
+        let case = shader.with_data(&mut data);
         run.execute(case);
         for arr in data {
             let [input, csin, ccos] = arr.map(f32::from_bits);

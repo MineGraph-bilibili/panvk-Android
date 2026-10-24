@@ -72,7 +72,8 @@ NON_DISPATCHABLE_HANDLE_TYPES = [
     "VkPrivateDataSlot",
 ]
 
-CUSTOM_HANDLE_CREATE_TYPES = [
+# The handles that do not use vkCreateX and vkDestroyX functions:
+HANDLES_CREATE_OR_DESTROYED_BY_NON_STANDARD_FUNCTIONS = [
     "VkPhysicalDevice",
     "VkQueue",
     "VkPipeline",
@@ -83,50 +84,25 @@ CUSTOM_HANDLE_CREATE_TYPES = [
 ]
 
 HANDLE_TYPES = list(sorted(list(set(DISPATCHABLE_HANDLE_TYPES +
-                                    NON_DISPATCHABLE_HANDLE_TYPES + CUSTOM_HANDLE_CREATE_TYPES))))
+                                    NON_DISPATCHABLE_HANDLE_TYPES + HANDLES_CREATE_OR_DESTROYED_BY_NON_STANDARD_FUNCTIONS))))
 
-HANDLE_INFO = {}
+# Maps Vulkan handle types to the methods that create and destroy them:
+HANDLE_INFO = {
+    # Handle types with standard create/destroy methods:
+    ** { h: HandleInfo(h, "vkCreate" + h[2:], "vkDestroy" + h[2:]) for h in DISPATCHABLE_HANDLE_TYPES },
+    ** { h: HandleInfo(h, "vkCreate" + h[2:], "vkDestroy" + h[2:]) for h in NON_DISPATCHABLE_HANDLE_TYPES },
 
-for h in HANDLE_TYPES:
-    if h in CUSTOM_HANDLE_CREATE_TYPES:
-        if h == "VkPhysicalDevice":
-            HANDLE_INFO[h] = \
-                HandleInfo(
-                    "VkPhysicalDevice",
-                    "vkEnumeratePhysicalDevices", None)
-        if h == "VkQueue":
-            HANDLE_INFO[h] = \
-                HandleInfo(
-                    "VkQueue",
-                    ["vkGetDeviceQueue", "vkGetDeviceQueue2"],
-                    None)
-        if h == "VkPipeline":
-            HANDLE_INFO[h] = \
-                HandleInfo(
-                    "VkPipeline",
-                    ["vkCreateGraphicsPipelines", "vkCreateComputePipelines"],
-                    "vkDestroyPipeline")
-        if h == "VkDeviceMemory":
-            HANDLE_INFO[h] = \
-                HandleInfo("VkDeviceMemory",
-                           "vkAllocateMemory", ["vkFreeMemory", "vkFreeMemorySyncGOOGLE"])
-        if h == "VkDescriptorSet":
-            HANDLE_INFO[h] = \
-                HandleInfo("VkDescriptorSet", "vkAllocateDescriptorSets",
-                           "vkFreeDescriptorSets")
-        if h == "VkCommandBuffer":
-            HANDLE_INFO[h] = \
-                HandleInfo("VkCommandBuffer", "vkAllocateCommandBuffers",
-                           "vkFreeCommandBuffers")
-        if h == "VkRenderPass":
-            HANDLE_INFO[h] = \
-                HandleInfo(
-                    "VkRenderPass",
-                    ["vkCreateRenderPass", "vkCreateRenderPass2", "vkCreateRenderPass2KHR"],
-                    "vkDestroyRenderPass")
-    else:
-        HANDLE_INFO[h] = \
-            HandleInfo(h, "vkCreate" + h[2:], "vkDestroy" + h[2:])
+    # Handle types with non-standard create/destroy methods:
+    "VkCommandBuffer": HandleInfo("VkCommandBuffer", "vkAllocateCommandBuffers", "vkFreeCommandBuffers"),
+    "VkDescriptorSet": HandleInfo("VkDescriptorSet", "vkAllocateDescriptorSets", "vkFreeDescriptorSets"),
+    "VkDeviceMemory": HandleInfo("VkDeviceMemory", "vkAllocateMemory", ["vkFreeMemory", "vkFreeMemorySyncGOOGLE"]),
+    "VkPhysicalDevice": HandleInfo("VkPhysicalDevice", "vkEnumeratePhysicalDevices", None),
+    "VkPipeline": HandleInfo("VkPipeline", ["vkCreateGraphicsPipelines", "vkCreateComputePipelines"], "vkDestroyPipeline"),
+    "VkPrivateDataSlot": HandleInfo("VkPrivateDataSlot", ["vkCreatePrivateDataSlot", "vkCreatePrivateDataSlotEXT"], ["vkDestroyPrivateDataSlot", "vkDestroyPrivateDataSlotEXT"]),
+    "VkPrivateDataSlotEXT": HandleInfo("VkPrivateDataSlotEXT", ["vkCreatePrivateDataSlot", "vkCreatePrivateDataSlotEXT"], ["vkDestroyPrivateDataSlot", "vkDestroyPrivateDataSlotEXT"]),
+    "VkQueue": HandleInfo("VkQueue", ["vkGetDeviceQueue", "vkGetDeviceQueue2"], None),
+    "VkRenderPass": HandleInfo("VkRenderPass", ["vkCreateRenderPass", "vkCreateRenderPass2", "vkCreateRenderPass2KHR"], "vkDestroyRenderPass"),
+}
 
 EXCLUDED_APIS = [
     "vkEnumeratePhysicalDeviceGroups",

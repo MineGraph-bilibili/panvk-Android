@@ -372,6 +372,18 @@ brw_lower_mulh_inst(brw_shader &s, brw_inst *inst)
    const intel_device_info *devinfo = s.devinfo;
    const brw_builder ibld(inst);
 
+   if (devinfo->ver >= 35) {
+      /* For Xe3P, do the 64-bit mul, and then copy the high_part for mulh */
+      assert(inst->dst.type == BRW_TYPE_D || inst->dst.type == BRW_TYPE_UD);
+      brw_reg low_high = retype(brw_allocate_vgrf_units(s, 2 * reg_unit(devinfo)),
+                                inst->dst.type == BRW_TYPE_D ? BRW_TYPE_Q : BRW_TYPE_UQ);
+      ibld.MUL(low_high, inst->src[0], inst->src[1]);
+      brw_reg high_part =
+         horiz_stride(horiz_offset(retype(low_high, inst->dst.type), 1), 2);
+      ibld.MOV(inst->dst, high_part);
+      return;
+   }
+
    /* According to the BDW+ BSpec page for the "Multiply Accumulate
     * High" instruction:
     *
@@ -436,8 +448,7 @@ brw_lower_integer_multiplication(brw_shader &s)
          } else if (!inst->dst.is_accumulator() &&
                     (inst->dst.type == BRW_TYPE_D ||
                      inst->dst.type == BRW_TYPE_UD) &&
-                    (!devinfo->has_integer_dword_mul ||
-                     devinfo->verx10 >= 125)) {
+                    !devinfo->has_integer_dword_mul) {
             brw_lower_mul_dword_inst(s, inst);
             inst->remove();
             progress = true;

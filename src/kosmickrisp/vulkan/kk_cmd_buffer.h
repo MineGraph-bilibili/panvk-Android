@@ -39,6 +39,10 @@ struct kk_root_descriptor_table {
 
          float blend_constant[4];
          float clip_z_coeff;
+
+         float viewport_z_range[KK_MAX_VIEWPORTS * 2];
+         bool emulate_depth_clamp;
+         bool emulate_viewport_z;
       } draw;
       struct {
          uint32_t base_group[3];
@@ -114,10 +118,15 @@ struct kk_rendering_state {
    struct kk_attachment fsr_att;
 
    bool ms_bresenham_lines;
+   /* Barrier tracking to understand if we need to split render passes. */
+   bool write_available;
+   bool ds_write_available;
+   bool storage_write_available;
    bool sample_locations_enable;
    uint32_t sample_locations_count;
    VkSampleLocationEXT sample_locations[KK_MAX_SAMPLES];
    bool force_attachment_store;
+   bool rendering_to_whole_framebuffer;
 };
 
 /* Dirty tracking bits for state not tracked by vk_dynamic_graphics_state or
@@ -206,23 +215,28 @@ struct kk_ts_resolve {
    uint64_t dst_addr;
 };
 
-struct kk_encoder_state {
-   /* either a mtl_compute_encoder or a mtl_render_encoder */
-   mtl_command_encoder *encoder;
-   mtl_command_allocator *allocator;
-   mtl_command_buffer *cmd_buf;
-   /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
-   struct util_dynarray ts_resolves;
+struct kk_ts_stage_entry {
+   mtl_counter_heap *heap;
+   enum mtl_render_stages stage;
+   uint32_t index;
 };
 
 struct kk_cmd_buffer {
    struct vk_command_buffer vk;
 
-   struct kk_encoder_state gfx;
-   /* pre and post gfx encoder states swap after every gfx encoder is committed */
-   struct kk_encoder_state cmp[2];
-   struct kk_encoder_state *pre_gfx;
-   struct kk_encoder_state *post_gfx;
+   struct {
+      mtl_command_allocator *allocator;
+      mtl_command_buffer *cmd_buf;
+      mtl_render_encoder *render;
+      mtl_compute_encoder *compute;
+   } metal;
+   /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
+   struct util_dynarray ts_resolves;
+   /* Timestamps already sampled by the current render encoder. (struct
+    * kk_ts_stage_entry). */
+   struct util_dynarray ts_stage_map;
+   /* Deferred writes due to being mid render encoder */
+   struct util_dynarray post_render_writes;
 
    void *drawable;
    mtl_argument_table *argument_table;
@@ -240,8 +254,6 @@ struct kk_cmd_buffer {
    } state;
 
    struct kk_uploader uploader;
-
-   struct util_dynarray submit_cmd_bufs;
 
    /* Owned large BOs */
    struct util_dynarray large_bos;
@@ -287,10 +299,9 @@ kk_get_descriptors_state(struct kk_cmd_buffer *cmd,
    }
 };
 
-void kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd);
 void cs_start_render(struct kk_cmd_buffer *cmd);
 mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
-mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx);
+mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd);
 void cs_end(struct kk_cmd_buffer *cmd);
 void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
                                         uint64_t addr);
@@ -333,6 +344,10 @@ void kk_cmd_buffer_flush_push_descriptors(struct kk_cmd_buffer *cmd,
                                           struct kk_descriptor_state *desc);
 
 void kk_apply_attachment_store_ops(struct kk_cmd_buffer *cmd, bool force_store);
+
+bool kk_attachment_do_renderpass_resolve(const struct kk_attachment *attachment,
+                                         bool rendering_to_whole_framebuffer,
+                                         VkImageAspectFlags aspect);
 
 enum kk_grid_mode {
    KK_GRID_DIRECT = 0u,
@@ -389,5 +404,7 @@ void kk_dispatch_precomp(struct kk_cmd_buffer *cmd, struct kk_grid grid,
 #define MESA_DISPATCH_PRECOMP kk_dispatch_precomp
 
 void kk_cmd_write(struct kk_cmd_buffer *cmd, struct libkk_imm_write write);
+
+void kk_cmd_buffer_set_label(struct kk_cmd_buffer *cb, const char *label);
 
 #endif

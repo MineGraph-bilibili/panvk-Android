@@ -1621,13 +1621,25 @@ dbg_expand_rpt(struct ir3 *ir)
    }
 }
 
+bool
+ir3_prefetch_sam_needs_helpers(struct ir3_compiler *compiler,
+                               struct ir3_instruction *sam)
+{
+   assert(sam->opc == OPC_SAM);
+   assert(has_dummy_dst(sam));
+
+   return compiler->info->props.prefetch_sam_helpers_quirk &&
+          (sam->flags & IR3_INSTR_S2EN);
+}
+
 struct ir3_mark_helpers_data {
    bool valid;
    regmask_t needs_helpers;
 };
 
 static void
-instr_mark_helpers(struct ir3_mark_helpers_data *bd,
+instr_mark_helpers(struct ir3_compiler *compiler,
+                   struct ir3_mark_helpers_data *bd,
                    struct ir3_instruction *instr)
 {
    if (instr->flags & IR3_INSTR_NEEDS_HELPERS) {
@@ -1668,6 +1680,17 @@ instr_mark_helpers(struct ir3_mark_helpers_data *bd,
    case OPC_DSXPP_1:
    case OPC_DSYPP_1: {
       if (instr->opc == OPC_SAM && has_dummy_dst(instr)) {
+         if (ir3_prefetch_sam_needs_helpers(compiler, instr)) {
+            /* Prefetch sam.s2en erroneously reads it src2 from fiber 0. To
+             * ensure its src2 is available even when fiber 0 is a helper, we
+             * should keep helpers enabled. We could try to track src2 here but
+             * this complicates the code below. Just mark the instruction
+             * itself. Since (eq) is illegal in the preamble it will propagate
+             * to the start of the main shader anyway.
+             */
+            instr->flags |= IR3_INSTR_NEEDS_HELPERS;
+         }
+
          /* sam requires helper invocations except for dummy prefetch
           * instructions.
           */
@@ -1776,7 +1799,7 @@ mark_helpers(struct ir3_legalize_ctx *ctx, struct ir3 *ir,
          }
 
          foreach_instr_rev (instr, &block->instr_list) {
-            instr_mark_helpers(bd, instr);
+            instr_mark_helpers(ctx->compiler, bd, instr);
 
             /* We only care about the last instruction needing helpers. */
             if (instr->flags & IR3_INSTR_NEEDS_HELPERS) {
@@ -2454,7 +2477,8 @@ align_aliases(struct ir3 *ir)
 }
 
 bool
-ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
+ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary,
+             bool can_speculate_preamble)
 {
    struct ir3_legalize_ctx *ctx = rzalloc(ir, struct ir3_legalize_ctx);
    bool progress;
@@ -2534,7 +2558,7 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
       }
    }
 
-   so->early_preamble = has_preamble && !gpr_in_preamble &&
+   so->early_preamble = can_speculate_preamble && has_preamble && !gpr_in_preamble &&
       !pred_in_preamble && !relative_in_preamble &&
       ir->compiler->info->props.has_early_preamble &&
       !(ir3_shader_debug & IR3_DBG_NOEARLYPREAMBLE);

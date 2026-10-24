@@ -29,6 +29,7 @@ enum tu_bo_alloc_flags {
    TU_BO_ALLOC_DMABUF = 1 << 4,
    TU_BO_ALLOC_SHAREABLE = 1 << 5,
    TU_BO_ALLOC_IMPLICIT_SYNC = 1 << 6,
+   TU_BO_ALLOC_NO_32B_ROLLOVER = 1 << 7,
 };
 
 enum tu_mem_sync_op {
@@ -133,13 +134,15 @@ struct tu_knl {
    int (*submitqueue_new)(struct tu_device *dev, struct tu_queue *queue);
    void (*submitqueue_close)(struct tu_device *dev, struct tu_queue *queue);
    VkResult (*bo_init)(struct tu_device *dev, struct vk_object_base *base,
-                       struct tu_bo **out_bo, uint64_t size, uint64_t client_iova,
+                       struct tu_bo **out_bo, uint64_t size, uint64_t align,
+                       uint64_t client_iova,
                        VkMemoryPropertyFlags mem_property,
                        enum tu_bo_alloc_flags flags,
                        struct tu_sparse_vma *lazy_vma,
                        const char *name);
    VkResult (*bo_init_dmabuf)(struct tu_device *dev, struct tu_bo **out_bo,
-                              uint64_t size, enum tu_bo_alloc_flags flags, int prime_fd);
+                              uint64_t size, uint64_t align,
+                              enum tu_bo_alloc_flags flags, int prime_fd);
    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
@@ -170,7 +173,8 @@ struct tu_knl {
                                struct tu_sparse_vma *out_vma,
                                uint64_t *out_iova,
                                enum tu_sparse_vma_flags flags,
-                               uint64_t size, uint64_t client_iova);
+                               uint64_t size, uint64_t align,
+                               uint64_t client_iova);
    void (*sparse_vma_finish)(struct tu_device *device,
                              struct tu_sparse_vma *vma);
 
@@ -192,6 +196,7 @@ tu_bo_init_new_explicit_iova(struct tu_device *dev,
                              struct vk_object_base *base,
                              struct tu_bo **out_bo,
                              uint64_t size,
+                             uint64_t align,
                              uint64_t client_iova,
                              VkMemoryPropertyFlags mem_property,
                              enum tu_bo_alloc_flags flags,
@@ -204,7 +209,7 @@ tu_bo_init_new(struct tu_device *dev, struct vk_object_base *base,
                enum tu_bo_alloc_flags flags, const char *name)
 {
    return tu_bo_init_new_explicit_iova(
-      dev, base, out_bo, size, 0,
+      dev, base, out_bo, size, 0, 0,
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -215,6 +220,7 @@ VkResult
 tu_bo_init_dmabuf(struct tu_device *dev,
                   struct tu_bo **bo,
                   uint64_t size,
+                  uint64_t align,
                   enum tu_bo_alloc_flags flags,
                   int fd);
 
@@ -256,7 +262,8 @@ VkResult tu_sparse_vma_init(struct tu_device *dev,
                             struct tu_sparse_vma *out_vma,
                             uint64_t *out_iova,
                             enum tu_sparse_vma_flags flags,
-                            uint64_t size, uint64_t client_iova);
+                            uint64_t size, uint64_t align,
+                            uint64_t client_iova);
 
 void tu_sparse_vma_finish(struct tu_device *device,
                           struct tu_sparse_vma *vma);

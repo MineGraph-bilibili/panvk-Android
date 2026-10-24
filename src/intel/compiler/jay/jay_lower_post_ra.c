@@ -32,7 +32,7 @@ lower_non_tied_default(jay_builder *b, jay_inst *I, jay_def default_)
 
          jay_inst *mov = jay_MOV(b, dst, src);
          mov->type = I->type;
-         jay_add_predicate(b, mov, not_pred);
+         jay_add_predicate(b, mov, not_pred, jay_null());
       }
    }
 }
@@ -130,21 +130,24 @@ pass(jay_function *func)
       jay_foreach_inst_in_block_safe(block, I) {
          jay_builder b = jay_init_builder(func, jay_before_inst(I));
 
-         if (jay_inst_has_default(I)) {
-            if (!jay_regs_equal(jay_is_null(I->dst) ? I->cond_flag : I->dst,
-                                *jay_inst_get_default(I))) {
-               lower_non_tied_default(&b, I, *jay_inst_get_default(I));
+         if (I->predication > 1) {
+            jay_def dsts[] = { jay_is_null(I->dst) ? I->cond_flag : I->dst,
+                               I->cond_flag };
+            for (unsigned i = 1; i < I->predication; ++i) {
+               jay_def def = I->src[I->num_srcs - I->predication + i];
+               if (!jay_regs_equal(dsts[i - 1], def)) {
+                  lower_non_tied_default(&b, I, def);
+               }
             }
 
-            /* Now just drop the default source */
-            jay_shrink_sources(I, I->num_srcs - 1);
-            I->predication = JAY_PREDICATED;
+            /* Now just drop the default sources */
+            jay_shrink_sources(I, I->num_srcs - (I->predication - 1));
+            I->predication = 1;
          }
 
          if (I->zero_inactive) {
             if (!BITSET_TEST(inactive_are_0, I->cond_flag.reg)) {
-               jay_MOV(&b, I->cond_flag, 0)->type =
-                  JAY_TYPE_U | func->shader->dispatch_width;
+               jay_MOV(&b, I->cond_flag, 0)->type = jay_flag_type(func);
                BITSET_SET(inactive_are_0, I->cond_flag.reg);
             }
 

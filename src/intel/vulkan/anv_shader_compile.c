@@ -11,6 +11,7 @@
 
 #include "nir/nir_builtin_builder.h"
 
+#include "common/intel_common.h"
 #include "common/intel_compute_slm.h"
 #include "common/intel_l3_config.h"
 
@@ -117,24 +118,41 @@ is_local_invoc_id_used_with_simd32_assumption(nir_intrinsic_instr *subgroup_inv)
          continue;
 
       nir_alu_instr *alu = nir_instr_as_alu(instr);
-      if (alu->op != nir_op_iand)
-         continue;
 
-      /* nir_print_instr(&alu->instr, stderr); */
-      /* fprintf(stderr, "\n"); */
+      switch (alu->op) {
+      case nir_op_iand:
+         for (uint32_t i = 0; i < 2; i++) {
+            if (&alu->src[i].src == src)
+               continue;
 
-      for (uint32_t i = 0; i < 2; i++) {
-         if (&alu->src[i].src == src)
-            continue;
+            if (!nir_src_is_const(alu->src[i].src))
+               continue;
 
-         if (!nir_src_is_const(alu->src[i].src))
-            continue;
+            if (nir_src_as_uint(alu->src[i].src) != 0xffffffe0)
+               continue;
 
-         if (nir_src_as_uint(alu->src[i].src) != 0xffffffe0)
-            continue;
-
-         if (is_alu_used_for_umod_subgroup_size(alu))
+            if (is_alu_used_for_umod_subgroup_size(alu))
+               return true;
+         }
+         break;
+      /* Detect if we have local invocation id divided by BRW_SUBGROUP_SIZE. */
+      case nir_op_ushr:
+         if (alu->src[0].src.ssa == &subgroup_inv->def &&
+             nir_src_is_const(alu->src[1].src) &&
+             nir_src_as_int(alu->src[1].src) == 5) {
             return true;
+         }
+         break;
+      case nir_op_udiv:
+      case nir_op_idiv:
+         if (alu->src[0].src.ssa == &subgroup_inv->def &&
+             nir_src_is_const(alu->src[1].src) &&
+             nir_src_as_int(alu->src[1].src) == 32) {
+            return true;
+         }
+         break;
+      default:
+         break;
       }
    }
 
@@ -191,17 +209,17 @@ anv_get_robust_flags(const struct vk_pipeline_robustness_state *rstate)
        BRW_ROBUSTNESS_UBO : 0);
 }
 
-static enum anv_descriptor_set_layout_type
+static enum anv_shader_binding_mode
 set_layouts_get_layout_type(struct anv_descriptor_set_layout * const *set_layouts,
                             uint32_t set_layout_count)
 {
    for (uint32_t s = 0; s < set_layout_count; s++) {
       if (set_layouts[s]) {
-         return set_layouts[s]->type;
+         return set_layouts[s]->binding_mode;
       }
    }
 
-   return ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_UNKNOWN;
+   return ANV_SHADER_BINDING_MODE_UNKNOWN;
 }
 
 void
@@ -210,6 +228,9 @@ anv_shader_init_uuid(struct anv_physical_device *device)
    /* We should include any parameter here that will change the compiler's
     * output. Mostly it's workarounds, but there is also settings for using
     * indirect descriptors (a different binding model).
+    *
+    * shaderBinaryUUID, the pipeline cache UUID and the disk cache id are all
+    * derived from the result, so an option only has to be added here.
     *
     * The fp64 workaround is skipped because although it changes the
     * compiler's output, not having that workaroung enabled with an app
@@ -222,56 +243,64 @@ anv_shader_init_uuid(struct anv_physical_device *device)
                        sizeof(device->driver_build_sha1));
    brw_device_blake3_update(&ctx, &device->info);
 
-   const bool always_bindless = !!ANV_DEBUG(BINDLESS);
+   /* The disk cache gets this as driver_flags, the UUID doesn't. */
+   const uint64_t compiler_config =
+      brw_get_compiler_config_value(device->compiler);
+   _mesa_blake3_update(&ctx, &compiler_config, sizeof(compiler_config));
+
+   const bool always_bindless = device->drirc.features.always_bindless;
    _mesa_blake3_update(&ctx, &always_bindless, sizeof(always_bindless));
 
    const bool indirect_descriptors = device->indirect_descriptors;
    _mesa_blake3_update(&ctx, &indirect_descriptors, sizeof(indirect_descriptors));
 
+   const bool efficient_64bit = device->uses_efficient_64bit;
+   _mesa_blake3_update(&ctx, &efficient_64bit, sizeof(efficient_64bit));
+
    const int spilling_rate = device->compiler->spilling_rate;
    _mesa_blake3_update(&ctx, &spilling_rate, sizeof(spilling_rate));
 
-   const uint8_t afs = device->instance->drirc.debug.assume_full_subgroups;
+   const uint8_t afs = device->drirc.debug.assume_full_subgroups;
    _mesa_blake3_update(&ctx, &afs, sizeof(afs));
 
-   const bool afswb = device->instance->drirc.debug.assume_full_subgroups_with_barrier;
+   const bool afswb = device->drirc.debug.assume_full_subgroups_with_barrier;
    _mesa_blake3_update(&ctx, &afswb, sizeof(afswb));
 
-   const bool afs_shm = device->instance->drirc.debug.assume_full_subgroups_with_shared_memory;
+   const bool afs_shm = device->drirc.debug.assume_full_subgroups_with_shared_memory;
    _mesa_blake3_update(&ctx, &afs_shm, sizeof(afs_shm));
 
-   const bool rwfe = device->instance->drirc.debug.read_without_format_emu;
+   const bool rwfe = device->drirc.debug.read_without_format_emu;
    _mesa_blake3_update(&ctx, &rwfe, sizeof(rwfe));
 
-   const bool lttd = device->instance->drirc.debug.lower_terminate_to_discard;
+   const bool lttd = device->drirc.debug.lower_terminate_to_discard;
    _mesa_blake3_update(&ctx, &lttd, sizeof(lttd));
 
    const bool large_wg_wa =
-      device->instance->drirc.debug.large_workgroup_non_coherent_image_workaround;
+      device->drirc.debug.large_workgroup_non_coherent_image_workaround;
    _mesa_blake3_update(&ctx, &large_wg_wa, sizeof(large_wg_wa));
 
-   const bool lto_disable = device->instance->drirc.debug.disable_lto;
+   const bool lto_disable = device->drirc.debug.disable_lto;
    _mesa_blake3_update(&ctx, &lto_disable, sizeof(lto_disable));
 
    const bool btp_bti_rcc = device->rt_change_needs_flush;
    _mesa_blake3_update(&ctx, &btp_bti_rcc, sizeof(btp_bti_rcc));
 
-   const bool cbv_push_buffer = device->instance->drirc.perf.promote_cbv_push_buffer;
+   const bool cbv_push_buffer = device->drirc.perf.promote_cbv_push_buffer;
    _mesa_blake3_update(&ctx, &cbv_push_buffer, sizeof(cbv_push_buffer));
 
-   const bool fs_sample_d_wa = device->instance->drirc.debug.fs_sampler_undef_derivatives_workaround;
+   const bool fs_sample_d_wa = device->drirc.debug.fs_sampler_undef_derivatives_workaround;
    _mesa_blake3_update(&ctx, &fs_sample_d_wa, sizeof(fs_sample_d_wa));
 
-   const bool slm_robust = device->instance->drirc.debug.slm_robust_vectorization;
+   const bool slm_robust = device->drirc.debug.slm_robust_vectorization;
    _mesa_blake3_update(&ctx, &slm_robust, sizeof(slm_robust));
 
-   const bool r11g11b10_wa = device->instance->drirc.debug.r11g11b10_atomic_swap_wa;
+   const bool r11g11b10_wa = device->drirc.debug.r11g11b10_atomic_swap_wa;
    _mesa_blake3_update(&ctx, &r11g11b10_wa, sizeof(r11g11b10_wa));
 
-   const bool emulate_active_thread_barriers = device->instance->drirc.debug.emulate_active_thread_barriers;
+   const bool emulate_active_thread_barriers = device->drirc.debug.emulate_active_thread_barriers;
    _mesa_blake3_update(&ctx, &emulate_active_thread_barriers, sizeof(emulate_active_thread_barriers));
 
-   const bool emulate_divergent_barriers = device->instance->drirc.debug.emulate_divergent_barriers;
+   const bool emulate_divergent_barriers = device->drirc.debug.emulate_divergent_barriers;
    _mesa_blake3_update(&ctx, &emulate_divergent_barriers, sizeof(emulate_divergent_barriers));
 
    uint8_t blake3[BLAKE3_KEY_LEN];
@@ -319,7 +348,7 @@ anv_shader_get_spirv_options(struct vk_physical_device *device,
       .min_ssbo_alignment = ANV_SSBO_ALIGNMENT,
 
       .workarounds = {
-         .lower_terminate_to_discard = pdevice->instance->drirc.debug.lower_terminate_to_discard,
+         .lower_terminate_to_discard = pdevice->drirc.debug.lower_terminate_to_discard,
       },
 
       .store_dxbc_dxil_hashes = true,
@@ -384,7 +413,8 @@ populate_base_prog_key(struct brw_base_prog_key *key,
     */
    if (rs != NULL)
       key->robust_flags = anv_get_robust_flags(rs);
-   key->divergent_atomics_flags = pdevice->instance->drirc.perf.opt_divergent_atomics;
+   key->divergent_atomics_flags = pdevice->drirc.perf.opt_divergent_atomics;
+   key->use_efficient_64bit = pdevice->uses_efficient_64bit;
 }
 
 static void
@@ -420,8 +450,8 @@ populate_vs_prog_key(struct brw_vs_prog_key *key,
 
    populate_base_gfx_prog_key(&key->base, device, rs, state, link_stages);
 
-   key->vf_component_packing = pdevice->instance->drirc.perf.vf_comp_packing;
-   key->max_payload_percent = 100.0f * pdevice->instance->drirc.perf.max_vs_payload;
+   key->vf_component_packing = pdevice->drirc.perf.vf_comp_packing;
+   key->max_payload_percent = 100.0f * pdevice->drirc.perf.max_vs_payload;
 }
 
 static void
@@ -466,7 +496,7 @@ populate_gs_prog_key(struct brw_gs_prog_key *key,
 
    populate_base_gfx_prog_key(&key->base, device, rs, state, link_stages);
 
-   if (pdevice->instance->drirc.debug.slm_robust_vectorization)
+   if (pdevice->drirc.debug.slm_robust_vectorization)
       key->base.robust_flags |= BRW_ROBUSTNESS_SLM;
 }
 
@@ -482,7 +512,7 @@ populate_task_prog_key(struct brw_task_prog_key *key,
 
    populate_base_gfx_prog_key(&key->base, device, rs, state, link_stages);
 
-   if (pdevice->instance->drirc.debug.slm_robust_vectorization)
+   if (pdevice->drirc.debug.slm_robust_vectorization)
       key->base.robust_flags |= BRW_ROBUSTNESS_SLM;
 }
 
@@ -618,7 +648,7 @@ populate_fs_prog_key(struct brw_fs_prog_key *key,
          (state->ms->alpha_to_coverage_enable ? INTEL_ALWAYS : INTEL_NEVER);
 
       /* TODO: We should make this dynamic */
-      if (pdevice->instance->drirc.debug.sample_mask_out_opengl_behaviour)
+      if (pdevice->drirc.debug.sample_mask_out_opengl_behaviour)
          key->ignore_sample_mask_out = !key->multisample_fbo;
    } else {
       /* Consider all inputs as valid until we look at the NIR variables. */
@@ -694,11 +724,13 @@ populate_cs_prog_key(struct brw_cs_prog_key *key,
 
    populate_base_prog_key(&key->base, device, rs);
 
-   if (pdevice->instance->drirc.debug.slm_robust_vectorization)
+   if (pdevice->drirc.debug.slm_robust_vectorization)
       key->base.robust_flags |= BRW_ROBUSTNESS_SLM;
 
    key->base.divergent_atomics_flags |=
-      pdevice->instance->drirc.perf.opt_divergent_atomics_compute_only;
+      pdevice->drirc.perf.opt_divergent_atomics_compute_only;
+   key->base.atomic_branch_flags |=
+      pdevice->drirc.perf.opt_atomic_branch_compute_only;
 }
 
 static void
@@ -719,6 +751,11 @@ populate_bs_prog_key(struct brw_bs_prog_key *key,
       ray_flags |= BRW_RT_RAY_FLAG_SKIP_TRIANGLES;
    else if (rt_skip_aabbs)
       ray_flags |= BRW_RT_RAY_FLAG_SKIP_AABBS;
+
+   if (INTEL_DEBUG(DEBUG_RT_NO_AHS))
+      ray_flags |= BRW_RT_RAY_FLAG_CULL_NON_OPAQUE;
+   if (INTEL_DEBUG(DEBUG_RT_NO_CHS))
+      ray_flags |= BRW_RT_RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
 
    key->pipeline_ray_flags = ray_flags;
 }
@@ -762,10 +799,13 @@ anv_shader_hash_state(struct vk_physical_device *device,
          populate_mesh_prog_key(&key.mesh, device, NULL, state, stages);
          _mesa_blake3_update(&blake3_ctx, &key.mesh, sizeof(key.mesh));
          break;
-      case VK_SHADER_STAGE_FRAGMENT_BIT:
+      case VK_SHADER_STAGE_FRAGMENT_BIT: {
+         uint32_t color_mask = rp_color_mask(state);
+         _mesa_blake3_update(&blake3_ctx, &color_mask, sizeof(color_mask));
          populate_fs_prog_key(&key.fs, device, NULL, state, stages);
          _mesa_blake3_update(&blake3_ctx, &key.fs, sizeof(key.fs));
          break;
+      }
       case VK_SHADER_STAGE_COMPUTE_BIT:
          populate_cs_prog_key(&key.cs, device, NULL);
          _mesa_blake3_update(&blake3_ctx, &key.cs, sizeof(key.cs));
@@ -887,7 +927,7 @@ anv_fixup_subgroup_size(struct anv_device *device,
 {
    nir_shader *shader = shader_data->info->nir;
    struct shader_info *info = &shader->info;
-   const struct anv_instance *instance = device->physical->instance;
+   const struct anv_physical_device *pdevice = device->physical;
 
    if (!mesa_shader_stage_uses_workgroup(info->stage))
       return;
@@ -911,7 +951,7 @@ anv_fixup_subgroup_size(struct anv_device *device,
     * which can cause bugs, as they may expect bigger size of the
     * subgroup than we choose for the execution.
     */
-   if (instance->drirc.debug.assume_full_subgroups &&
+   if (pdevice->drirc.debug.assume_full_subgroups &&
        info->uses_wide_subgroup_intrinsics &&
        info->api_subgroup_size == BRW_SUBGROUP_SIZE &&
        local_size &&
@@ -920,7 +960,7 @@ anv_fixup_subgroup_size(struct anv_device *device,
       info->min_subgroup_size = BRW_SUBGROUP_SIZE;
    }
 
-   if (instance->drirc.debug.assume_full_subgroups_with_barrier &&
+   if (pdevice->drirc.debug.assume_full_subgroups_with_barrier &&
        info->stage == MESA_SHADER_COMPUTE &&
        device->info->verx10 <= 125 &&
        info->uses_control_barrier &&
@@ -934,7 +974,7 @@ anv_fixup_subgroup_size(struct anv_device *device,
    /* Similarly, sometimes games rely on the implicit synchronization of
     * the shared memory accesses, and choosing smaller subgroups than the game
     * expects will cause bugs. */
-   if (instance->drirc.debug.assume_full_subgroups_with_shared_memory &&
+   if (pdevice->drirc.debug.assume_full_subgroups_with_shared_memory &&
        info->shared_size > 0 &&
        info->min_subgroup_size != info->max_subgroup_size &&
        local_size &&
@@ -990,7 +1030,8 @@ wa_18019110168_load_provoking_vertex(nir_builder *b, void *data)
    nir_def *val = NULL;
 
    for (uint32_t i = 0; i < bind_map->inline_dwords_count; i++) {
-      if (bind_map->inline_dwords[i] == anv_drv_const_dword(gfx.wa_18019110168)) {
+      if (bind_map->inline_dwords[i] ==
+          anv_drv_const_dword(drv_data.gfx.wa_18019110168)) {
          val = nir_load_inline_data_intel(
             b, 1, 32, nir_imm_int(b, 0),
             .base = i * 4);
@@ -1000,9 +1041,9 @@ wa_18019110168_load_provoking_vertex(nir_builder *b, void *data)
 
    if (val == NULL) {
       val = nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
-                                     .base = anv_drv_const_offset(gfx.wa_18019110168) -
+                                     .base = anv_drv_const_offset(drv_data.gfx.wa_18019110168) -
                                              bind_map->push_ranges[0].start * 32,
-                                     .range = anv_drv_const_size(gfx.wa_18019110168));
+                                     .range = anv_drv_const_size(drv_data.gfx.wa_18019110168));
    }
 
    return nir_iand_imm(b, val, ANV_WA_18019110168_PROVOKING_VERTEX_MASK);
@@ -1012,12 +1053,11 @@ static nir_def *
 wa_18019110168_load_per_primitive_remap_table(nir_builder *b, void *data)
 {
    const struct anv_pipeline_bind_map *bind_map = data;
-   nir_def *val = NULL;
-
-   val = nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
-                                  .base = anv_drv_const_offset(gfx.wa_18019110168) -
-                                          bind_map->push_ranges[0].start * 32,
-                                  .range = anv_drv_const_size(gfx.wa_18019110168));
+   nir_def *val =
+      nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                               .base = anv_drv_const_offset(drv_data.gfx.wa_18019110168) -
+                                       bind_map->push_ranges[0].start * 32,
+                               .range = anv_drv_const_size(drv_data.gfx.wa_18019110168));
 
    return nir_iand_imm(b, val, ANV_WA_18019110168_PER_PRIMITIVE_REMAP_TABLE_OFFSET_MASK);
 }
@@ -1032,6 +1072,52 @@ populate_compile_params_mesh(union brw_any_compile_params *params,
    params->mesh.wa_18019110168_load_provoking_vertex =
       wa_18019110168_load_provoking_vertex;
    params->mesh.wa_18019110168_data = (void *)&shader_data->bind_map;
+}
+
+static nir_def *
+rt_write_efficient_64bit(nir_builder *b, signed rt, void *data)
+{
+   struct anv_shader_data *shader_data = data;
+   const struct anv_pipeline_bind_map *bind_map = &shader_data->bind_map;
+   const struct vk_color_attachment_location_state *cal = shader_data->fs_color_map;
+
+   if (rt < 0 && shader_data->bind_map.surface_count == 0)
+      return nir_imm_int64(b, 0);
+
+   nir_def *color_offset =
+      nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                               .base = anv_drv_const_offset(drv_data.gfx.fs_color_offset) -
+                                       bind_map->push_ranges[0].start * 32,
+                               .range = anv_drv_const_size(drv_data.gfx.fs_color_offset));
+
+   if (rt >= 0) {
+      if (cal != NULL) {
+         /* If the attachment is unused, keep the RT write on the first render
+          * target item which is the null surface.
+          */
+         for (uint32_t i = 0; i < ARRAY_SIZE(cal->color_map); i++) {
+            if (cal->color_map[i] == rt) {
+               color_offset = nir_iadd_imm(
+                  b, color_offset, (i + 1) * ANV_SURFACE_STATE_SIZE);
+            }
+         }
+      } else {
+         nir_def *map =
+            nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                     .base = anv_drv_const_offset(drv_data.gfx.fs_color_map) -
+                                             bind_map->push_ranges[0].start * 32,
+                                     .range = anv_drv_const_size(drv_data.gfx.fs_color_map));
+         nir_def *index = nir_ubitfield_extract_imm(b, map, rt * 4, 4);
+         color_offset = nir_iadd(b, color_offset, nir_imul_imm(b, index, ANV_SURFACE_STATE_SIZE));
+         shader_data->prog_data.fs.uses_fs_color_map = true;
+      }
+   }
+
+   shader_data->prog_data.fs.uses_fs_color_offset = true;
+   return nir_pack_64_2x32_split(
+      b,
+      color_offset,
+      nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_INTERNAL_HIGH));
 }
 
 static void
@@ -1059,6 +1145,11 @@ populate_compile_params_fs(union brw_any_compile_params *params,
    params->fs.wa_18019110168_load_per_primitive_remap_table_offset =
       wa_18019110168_load_per_primitive_remap_table;
    params->fs.wa_18019110168_data = (void *)&shader_data->bind_map;
+
+   if (shader_data->key.base.use_efficient_64bit) {
+      params->fs.rt_write_cb = rt_write_efficient_64bit;
+      params->fs.rt_write_data = (void *)shader_data;
+   }
 }
 
 static bool
@@ -1078,7 +1169,7 @@ populate_compile_params_bs(union brw_any_compile_params *params,
 {
    nir_shader *nir = shader_data->info->nir;
 
-   struct brw_nir_lower_shader_calls_state lowering_state = {
+   struct brw_nir_lower_rt_state lowering_state = {
       .devinfo = devinfo,
       .key = &shader_data->key.bs,
    };
@@ -1292,7 +1383,7 @@ anv_shader_lower_nir(struct anv_device *device,
 
    /* Workaround for apps that need fp64 support */
    if (!devinfo->has_64bit_float && (nir->info.bit_sizes_float & 64) &&
-       pdevice->instance->drirc.debug.fp64_emu) {
+       pdevice->drirc.debug.fp64_emu) {
       nir_shader *fp64_nir = anv_ensure_fp64_shader(device);
 
       NIR_PASS(_, nir, nir_lower_doubles, fp64_nir,
@@ -1308,11 +1399,11 @@ anv_shader_lower_nir(struct anv_device *device,
    }
 
    /* Workaround for R11G11B10 atomic accesses on Xe2+ */
-   if (devinfo->ver >= 20 && pdevice->instance->drirc.debug.r11g11b10_atomic_swap_wa)
+   if (devinfo->ver >= 20 && pdevice->drirc.debug.r11g11b10_atomic_swap_wa)
       NIR_PASS(_, nir, anv_nir_xe2_r11g11b10_atomic_swap_wa);
 
    if (nir->info.stage == MESA_SHADER_COMPUTE &&
-       pdevice->instance->drirc.debug.large_workgroup_non_coherent_image_workaround) {
+       pdevice->drirc.debug.large_workgroup_non_coherent_image_workaround) {
       const unsigned local_size = nir->info.workgroup_size[0] *
                                   nir->info.workgroup_size[1] *
                                   nir->info.workgroup_size[2];
@@ -1415,7 +1506,7 @@ anv_shader_lower_nir(struct anv_device *device,
                .lower_loads = true,
                .lower_stores_64bit = true,
                .lower_loads_without_formats =
-                  pdevice->instance->drirc.debug.read_without_format_emu,
+                  pdevice->drirc.debug.read_without_format_emu,
             });
 
    if (lower_64bit_atomics) {
@@ -1436,7 +1527,7 @@ anv_shader_lower_nir(struct anv_device *device,
             nir_address_format_32bit_offset);
 
    /* Realign pointers to CBV on stages that can promote to push buffers. */
-   if (pdevice->instance->drirc.perf.promote_cbv_push_buffer &&
+   if (pdevice->drirc.perf.promote_cbv_push_buffer &&
        nir->info.stage <= MESA_SHADER_FRAGMENT) {
       /* Cleanup for the analysis, we don't want any ALU */
       cleanup_nir(nir);
@@ -1446,7 +1537,8 @@ anv_shader_lower_nir(struct anv_device *device,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
 
-   NIR_PASS(_, nir, brw_nir_lower_ray_queries, &pdevice->info);
+   NIR_PASS(_, nir, brw_nir_lower_ray_queries,
+            &pdevice->info, &shader_data->key.base);
 
    shader_data->push_desc_info.used_descriptors =
       anv_nir_compute_used_push_descriptors(
@@ -1455,19 +1547,6 @@ anv_shader_lower_nir(struct anv_device *device,
    /* Need to have render targets placed first in the bind_map */
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       anv_shader_compute_fragment_rts(devinfo, state, shader_data);
-
-   uint32_t dynamic_descriptors_offset = 0;
-   uint32_t dynamic_descriptors_offsets[MAX_SETS] = {};
-   for (uint32_t i = 0; i < set_layout_count; i++) {
-      dynamic_descriptors_offsets[i] = dynamic_descriptors_offset;
-      if (set_layouts[i] != NULL) {
-         shader_data->bind_map.binding_mask |= ANV_PIPELINE_BIND_MASK_SET(i);
-         const uint32_t dyn_desc_count =
-            set_layouts[i]->vk.dynamic_descriptor_count;
-         shader_data->bind_map.dynamic_descriptors[i] = dyn_desc_count;
-         dynamic_descriptors_offset += dyn_desc_count;
-      }
-   }
 
    /* Apply the actual layout to UBOs, SSBOs, and textures */
    if (shader_data->info->flags & VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT) {
@@ -1479,9 +1558,6 @@ anv_shader_lower_nir(struct anv_device *device,
       NIR_PASS(_, nir, anv_nir_apply_pipeline_layout,
                pdevice, shader_data->key.base.robust_flags,
                set_layouts, set_layout_count,
-               (shader_data->info->flags &
-                VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_KHR) ? NULL :
-               dynamic_descriptors_offsets,
                shader_data->info->flags & VK_SHADER_CREATE_INDIRECT_BINDABLE_BIT_EXT,
                &shader_data->bind_map, &shader_data->push_map, mem_ctx);
    }
@@ -1506,6 +1582,7 @@ anv_shader_lower_nir(struct anv_device *device,
    cleanup_nir(nir);
 
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
    cleanup_nir(nir);
 
@@ -1519,6 +1596,11 @@ anv_shader_lower_nir(struct anv_device *device,
 
    NIR_PASS(_, nir, nir_opt_remove_phis);
 
+   /* Pre-Xe2 platforms don't have native support for dynamic programmable
+    * offsets. Since support includes non-uniform programmable offsets, we
+    * need to lower those texture messages in the same way we lower
+    * non-uniform texture/sampler handles.
+    */
    const bool lower_non_uniform_texture_offsets = device->info->ver < 20;
 
    const enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
@@ -1529,14 +1611,6 @@ anv_shader_lower_nir(struct anv_device *device,
       nir_lower_non_uniform_get_ssbo_size |
       (lower_non_uniform_texture_offsets ?
        nir_lower_non_uniform_texture_offset_access : 0);
-
-   /* Pre-Xe2 platforms don't have native support for dynamic programmable
-    * offsets. Since support includes non-uniform programmable offsets, we
-    * need to lower those texture messages in the same way we lower
-    * non-uniform texture/sampler handles.
-    */
-   if (lower_non_uniform_texture_offsets)
-      nir_divergence_analysis(nir);
 
    /* In practice, most shaders do not have non-uniform-qualified
     * accesses (see
@@ -1562,13 +1636,13 @@ anv_shader_lower_nir(struct anv_device *device,
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
-       pdevice->instance->drirc.debug.fs_sampler_undef_derivatives_workaround)
+       pdevice->drirc.debug.fs_sampler_undef_derivatives_workaround)
       NIR_PASS(_, nir, brw_nir_apply_sampler_undef_derivatives_workaround);
 
    if (mesa_shader_stage_uses_workgroup(nir->info.stage)) {
-      if (pdevice->instance->drirc.debug.emulate_divergent_barriers)
+      if (pdevice->drirc.debug.emulate_divergent_barriers)
          NIR_PASS(_, nir, brw_nir_lower_divergent_barriers, devinfo);
-      else if (pdevice->instance->drirc.debug.emulate_active_thread_barriers)
+      else if (pdevice->drirc.debug.emulate_active_thread_barriers)
          NIR_PASS(_, nir, brw_nir_lower_active_thread_barriers, devinfo);
 
       NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
@@ -1616,6 +1690,13 @@ anv_shader_lower_nir(struct anv_device *device,
                                            brw_fs_prog_key_is_dynamic(&shader_data->key.fs),
                   .mesh_dynamic          = nir->info.stage == MESA_SHADER_FRAGMENT &&
                                            shader_data->key.fs.mesh_input == INTEL_SOMETIMES,
+                  .use_fs_color_offset   = pdevice->uses_efficient_64bit &&
+                                           shader_data->bind_map.surface_count > 0 &&
+                                           shader_data->bind_map.surface_to_descriptor[0].set == ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
+                  .use_fs_color_map      = pdevice->uses_efficient_64bit &&
+                                           shader_data->bind_map.surface_count > 0 &&
+                                           shader_data->bind_map.surface_to_descriptor[0].set == ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS &&
+                                           shader_data->fs_color_map == NULL,
                },
                &shader_data->key.base,
                &shader_data->prog_data.base,
@@ -1623,7 +1704,7 @@ anv_shader_lower_nir(struct anv_device *device,
 
    if (!(shader_data->info->flags & VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT)) {
       NIR_PASS(_, nir, anv_nir_lower_resource_intel, pdevice,
-                  shader_data->bind_map.layout_type);
+                  shader_data->bind_map.binding_mode);
    }
 
    shader_data->push_desc_info.push_set_buffer =
@@ -1763,29 +1844,34 @@ anv_shaders_post_lower_rt(struct anv_device *device,
                           struct anv_shader_data *shaders_data,
                           uint32_t shader_count)
 {
+
    for (uint32_t s = 0; s < shader_count; s++) {
       struct anv_shader_data *shader_data = &shaders_data[s];
+      struct brw_nir_lower_rt_state state = {
+         .devinfo = device->info,
+         .key = &shader_data->key.bs,
+      };
       nir_shader *nir = shader_data->info->nir;
 
       switch (nir->info.stage) {
       case MESA_SHADER_RAYGEN:
-         brw_nir_lower_raygen(nir, device->info);
+         brw_nir_lower_raygen(nir, &state);
          break;
 
       case MESA_SHADER_ANY_HIT:
-         brw_nir_lower_any_hit(nir, device->info);
+         brw_nir_lower_any_hit(nir, &state);
          break;
 
       case MESA_SHADER_CLOSEST_HIT:
-         brw_nir_lower_closest_hit(nir, device->info);
+         brw_nir_lower_closest_hit(nir, &state);
          break;
 
       case MESA_SHADER_MISS:
-         brw_nir_lower_miss(nir, device->info);
+         brw_nir_lower_miss(nir, &state);
          break;
 
       case MESA_SHADER_CALLABLE:
-         brw_nir_lower_callable(nir, device->info);
+         brw_nir_lower_callable(nir, &state);
          break;
 
       case MESA_SHADER_INTERSECTION:
@@ -1901,9 +1987,9 @@ anv_bsr(const struct intel_device_info *devinfo,
     * these bits if VRT is disabled.
     */
    uint64_t registers_per_thread =
-      devinfo->ver >= 30 ? ((uint64_t)brw_register_blocks(devinfo,
-                                                          grf_used) << 60) :
-                                                          0;
+      devinfo->ver >= 30 ? ((uint64_t)intel_register_blocks(devinfo,
+                                                            grf_used) << 60) :
+                           0;
    return registers_per_thread |
           offset |
           SET_BITS(bindless_shader_dispatch_mode, 4, 4) |
@@ -1921,7 +2007,9 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
       jay_compile(devinfo, mem_ctx, nir,
                   (union brw_any_prog_data *)compile_params->prog_data,
                   (union brw_any_prog_key *)compile_params->key,
-                  shader_data->archiver);
+                  shader_data->archiver,
+                  nir->info.stage == MESA_SHADER_FRAGMENT ? params.fs.mue_map
+                                                          : NULL);
 
    /* Early return if there are not resume shaders to compile */
    if (params.bs.num_resume_shaders == 0 ||
@@ -1977,7 +2065,7 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
                                           resume_nir,
                                           &main_prog_data,
                                           (union brw_any_prog_key *)compile_params->key,
-                                          shader_data->archiver);
+                                          shader_data->archiver, NULL);
 
       resume_prog_data[i] = main_prog_data;
       resume_grf_used[i] = resume_prog_data[i].base.grf_used;
@@ -1992,6 +2080,11 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
        */
       reloc_count += resume_prog_data[i].base.num_relocs + 1;
    }
+
+   /* Copy resource requirements accumulated across all resume shaders. */
+   prog_data->base.total_scratch = main_prog_data.base.total_scratch;
+   prog_data->bs.max_stack_size = main_prog_data.bs.max_stack_size;
+   prog_data->base.has_ubo_pull = main_prog_data.base.has_ubo_pull;
 
    /* Allocate the relocs array once, sized for the whole thing. */
    struct intel_shader_reloc *relocs =
@@ -2080,6 +2173,7 @@ anv_shader_compile(struct vk_device *vk_device,
 {
    struct anv_device *device =
       container_of(vk_device, struct anv_device, vk);
+   struct anv_physical_device *pdevice = device->physical;
    VkResult result = VK_SUCCESS;
 
    for (uint32_t i = 0; i < shader_count; i++)
@@ -2148,10 +2242,9 @@ anv_shader_compile(struct vk_device *vk_device,
       shader_data->key_size = brw_prog_key_size(info->stage);
 
       /* Resolve now; shader->workaround exists only after brw_compile. */
-      struct anv_instance *instance = device->physical->instance;
-      if (instance->shader_workarounds != NULL) {
+      if (pdevice->shader_workarounds != NULL) {
          shader_data->workaround =
-            _mesa_hash_table_u64_search(instance->shader_workarounds,
+            _mesa_hash_table_u64_search(pdevice->shader_workarounds,
                                         shader_data->source_hash);
       }
 
@@ -2161,7 +2254,7 @@ anv_shader_compile(struct vk_device *vk_device,
             info->set_layouts[i]->dynamic_descriptor_count : 0;
       }
 
-      shader_data->bind_map.layout_type =
+      shader_data->bind_map.binding_mode =
          set_layouts_get_layout_type((struct anv_descriptor_set_layout * const *)info->set_layouts,
                                      info->set_layout_count);
       shader_data->bind_map.surface_to_descriptor =
@@ -2208,10 +2301,15 @@ anv_shader_compile(struct vk_device *vk_device,
          shader_data->key.fs.prefer_simd32 =
             shader_data->workaround != NULL &&
             shader_data->workaround->prefer_simd32_fs;
+         shader_data->fs_color_map = state != NULL ? state->cal : NULL;
          break;
       case MESA_SHADER_COMPUTE:
          populate_cs_prog_key(&shader_data->key.cs, vk_device->physical,
                               info->robustness);
+         shader_data->prog_data.cs.force_simd32 =
+            device->info->ver >= 20 &&
+            shader_data->workaround != NULL &&
+            shader_data->workaround->force_xe2_simd32_cs;
          break;
       case MESA_SHADER_RAYGEN:
       case MESA_SHADER_ANY_HIT:
@@ -2263,7 +2361,10 @@ anv_shader_compile(struct vk_device *vk_device,
          ordered_infos[MESA_SHADER_INTERSECTION]->nir,
          ordered_infos[MESA_SHADER_ANY_HIT] != NULL ?
          ordered_infos[MESA_SHADER_ANY_HIT]->nir : NULL,
-         device->info);
+         &(struct brw_nir_lower_rt_state) {
+            .devinfo = device->info,
+            .key = &shaders_data[0].key.bs,
+         });
    }
 
    if (mesa_shader_stage_is_graphics(shaders_data[0].info->stage))
@@ -2290,7 +2391,6 @@ anv_shader_compile(struct vk_device *vk_device,
          .stats = shader_data->stats,
          .log_data = device,
          .mem_ctx = mem_ctx,
-         .source_hash = shader_data->source_hash,
          .archiver = shader_data->archiver,
       };
       struct brw_compile_params *compile_params = &params.base;
@@ -2331,6 +2431,8 @@ anv_shader_compile(struct vk_device *vk_device,
          UNREACHABLE("Invalid graphics shader stage");
       }
 
+      shader_data->prog_data.base.source_hash = shader_data->source_hash;
+
       if (intel_use_jay(devinfo, nir->info.stage)) {
          struct jay_shader_bin *bin =
             anv_shader_compile_jay(devinfo, mem_ctx, nir, params, shader_data);
@@ -2349,6 +2451,9 @@ anv_shader_compile(struct vk_device *vk_device,
       } else {
          shader_data->code = brw_compile(compiler, compile_params);
       }
+
+      /* The compiler should not alter this. */
+      assert(shader_data->prog_data.base.source_hash == shader_data->source_hash);
 
       if (shader_data->info->stage == MESA_SHADER_FRAGMENT) {
          shader_data->num_stats =

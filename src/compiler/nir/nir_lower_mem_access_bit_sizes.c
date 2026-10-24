@@ -442,16 +442,20 @@ lower_mem_store(nir_builder *b, nir_intrinsic_instr *intrin,
             break;
          case nir_intrinsic_store_global:
             nir_global_atomic(b, 32, chunk_offset, iand_mask,
-                              .atomic_op = nir_atomic_op_iand);
+                              .atomic_op = nir_atomic_op_iand,
+                              .access = nir_intrinsic_access(intrin));
             nir_global_atomic(b, 32, chunk_offset, data,
-                              .atomic_op = nir_atomic_op_ior);
+                              .atomic_op = nir_atomic_op_ior,
+                              .access = nir_intrinsic_access(intrin));
             break;
          case nir_intrinsic_store_shared:
             nir_shared_atomic(b, 32, chunk_offset, iand_mask,
                               .atomic_op = nir_atomic_op_iand,
+                              .access = nir_intrinsic_access(intrin),
                               .base = nir_intrinsic_base(intrin));
             nir_shared_atomic(b, 32, chunk_offset, data,
                               .atomic_op = nir_atomic_op_ior,
+                              .access = nir_intrinsic_access(intrin),
                               .base = nir_intrinsic_base(intrin));
             break;
          case nir_intrinsic_store_scratch: {

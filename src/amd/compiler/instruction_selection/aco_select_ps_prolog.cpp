@@ -208,7 +208,7 @@ get_interp_color(isel_context* ctx, int interp_arg, unsigned attr_index, unsigne
 
       emit_interp_instr(ctx, attr_index, comp, interp_ij, dst, prim_mask, false);
    } else {
-      emit_interp_mov_instr(ctx, attr_index, comp, 0, dst, prim_mask, false);
+      emit_interp_mov_instr(ctx, attr_index, comp, 0, dst, prim_mask);
    }
 
    return dst;

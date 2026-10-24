@@ -259,13 +259,13 @@ vn_wsi_memory_info_init(struct vn_device_memory *mem,
    const VkMemoryDedicatedAllocateInfo *dedicated_info = NULL;
    const struct wsi_memory_allocate_info *wsi_info = NULL;
 
-   vk_foreach_struct_const(pnext, alloc_info->pNext) {
-      switch ((uint32_t)pnext->sType) {
+   vk_foreach_struct_const(sType, pnext, alloc_info->pNext) {
+      switch ((uint32_t)sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
-         dedicated_info = (const void *)pnext;
+         dedicated_info = pnext;
          break;
       case VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA:
-         wsi_info = (const void *)pnext;
+         wsi_info = pnext;
          break;
       default:
          break;
@@ -507,8 +507,8 @@ vn_wsi_clone_present_info(struct vn_device *dev, const VkPresentInfoKHR *pi)
    VkSwapchainPresentModeInfoKHR *spmi = NULL;
    VkPresentTimingsInfoEXT *pti = NULL;
 
-   vk_foreach_struct_const(pnext, pi->pNext) {
-      switch (pnext->sType) {
+   vk_foreach_struct_const(sType, pnext, pi->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR:
          dgpi = (void *)pnext;
          break;

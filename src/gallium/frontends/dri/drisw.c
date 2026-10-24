@@ -474,6 +474,9 @@ drisw_allocate_textures(struct dri_context *stctx,
        */
       templ.width0 = drawable->w;
       templ.height0 = drawable->h;
+
+      dri_drawable_allocate_msaa_textures(stctx, drawable, statts, count,
+                                          &templ);
    } else {
       for (i = 0; i < count; i++) {
          enum pipe_format format;
@@ -600,6 +603,11 @@ drisw_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
    const __DRIswrastLoaderExtension *loader = screen->swrast_loader;
    struct pipe_screen *pscreen = NULL;
    const struct drisw_loader_funcs *lf = &drisw_lf;
+
+   if (!loader) {
+      fprintf(stderr, "mesa: swrast interface not found\n");
+      return NULL;
+   }
 
    screen->swrast_no_present = debug_get_option_swrast_no_present();
 

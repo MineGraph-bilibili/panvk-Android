@@ -22,6 +22,12 @@ struct fd_perfcntr_counter;
 namespace pps
 {
 
+struct FreedrenoPerfRecord {
+   uint64_t timestamp;
+   uint32_t seqno;
+   std::vector<uint64_t> values;
+};
+
 class FreedrenoDriver : public Driver
 {
 public:
@@ -74,7 +80,12 @@ private:
    /**
     * Buffer used to read samples
     */
-   void *sample_buf;
+   std::vector<uint64_t> sample_buf;
+
+   /**
+    * Perf-counter records waiting to be accumulated
+    */
+   std::vector<FreedrenoPerfRecord> records;
 
    const struct fd_perfcntr_group *perfcntrs;
    unsigned num_perfcntrs;
@@ -97,9 +108,10 @@ private:
 
    void configure_counters(bool reset, bool wait);
    void collect_countables();
+   uint64_t gpu_timestamp_ticks() const;
 
    int configure_counters_stream();
-   bool collect_countables_stream();
+   void collect_countables_stream();
 
    /**
     * Split out countable mutable state from the class so that copy-
@@ -143,7 +155,8 @@ private:
       /* perfcntr stream related APIs */
       void configure_stream(struct drm_msm_perfcntr_config *req) const;
       void resolve_sample_idx(const struct drm_msm_perfcntr_config *req) const;
-      void collect_stream(const uint64_t *buf) const;
+      void collect_stream(const uint64_t *record_a,
+                          const uint64_t *record_b) const;
 
    private:
 

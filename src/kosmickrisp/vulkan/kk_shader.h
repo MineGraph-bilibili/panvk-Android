@@ -100,6 +100,10 @@ struct kk_shader_info {
       } tess;
 
       struct {
+         bool uses_flat_varyings;
+      } fs;
+
+      struct {
          struct mtl_size local_size;
       } cs;
    };
@@ -157,6 +161,9 @@ kk_nir_lower_descriptors(nir_shader *nir,
                          uint32_t set_layout_count,
                          struct vk_descriptor_set_layout *const *set_layouts);
 
+/* KK_WORKAROUND_18 */
+bool kk_nir_add_device_barrier_workaround(nir_shader *nir);
+
 bool kk_nir_lower_poly(struct nir_shader *nir);
 bool kk_nir_lower_null_images(nir_shader *nir);
 
@@ -169,6 +176,7 @@ bool kk_nir_lower_fs_multiview(nir_shader *nir, uint32_t view_mask);
 #define KK_TEXTURE_FLAG_CLAMP_TO_0 (1 << 0)
 
 bool kk_nir_lower_custom_border(nir_shader *nir);
+bool kk_nir_lower_image_view_min_lod(nir_shader *nir);
 
 VkResult kk_compile_nir_shader(struct kk_device *dev, nir_shader *nir,
                                const VkAllocationCallbacks *alloc,

@@ -49,6 +49,7 @@ i915_gem_create_context_ext(int fd,
                             enum intel_gem_create_context_flags flags,
                             uint32_t *ctx_id);
 bool i915_gem_supports_protected_context(int fd);
+bool i915_gem_supports_huc(int fd);
 bool i915_gem_get_param(int fd, uint32_t param, int *value);
 bool i915_gem_can_render_on_fd(int fd);
 bool i915_gem_supports_dma_buf_sync_file(int fd);

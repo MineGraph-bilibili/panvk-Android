@@ -115,12 +115,6 @@ struct wsi_device {
 
    bool disable_unordered_submits;
 
-   /* Wait for rendering to finish before handing an image to the window
-    * system.  Used by dma-buf capable devices which cannot attach their GPU
-    * completion fence to the dma-buf reservation object.
-    */
-   bool wait_present_before_queue;
-
    struct {
       /* Override the minimum number of images on the swapchain.
        * 0 = no override */
@@ -138,11 +132,6 @@ struct wsi_device {
 
       /* adds an extra minImageCount when running under xwayland */
       bool extra_xwayland_image;
-
-      /* Termux:X11/Winlator private DRI3 protocol: pass a directly mmap-able
-       * dma-buf with modifier 1274 through PixmapFromBuffers.
-       */
-      bool use_raw_fd_modifier;
 
       /* Never report VK_SUBOPTIMAL_KHR. Used to workaround
        * games that cannot handle SUBOPTIMAL correctly. */
@@ -167,6 +156,10 @@ struct wsi_device {
       /* Does not transfer the ownership to the command buffer. The command
        * buffer must retain the drawable to ensure lifespan. */
       void (*encode_drawable_present)(VkCommandBuffer cmd, void *drawable);
+      /* Required to work around Metal4 presentation bug. */
+      void (*cmd_blit_image)(VkCommandBuffer cmd,
+                             const VkBlitImageInfo2 *blit_info,
+                             bool opaque_alpha);
    } metal;
 
 
@@ -274,8 +267,6 @@ struct wsi_device_options {
    bool sw_device;
    bool extra_xwayland_image;
    bool emulate_24as32;
-   bool wait_present_before_queue;
-   bool x11_use_raw_fd_modifier;
 };
 
 VkResult

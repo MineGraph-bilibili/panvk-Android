@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <unistd.h>
-
 #include "genxml/decode.h"
 
 #include "vulkan/util/vk_util.h"
@@ -114,8 +112,6 @@ panvk_AllocateMemory(VkDevice _device,
 
       mem->bo = pan_kmod_bo_import(device->kmod.dev, fd_info->fd);
       if (!mem->bo) {
-         mesa_loge("panvk: bo_import failed (fd=%d errno=%d)", fd_info->fd,
-                   errno);
          result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
          goto err_destroy_mem;
       }
@@ -129,9 +125,16 @@ panvk_AllocateMemory(VkDevice _device,
           (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
          bo_flags |= PAN_KMOD_BO_FLAG_WB_MMAP;
 
+      /* A placed map aliases the BO at a caller-chosen address; on kbase
+       * only shareable (dma-buf backed) BOs can be mapped twice. */
+      bool shareable =
+         can_be_exported ||
+         (device->vk.enabled_features.memoryMapPlaced &&
+          (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT));
+
       bo_flags = panvk_device_adjust_bo_flags(device, bo_flags);
       mem->bo = pan_kmod_bo_alloc(device->kmod.dev,
-                                  can_be_exported ? NULL : device->kmod.vm,
+                                  shareable ? NULL : device->kmod.vm,
                                   pAllocateInfo->allocationSize, bo_flags);
       if (!mem->bo) {
          result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -488,18 +491,20 @@ panvk_GetMemoryFdPropertiesKHR(VkDevice _device,
     * import/free cycles of one dma-buf alias to a single GPU VA, and the
     * frees can tear down GPU PTEs that re-import does not restore,
     * breaking the later real import (GPU TRANSLATION_FAULT). Answer from
-    * the same assumptions the fd-import path uses instead (kmod_flags=0 +
-    * IMPORTED: visible + coherent, not cached), without creating any GPU
-    * mapping. Validated on G615/MT8300 (Gate G): single IMPORT per AHB,
-    * GPU clear lands. Matches panvk-kbase-android patch kbase-common/014.
+    * the same assumptions the fd-import path uses instead.
     */
    if (phys_dev->kbase_node_path[0]) {
-      if (fd < 0 || lseek(fd, 0, SEEK_END) < 0) {
-         mesa_loge("panvk: GetMemoryFdPropertiesKHR: bad fd=%d (errno=%d)",
-                   fd, errno);
+      /* fd < 0 is the only real error: MTK (and other vendor) AFBC gralloc
+       * dma-bufs do not implement llseek, so probing with lseek() falsely
+       * rejects valid ANativeWindow buffers and kills the whole WSI
+       * swapchain (black screen with working audio). The memoryTypeBits
+       * below are static assumptions anyway; the real import validates
+       * the fd on its own.
+       */
+      if (fd < 0)
          return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-      }
 
+      /* Matches kbase_kmod_bo_import_fd(..., kmod_flags=0, external): */
       const bool can_do_host_visible = true;
       const bool can_do_host_coherent = true;
       const bool can_do_host_cached = false;
@@ -568,4 +573,10 @@ panvk_GetDeviceMemoryOpaqueCaptureAddress(
    VK_FROM_HANDLE(panvk_device_memory, memory, pInfo->memory);
 
    return memory->addr.dev;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_SetDeviceMemoryPriorityEXT(VkDevice device, VkDeviceMemory memory,
+                                 float priority)
+{
 }

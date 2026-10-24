@@ -132,10 +132,20 @@ etna_context_destroy(struct pipe_context *pctx)
 
    slab_destroy_child(&ctx->transfer_pool);
 
-   if (ctx->in_fence_fd != -1)
+   if (ctx->in_fence_fd >= 0)
       close(ctx->in_fence_fd);
 
    FREE(pctx);
+}
+
+static inline void
+etna_shader_key_set_tex_swizzle(struct etna_shader_key *key, unsigned i,
+                                const struct pipe_sampler_view *view)
+{
+   key->tex_swizzle[i].swizzle_r = view->swizzle_r;
+   key->tex_swizzle[i].swizzle_g = view->swizzle_g;
+   key->tex_swizzle[i].swizzle_b = view->swizzle_b;
+   key->tex_swizzle[i].swizzle_a = view->swizzle_a;
 }
 
 static bool
@@ -145,9 +155,15 @@ etna_get_vs(struct etna_context *ctx, struct etna_shader_key* const key)
 
    key->tex_is_128bit = ctx->tex_is_128bit[MESA_SHADER_VERTEX];
 
-   if (key->tex_is_128bit)
+   if (key->tex_is_128bit) {
+      const unsigned offset = ctx->screen->specs.vertex_sampler_offset;
+
       for (unsigned i = 0; i < ctx->screen->specs.vertex_sampler_count; i++)
          key->sampler_companion[i] = ctx->sampler_companion[MESA_SHADER_VERTEX][i];
+
+      u_foreach_bit(i, key->tex_is_128bit)
+         etna_shader_key_set_tex_swizzle(key, i, ctx->sampler_view[offset + i]);
+   }
 
    ctx->shader.vs = etna_shader_variant(ctx->shader.bind_vs, key, &ctx->base.debug, true);
 
@@ -169,37 +185,38 @@ etna_get_fs(struct etna_context *ctx, struct etna_shader_key* const key)
     * halti < 2 has no HW shadow compare. halti >= 2 has it, but depth32f is
     * emulated as D24S8 and the float compare ref must not be clamped to the
     * D24 range, so it must compare in the shader (and not clamp the ref). */
-   if (ctx->dirty & (ETNA_DIRTY_SAMPLERS | ETNA_DIRTY_SAMPLER_VIEWS)) {
+   for (unsigned int i = 0; i < ctx->num_fragment_sampler_views; i++) {
+      if (!ctx->sampler[i] || !ctx->sampler_view[i])
+         continue;
 
-      for (unsigned int i = 0; i < ctx->num_fragment_sampler_views; i++) {
-         if (ctx->sampler[i]->compare_mode == PIPE_TEX_COMPARE_NONE)
-            continue;
+      if (ctx->sampler[i]->compare_mode == PIPE_TEX_COMPARE_NONE)
+         continue;
 
-         const bool emulated_z32f = format_is_emulated_z32f(ctx->sampler_view[i]->format);
+      const bool emulated_z32f = format_is_emulated_z32f(ctx->sampler_view[i]->format);
 
-         if (ctx->screen->info->halti >= 2 && !emulated_z32f)
-            continue;
+      if (ctx->screen->info->halti >= 2 && !emulated_z32f)
+         continue;
 
-         if (emulated_z32f)
-            key->shadow_compare_no_clamp = 1;
+      if (emulated_z32f)
+         key->shadow_compare_no_clamp = 1;
 
-         key->has_sample_tex_compare = 1;
-         key->num_texture_states = ctx->num_fragment_sampler_views;
+      key->has_sample_tex_compare = 1;
+      key->num_texture_states = ctx->num_fragment_sampler_views;
 
-         key->tex_swizzle[i].swizzle_r = ctx->sampler_view[i]->swizzle_r;
-         key->tex_swizzle[i].swizzle_g = ctx->sampler_view[i]->swizzle_g;
-         key->tex_swizzle[i].swizzle_b = ctx->sampler_view[i]->swizzle_b;
-         key->tex_swizzle[i].swizzle_a = ctx->sampler_view[i]->swizzle_a;
+      etna_shader_key_set_tex_swizzle(key, i, ctx->sampler_view[i]);
 
-         key->tex_compare_func[i] = ctx->sampler[i]->compare_func;
-      }
+      key->tex_compare_func[i] = ctx->sampler[i]->compare_func;
    }
 
    key->tex_is_128bit = ctx->tex_is_128bit[MESA_SHADER_FRAGMENT];
 
-   if (key->tex_is_128bit)
+   if (key->tex_is_128bit) {
       for (unsigned i = 0; i < ctx->screen->specs.fragment_sampler_count; i++)
          key->sampler_companion[i] = ctx->sampler_companion[MESA_SHADER_FRAGMENT][i];
+
+      u_foreach_bit(i, key->tex_is_128bit)
+         etna_shader_key_set_tex_swizzle(key, i, ctx->sampler_view[i]);
+   }
 
    ctx->shader.fs = etna_shader_variant(ctx->shader.bind_fs, key, &ctx->base.debug, true);
 
@@ -212,31 +229,12 @@ etna_get_fs(struct etna_context *ctx, struct etna_shader_key* const key)
    return true;
 }
 
-static inline void clear_draw_flag(struct etna_context **ctx_ptr) {
-   (*ctx_ptr)->in_draw_vbo = false;
-}
-
-#define AUTO_CLEAR_DRAW_FLAG(ctx) \
-   struct etna_context *_draw_cleanup __attribute__((cleanup(clear_draw_flag))) = (ctx); \
-   (ctx)->in_draw_vbo = true
-
 static void
 etna_reset_gpu_state(struct etna_context *ctx)
 {
    struct etna_cmd_stream *stream = ctx->stream;
    struct etna_screen *screen = ctx->screen;
    uint32_t dummy_attribs[VIVS_NFE_GENERIC_ATTRIB__LEN] = { 0 };
-
-   if (ctx->compute_only) {
-      /* compute only context does not make use of any of the dirty state tracking. */
-      assert(ctx->dirty == 0);
-      assert(ctx->dirty_sampler_views == 0);
-      assert(ctx->prev_active_samplers == 0);
-
-      etna_cmd_stream_mark_end_of_context_init(stream);
-
-      return;
-   }
 
    etna_set_state(stream, VIVS_GL_API_MODE, VIVS_GL_API_MODE_OPENGL);
    etna_set_state(stream, VIVS_PA_W_CLIP_LIMIT, 0x34000001);
@@ -271,10 +269,6 @@ etna_reset_gpu_state(struct etna_context *ctx)
 
       etna_set_state(stream, VIVS_SH_CONFIG, VIVS_SH_CONFIG_RTNE_ROUNDING);
    }
-
-   if (VIV_FEATURE(screen, ETNA_FEATURE_MSAA_FRAGMENT_OPERATION))
-      etna_set_state(stream, VIVS_PS_MSAA_CONFIG, 0x6fffffff & 0xf70fffff & 0xfff6ffff &
-                                                  0xfffff6ff & 0xffffff7f);
 
    if (VIV_FEATURE(screen, ETNA_FEATURE_BUG_FIXES18))
       etna_set_state(stream, VIVS_GL_BUG_FIXES, 0x6);
@@ -316,7 +310,9 @@ etna_reset_gpu_state(struct etna_context *ctx)
    ctx->index_buffer.FE_INDEX_STREAM_BASE_ADDR.bo = NULL;
    ctx->dirty = ~0L;
    ctx->dirty_sampler_views = ~0L;
+   ctx->dirty_samplers = ~0L;
    ctx->prev_active_samplers = ~0L;
+   ctx->prev_vs_sampler_base = ~0;
    ctx->needs_gpu_state_reset = false;
    ctx->alpha_coverage_dither_emitted = false;
 }
@@ -335,8 +331,6 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (!indirect && (!draws[0].count || !info->instance_count))
       return;
-
-   AUTO_CLEAR_DRAW_FLAG(etna_context(pctx));
 
    struct etna_context *ctx = etna_context(pctx);
    struct etna_screen *screen = ctx->screen;
@@ -371,39 +365,28 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
 
-   struct etna_shader_key key = {
-      .front_ccw = ctx->rasterizer->front_ccw,
-      .sprite_coord_enable = ctx->rasterizer->sprite_coord_enable,
-      .sprite_coord_yinvert = !!ctx->rasterizer->sprite_coord_mode,
-   };
+   if (unlikely(ctx->dirty & (ETNA_DIRTY_SHADER | ETNA_DIRTY_RASTERIZER |
+                              ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_SAMPLERS |
+                              ETNA_DIRTY_SAMPLER_VIEWS))) {
+      struct etna_shader_key *key = &ctx->shader.key;
 
-   if (screen->info->halti >= 5)
-      key.flatshade = ctx->rasterizer->flatshade;
+      memset(key, 0, sizeof(*key));
+      key->front_ccw = ctx->rasterizer->front_ccw;
+      key->sprite_coord_enable = ctx->rasterizer->sprite_coord_enable;
+      key->sprite_coord_yinvert = !!ctx->rasterizer->sprite_coord_mode;
 
-   /* On LINEAR_PE GPUs rendering directly to a linear shared resource,
-    * use shader-based R/B swap so bytes in memory have the correct order
-    * for external consumers. This avoids a dedicated flush-time blit.
-    * Per-RT bitmask so MRT with mixed shared/non-shared targets works. */
-   if (VIV_FEATURE(screen, ETNA_FEATURE_LINEAR_PE)) {
-      for (i = 0; i < pfb->nr_cbufs; i++) {
-         if (pfb->cbufs[i].texture) {
-            struct etna_resource *rsc = etna_resource(pfb->cbufs[i].texture);
-            if (rsc->shared && rsc->layout == ETNA_LAYOUT_LINEAR &&
-                translate_pe_format_rb_swap(pfb->cbufs[i].format)) {
-               key.frag_rb_swap |= (1 << i);
-            }
-         }
+      if (screen->info->halti >= 5)
+         key->flatshade = ctx->rasterizer->flatshade;
+
+      key->rt_is_128bit = ctx->framebuffer_s.rt_is_128bit;
+      key->has_128bit_rt = !!key->rt_is_128bit;
+      for (i = 0; i < ARRAY_SIZE(key->rt_companion); i++)
+         key->rt_companion[i] = ctx->framebuffer_s.rt_companion[i];
+
+      if (!etna_get_vs(ctx, key) || !etna_get_fs(ctx, key)) {
+         BUG("compiled shaders are not okay");
+         return;
       }
-   }
-
-   key.rt_is_128bit = ctx->framebuffer_s.rt_is_128bit;
-   key.has_128bit_rt = !!key.rt_is_128bit;
-   for (i = 0; i < ARRAY_SIZE(key.rt_companion); i++)
-      key.rt_companion[i] = ctx->framebuffer_s.rt_companion[i];
-
-   if (!etna_get_vs(ctx, &key) || !etna_get_fs(ctx, &key)) {
-      BUG("compiled shaders are not okay");
-      return;
    }
 
    /* Update any derived state */
@@ -426,6 +409,7 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * aside from the draw state updates that have been reserved.
     */
    etna_reserve_emit_space(ctx);
+   ETNA_CONTEXT_ATOMIC_EMIT(ctx);
 
    if (ctx->needs_gpu_state_reset)
       etna_reset_gpu_state(ctx);
@@ -490,13 +474,16 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (ctx->dirty & ETNA_DIRTY_FRAMEBUFFER) {
       for (i = 0; i < pfb->nr_cbufs; i++) {
-         struct pipe_resource *surf;
+         struct pipe_resource *rsc;
 
          if (!pfb->cbufs[i].texture)
             continue;
 
-         surf = pfb->cbufs[i].texture;
-         resource_written(ctx, surf);
+         rsc = pfb->cbufs[i].texture;
+         resource_written(ctx, rsc);
+
+         if (etna_resource(rsc)->shared && !etna_resource(rsc)->explicit_flush)
+            etna_context_add_flush_resource(ctx, rsc);
       }
    }
 
@@ -604,11 +591,8 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
          etna_resource_level_mark_changed(level);
 
-         /* PE rendered directly to the shared buffer (no render shadow).
-          * If the shader swapped R/B, data is in native byte order.
-          * Otherwise it's in PE-internal order (BGRA for RB_SWAP formats). */
          if (rsc->shared && res == rsc)
-            rsc->shared_native_order = !!(key.frag_rb_swap & (1 << i));
+            rsc->shared_native_order = false;
       }
    }
 
@@ -665,13 +649,18 @@ etna_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
                           (flags & PIPE_FLUSH_FENCE_FD) ? &out_fence_fd : NULL,
                           ctx->is_noop);
 
-   list_for_each_entry(struct etna_acc_query, aq, &ctx->active_acc_queries, node)
-      etna_acc_query_resume(aq, ctx);
+   if (ctx->in_fence_fd >= 0) {
+      close(ctx->in_fence_fd);
+      ctx->in_fence_fd = -1;
+   }
 
    if (fence)
       *fence = etna_fence_create(pctx, out_fence_fd);
 
    _mesa_hash_table_clear(ctx->pending_resources, NULL);
+
+   list_for_each_entry(struct etna_acc_query, aq, &ctx->active_acc_queries, node)
+      etna_acc_query_resume(aq, ctx);
 
    ctx->needs_gpu_state_reset = true;
 }
@@ -687,13 +676,10 @@ static void
 etna_context_force_flush(struct etna_cmd_stream *stream, void *priv)
 {
    struct pipe_context *pctx = priv;
-   struct etna_context *ctx = etna_context(pctx);
+
+   assert(!etna_context(pctx)->in_atomic_emit);
 
    etna_flush(pctx, NULL, 0, true);
-
-   /* update derived states as the context is now fully dirty */
-   if (ctx->in_draw_vbo)
-      etna_state_update(ctx);
 }
 
 void
@@ -764,6 +750,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->screen = screen;
    /* need some sane default in case gallium frontends don't set some state: */
    ctx->sample_mask = 0xffff;
+   ctx->sample_coverage = 1.0f;
 
    ctx->compute_only = compute_only;
    ctx->needs_gpu_state_reset = true;

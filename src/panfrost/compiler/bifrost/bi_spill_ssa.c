@@ -351,8 +351,11 @@ remat_to(bi_builder *b, bi_index dst, struct spill_ctx *ctx, unsigned node)
    assert(can_remat(I));
 
    switch (I->op) {
-   case BI_OPCODE_IADD_IMM_I32:
-      return bi_iadd_imm_i32_to(b, dst, I->src[0], I->index);
+   case BI_OPCODE_IADD_IMM_I32: {
+      bi_instr *J = bi_iadd_imm_i32_to(b, dst, I->src[0], I->index);
+      J->patch_imm_const_offset = I->patch_imm_const_offset;
+      return J;
+   }
    case BI_OPCODE_IADD_IMM_V2I16:
       return bi_iadd_imm_v2i16_to(b, dst, I->src[0], I->index);
    case BI_OPCODE_LD_PKA_I8:
@@ -417,7 +420,6 @@ insert_spill(bi_builder *b, struct spill_ctx *ctx, unsigned node)
 
       bi_memmov_to(b, mem, idx);
 
-      b->shader->spills++;
       /* We only need the extra registers reserved if we actually spilled
        * instead of just remat.
        */
@@ -441,7 +443,6 @@ insert_reload(struct spill_ctx *ctx, bi_block *block, bi_cursor cursor,
       remat_to(&b, idx, ctx, node);
    } else {
       bi_memmov_to(&b, idx, bi_index_as_mem(idx, ctx));
-      b.shader->fills++;
    }
 }
 

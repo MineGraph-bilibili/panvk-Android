@@ -28,17 +28,16 @@ si_emit_spi_config_cntl(struct si_context *sctx,
 static bool si_sqtt_init_bo(struct si_context *sctx)
 {
    unsigned max_se = sctx->screen->info.max_se;
-   uint64_t per_se_size, size;
+   uint64_t size;
 
-   /* The buffer size and address need to be aligned in HW regs. Align the
-    * size as early as possible so that we do all the allocation & addressing
-    * correctly. */
-   per_se_size = align64(sctx->sqtt->buffer_size, 1ull << SQTT_BUFFER_ALIGN_SHIFT);
+   /* The buffer size and address need to be aligned in HW regs. The size is
+    * aligned when it is set. */
+   assert(!(sctx->sqtt->buffer_size & ((1u << SQTT_BUFFER_ALIGN_SHIFT) - 1)));
 
    /* Compute total size of the thread trace BO for all SEs. */
    size = align64(sizeof(struct ac_sqtt_data_info) * max_se,
                   1ull << SQTT_BUFFER_ALIGN_SHIFT);
-   size += per_se_size * (uint64_t)max_se;
+   size += sctx->sqtt->buffer_size * (uint64_t)max_se;
 
    if (size > UINT32_MAX)
       return false;
@@ -296,20 +295,22 @@ si_sqtt_resize_bo(struct si_context *sctx)
 }
 
 static bool si_get_sqtt_trace(struct si_context *sctx,
-                              struct ac_sqtt_trace *sqtt)
+                              struct ac_sqtt_trace *sqtt,
+                              struct pipe_transfer **transfer)
 {
-   struct pipe_transfer *transfer;
    struct pipe_resource *bo = sctx->sqtt->bo;
 
    memset(sqtt, 0, sizeof(*sqtt));
 
-   sctx->sqtt->ptr = pipe_buffer_map(&sctx->b, bo, PIPE_MAP_READ, &transfer);
+   sctx->sqtt->ptr = pipe_buffer_map(&sctx->b, bo, PIPE_MAP_READ, transfer);
 
    if (!sctx->sqtt->ptr)
       return false;
 
    if (!ac_sqtt_get_trace(sctx->sqtt, &sctx->screen->info, sqtt)) {
-      pipe_buffer_unmap(&sctx->b, transfer);
+      pipe_buffer_unmap(&sctx->b, *transfer);
+      *transfer = NULL;
+      sctx->sqtt->ptr = NULL;
 
       if (!si_sqtt_resize_bo(sctx)) {
          mesa_loge("Failed to resize the SQTT buffer.");
@@ -323,7 +324,6 @@ static bool si_get_sqtt_trace(struct si_context *sctx,
       return false;
    }
 
-   pipe_buffer_unmap(&sctx->b, transfer);
    return true;
 }
 
@@ -455,8 +455,10 @@ void si_destroy_sqtt(struct si_context *sctx)
    free(sctx->sqtt->trigger_file);
 
    for (int i = 0; i < ARRAY_SIZE(sctx->sqtt->start_cs); i++) {
-      sscreen->ws->cs_destroy(sctx->sqtt->start_cs[i]);
-      sscreen->ws->cs_destroy(sctx->sqtt->stop_cs[i]);
+      if (sctx->sqtt->start_cs[i])
+         sscreen->ws->cs_destroy(sctx->sqtt->start_cs[i]);
+      if (sctx->sqtt->stop_cs[i])
+         sscreen->ws->cs_destroy(sctx->sqtt->stop_cs[i]);
    }
 
    struct rgp_pso_correlation *pso_correlation =
@@ -559,6 +561,7 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs)
       }
    } else {
       struct ac_sqtt_trace sqtt_trace = {0};
+      struct pipe_transfer *transfers[2];
 
       /* Stop SQTT */
       si_end_sqtt(sctx, rcs);
@@ -569,13 +572,12 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs)
       /* Wait for SQTT to finish and read back the bo */
       if (sctx->ws->fence_wait(sctx->ws, sctx->last_sqtt_fence,
                                OS_TIMEOUT_INFINITE) &&
-          si_get_sqtt_trace(sctx, &sqtt_trace)) {
-         struct pipe_transfer *transfer;
+          si_get_sqtt_trace(sctx, &sqtt_trace, &transfers[0])) {
          struct ac_spm_trace spm_trace;
 
          /* Map the SPM counter buffer */
          if (sctx->spm.bo)
-            sctx->spm.ptr = pipe_buffer_map(&sctx->b, sctx->spm.bo, PIPE_MAP_READ, &transfer);
+            sctx->spm.ptr = pipe_buffer_map(&sctx->b, sctx->spm.bo, PIPE_MAP_READ, &transfers[1]);
 
          if (sctx->spm.ptr)
             ac_spm_get_trace(&sctx->spm, &spm_trace);
@@ -584,9 +586,12 @@ void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs)
                              sctx->spm.ptr ? &spm_trace : NULL, NULL);
 
          if (sctx->spm.ptr) {
-            pipe_buffer_unmap(&sctx->b, transfer);
+            pipe_buffer_unmap(&sctx->b, transfers[1]);
             sctx->spm.ptr = NULL;
          }
+
+         pipe_buffer_unmap(&sctx->b, transfers[0]);
+         sctx->sqtt->ptr = NULL;
       } else if (sctx->sqtt->bo) {
          if (!sctx->sqtt->trigger_file) {
             sctx->sqtt->start_frame = num_frames + 10;
@@ -696,40 +701,14 @@ void si_sqtt_describe_barrier_start(struct si_context *sctx, struct radeon_cmdbu
 }
 
 void si_sqtt_describe_barrier_end(struct si_context *sctx, struct radeon_cmdbuf *rcs,
-                                  unsigned flags)
+                                  enum ac_rgp_flush_bits flush_bits)
 {
    struct rgp_sqtt_marker_barrier_end marker = {0};
 
    marker.identifier = RGP_SQTT_MARKER_IDENTIFIER_BARRIER_END;
    marker.cb_id = sctx->sqtt_cb_id;
 
-   if (flags & SI_BARRIER_SYNC_VS)
-      marker.vs_partial_flush = true;
-   if (flags & SI_BARRIER_SYNC_PS)
-      marker.ps_partial_flush = true;
-   if (flags & SI_BARRIER_SYNC_CS)
-      marker.cs_partial_flush = true;
-
-   if (flags & SI_BARRIER_PFP_SYNC_ME)
-      marker.pfp_sync_me = true;
-
-   if (flags & SI_BARRIER_INV_VMEM)
-      marker.inval_tcp = true;
-   if (flags & SI_BARRIER_INV_ICACHE)
-      marker.inval_sqI = true;
-   if (flags & SI_BARRIER_INV_SMEM)
-      marker.inval_sqK = true;
-   if (flags & SI_BARRIER_INV_L2)
-      marker.inval_tcc = true;
-
-   if (flags & SI_BARRIER_SYNC_AND_INV_CB) {
-      marker.inval_cb = true;
-      marker.flush_cb = true;
-   }
-   if (flags & SI_BARRIER_SYNC_AND_INV_DB) {
-      marker.inval_db = true;
-      marker.flush_db = true;
-   }
+   ac_rgp_flush_bits_to_barrier_marker(flush_bits, &marker);
 
    si_emit_sqtt_userdata(sctx, rcs, &marker, sizeof(marker) / 4);
 }
@@ -756,7 +735,7 @@ void si_write_user_event(struct si_context *sctx, struct radeon_cmdbuf *rcs,
       uint8_t *buffer = alloca(sizeof(marker) + marker.length);
       memcpy(buffer, &marker, sizeof(marker));
       memcpy(buffer + sizeof(marker), str, len);
-      buffer[sizeof(marker) + len - 1] = '\0';
+      memset(buffer + sizeof(marker) + len, 0, marker.length - len);
 
       si_emit_sqtt_userdata(sctx, rcs, buffer,
                             sizeof(marker) / 4 + marker.length / 4);

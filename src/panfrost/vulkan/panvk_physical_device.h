@@ -72,6 +72,8 @@ struct panvk_physical_device {
 
       uint64_t max_supported_va;
       alignas(8) uint64_t heap_used;
+      alignas(8) uint64_t available;
+      alignas(8) uint64_t available_ns;
    } memory;
 
    struct vk_sync_type drm_syncobj_type;
@@ -112,29 +114,16 @@ typedef VkResult (*panvk_kbase_sync_wait_func)(
    const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
    uint64_t abs_timeout_ns);
 
-typedef VkResult (*panvk_kbase_sync_export_func)(
-   struct vk_device *device, void *data,
-   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
-   int *sync_file);
-
-struct panvk_kbase_sync_pending_payload {
-   void *data;
-   panvk_kbase_sync_wait_func wait;
-   panvk_kbase_sync_export_func export_sync_file;
-   uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT];
-};
-
-bool panvk_kbase_sync_get_pending_payload(
-   struct vk_sync *sync,
-   struct panvk_kbase_sync_pending_payload *payload);
-
 void panvk_kbase_sync_set_pending(
    struct vk_sync *sync, void *data, panvk_kbase_sync_wait_func wait,
-   panvk_kbase_sync_export_func export_sync_file,
-   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT]);
+   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
+   const uint64_t target_addrs[PANVK_KBASE_SYNC_TARGET_COUNT]);
 
 bool panvk_kbase_sync_peek(struct vk_sync *sync, void **data,
                            uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT]);
+
+int panvk_kbase_sync_gpu_wait_targets(
+   struct vk_sync *sync, uint64_t out[PANVK_KBASE_SYNC_TARGET_COUNT]);
 #endif
 
 void panvk_physical_device_finish(struct panvk_physical_device *device);
@@ -153,9 +142,6 @@ panvk_get_max_buffer_size(const struct panvk_physical_device *device);
 
 bool panvk_bc_emul_enabled(const struct panvk_physical_device *device);
 
-bool panvk_bc_format_needs_emul(const struct panvk_physical_device *device,
-                                VkFormat format);
-
 #ifdef PAN_ARCH
 void panvk_per_arch(get_physical_device_extensions)(
    const struct panvk_physical_device *device,
@@ -165,9 +151,6 @@ void panvk_per_arch(get_physical_device_extensions)(
 void panvk_per_arch(get_physical_device_features)(
    const struct panvk_instance *instance,
    const struct panvk_physical_device *device, struct vk_features *features);
-
-void panvk_per_arch(log_texture_compression_summary)(
-   const struct panvk_physical_device *device);
 
 void panvk_per_arch(get_physical_device_properties)(
    const struct panvk_instance *instance,

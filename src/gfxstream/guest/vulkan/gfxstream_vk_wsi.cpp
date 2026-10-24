@@ -16,7 +16,14 @@ gfxstream_vk_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char* pName) {
 VkResult gfxstream_vk_wsi_init(struct gfxstream_vk_physical_device* physical_device) {
     VkResult result = (VkResult)0;
 
-    const struct wsi_device_options options = {.sw_device = false};
+    const struct wsi_device_options options = {
+#if defined(GFXSTREAM_VK_METAL)
+        // A host image cannot be bound to a Metal drawable; copy instead.
+        .sw_device = true,
+#else
+        .sw_device = false,
+#endif
+    };
     result = wsi_device_init(
         &physical_device->wsi_device, gfxstream_vk_physical_device_to_handle(physical_device),
         gfxstream_vk_wsi_proc_addr, &physical_device->instance->vk.alloc, -1, NULL, &options);

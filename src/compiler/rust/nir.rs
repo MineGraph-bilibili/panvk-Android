@@ -10,6 +10,9 @@ use std::marker::PhantomData;
 use std::mem::offset_of;
 use std::str;
 
+unsafe impl Send for nir_shader_compiler_options {}
+unsafe impl Sync for nir_shader_compiler_options {}
+
 pub struct ExecListIter<'a, T> {
     n: &'a exec_node,
     offset: usize,
@@ -84,6 +87,11 @@ impl ALUType {
     pub const BOOL: Self = Self(nir_type_bool);
     pub const FLOAT: Self = Self(nir_type_float);
     pub const INVALID: Self = Self(nir_type_invalid);
+
+    pub const INT8: Self = Self(nir_type_int8);
+    pub const UINT8: Self = Self(nir_type_uint8);
+    pub const FLOAT16: Self = Self(nir_type_float16);
+    pub const FLOAT32: Self = Self(nir_type_float32);
 
     pub fn new(base: Self, bit_size: u8) -> Self {
         assert!(bit_size.is_power_of_two());
@@ -286,6 +294,15 @@ impl nir_intrinsic_instr {
         self.const_index[usize::from(idx - 1)] as u32
     }
 
+    /// Reads a multi-word index (`size > 1` in nir_intrinsics.py) into an array
+    pub fn get_const_index_words<const N: usize>(&self, name: u32) -> [u32; N] {
+        let name: usize = name.try_into().unwrap();
+        let idx = self.info().index_map[name];
+        assert!(idx > 0);
+        let start = usize::from(idx - 1);
+        std::array::from_fn(|i| self.const_index[start + i] as u32)
+    }
+
     pub fn base(&self) -> i32 {
         self.get_const_index(NIR_INTRINSIC_BASE) as i32
     }
@@ -371,6 +388,12 @@ impl nir_intrinsic_instr {
 
     pub fn memory_modes(&self) -> nir_variable_mode {
         self.get_const_index(NIR_INTRINSIC_MEMORY_MODES)
+    }
+
+    pub fn io_semantics(&self) -> nir_io_semantics {
+        // A bitfield struct spanning two const_index slots, so reinterpret it
+        let words = self.get_const_index_words::<2>(NIR_INTRINSIC_IO_SEMANTICS);
+        unsafe { std::mem::transmute(words) }
     }
 
     pub fn flags(&self) -> u32 {

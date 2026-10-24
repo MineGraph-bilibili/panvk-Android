@@ -321,6 +321,10 @@ bool fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info
                        const struct fdl_image_params *params,
                        const struct fdl_explicit_layout *explicit_layout);
 
+uint64_t fdl6_layout_multiplanar_image(struct fdl_layout *y_layout,
+                                       struct fdl_layout *uv_layout,
+                                       uint32_t mip_levels);
+
 static inline void
 fdl_set_pitchalign(struct fdl_layout *layout, unsigned pitchalign)
 {

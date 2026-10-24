@@ -21,12 +21,14 @@
  * IN THE SOFTWARE.
  */
 #include "xe/intel_gem.h"
+#include "xe/intel_srcids.h"
 
 #include "drm-uapi/xe_drm.h"
 
 #include "common/intel_gem.h"
 #include "common/xe/intel_engine.h"
 
+#include "util/log.h"
 #include "util/os_time.h"
 #include "util/timespec.h"
 #include "util/compiler.h"
@@ -127,6 +129,21 @@ xe_gem_supports_protected_exec_queue(int fd)
    return intel_ioctl(fd, DRM_IOCTL_XE_DEVICE_QUERY, &query) == 0;
 }
 
+bool
+xe_gem_supports_huc(int fd)
+{
+   struct drm_xe_query_uc_fw_version huc_version = {
+      .uc_type = XE_QUERY_UC_TYPE_HUC,
+   };
+   struct drm_xe_device_query query = {
+      .query = DRM_XE_DEVICE_QUERY_UC_FW_VERSION,
+      .size = sizeof(huc_version),
+      .data = (uintptr_t)&huc_version,
+   };
+
+   return intel_ioctl(fd, DRM_IOCTL_XE_DEVICE_QUERY, &query) == 0;
+}
+
 bool xe_gem_supports_get_vm_faults(int fd)
 {
    struct drm_xe_vm_get_property prop = {
@@ -173,6 +190,38 @@ xe_vm_fault_get_level(const struct xe_vm_fault *vm_fault)
    }
 }
 
+static inline enum intel_pagefault_src
+xe_vm_fault_get_src(const struct xe_vm_fault *vm_fault)
+{
+   const uint8_t raw_id = vm_fault->srcid;
+
+   if (raw_id == 0) {
+      /* XXX: Kernel didn't give us a way to check for support */
+      return INTEL_PAGEFAULT_SRC_UNKNOWN;
+   }
+
+#define _SRCID_XEFI_DECL(name, id) UNUSED const uint8_t name = id;
+   INTEL_SRCID_XEFI_DECLS
+#undef _SRCID_XEFI_DECL
+
+#define _SRCID_MESA_DECL(name, ...)                                           \
+   {                                                                          \
+      const uint8_t _ids[] = __VA_ARGS__;                                     \
+      for (unsigned i = 0; i < ARRAY_SIZE(_ids); ++i) {                       \
+         if (_ids[i] == raw_id) {                                             \
+            return INTEL_PAGEFAULT_SRC_##name;                                \
+         }                                                                    \
+      }                                                                       \
+   }
+   INTEL_SRCID_MESA_DECLS
+#undef _SRCID_MESA_DECL
+
+   mesa_logd("FIXME: Received page fault with unknown SRCID 0x%02x\n",
+             (unsigned) raw_id);
+
+   return INTEL_PAGEFAULT_SRC_UNKNOWN;
+}
+
 struct intel_pagefault_buffer *
 xe_gem_alloc_get_vm_faults(int fd, int vm_id)
 {
@@ -207,6 +256,7 @@ xe_gem_alloc_get_vm_faults(int fd, int vm_id)
             result->items[i].access = xe_vm_fault_get_access(&kmd_faults[i]);
             result->items[i].type = xe_vm_fault_get_type(&kmd_faults[i]);
             result->items[i].level = xe_vm_fault_get_level(&kmd_faults[i]);
+            result->items[i].src = xe_vm_fault_get_src(&kmd_faults[i]);
          }
       }
    }

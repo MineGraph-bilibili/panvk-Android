@@ -75,10 +75,16 @@
 #define RUVD_ARRAY_MODE_MACRO_TILED_MICRO_TILED  0x00000005
 
 /* UVD tile config */
-#define RUVD_BANK_WIDTH(x)              ((x) << 0)
-#define RUVD_BANK_HEIGHT(x)             ((x) << 3)
-#define RUVD_MACRO_TILE_ASPECT_RATIO(x) ((x) << 6)
-#define RUVD_NUM_BANKS(x)               ((x) << 9)
+#define RUVD_BANK_WIDTH(x)              (((x) & 0x3) << 0)
+#define RUVD_BANK_HEIGHT(x)             (((x) & 0x3) << 3)
+#define RUVD_MACRO_TILE_ASPECT_RATIO(x) (((x) & 0x3) << 6)
+#define RUVD_NUM_BANKS(x)               (((x) & 0x7) << 9)
+#define RUVD_PIPE_CONFIG(x)             (((x) & 0x1f) << 12)
+#define RUVD_TILE_SPLIT(x)              (((x) & 0x7) << 17)
+#define RUVD_MICRO_TILE_MODE(x)         (((x) & 0x3) << 20)
+#define RUVD_NUM_PIPES(x)               (((x) & 0x7) << 22)
+#define RUVD_PIPE_INTERLEAVE(x)         (((x) & 0x7) << 25)
+#define RUVD_NUM_SHADER_ENGINES(x)      (((x) & 0x7) << 28)
 
 /* H.264 profile definitions */
 #define RUVD_H264_PROFILE_BASELINE    0x00000000

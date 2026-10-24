@@ -348,7 +348,7 @@ static inline uint64_t xgetbv(void)
    uint32_t eax, edx;
 
    __asm __volatile (
-     ".byte 0x0f, 0x01, 0xd0" // xgetbv isn't supported on gcc < 4.4
+     "xgetbv"
      : "=a"(eax),
        "=d"(edx)
      : "c"(0)
@@ -741,6 +741,7 @@ void check_cpu_caps_override(void)
       util_cpu_caps.has_avx512bw   = 0;
       util_cpu_caps.has_avx512vl   = 0;
       util_cpu_caps.has_avx512vbmi = 0;
+      util_cpu_caps.has_avx512fp16 = 0;
    }
 #endif /* DETECT_ARCH_X86 || DETECT_ARCH_X86_64 */
 }
@@ -756,6 +757,11 @@ void check_max_vector_bits(void)
    if (util_cpu_caps.has_avx512f) {
       util_cpu_caps.max_vector_bits = 512;
    } else if (util_cpu_caps.has_avx) {
+      util_cpu_caps.max_vector_bits = 256;
+   }
+#endif
+#if DETECT_ARCH_LOONGARCH64
+   if (util_cpu_caps.has_lasx) {
       util_cpu_caps.max_vector_bits = 256;
    }
 #endif
@@ -925,6 +931,7 @@ _util_cpu_detect_once(void)
                util_cpu_caps.has_avx512bw   = (regs7[1] >> 30) & 1;
                util_cpu_caps.has_avx512vl   = (regs7[1] >> 31) & 1;
                util_cpu_caps.has_avx512vbmi = (regs7[2] >>  1) & 1;
+               util_cpu_caps.has_avx512fp16 = (regs7[3] >> 23) & 1;
             }
          }
       }
@@ -1007,6 +1014,7 @@ _util_cpu_detect_once(void)
       printf("util_cpu_caps.has_avx512bw = %u\n", util_cpu_caps.has_avx512bw);
       printf("util_cpu_caps.has_avx512vl = %u\n", util_cpu_caps.has_avx512vl);
       printf("util_cpu_caps.has_avx512vbmi = %u\n", util_cpu_caps.has_avx512vbmi);
+      printf("util_cpu_caps.has_avx512fp16 = %u\n", util_cpu_caps.has_avx512fp16);
       printf("util_cpu_caps.has_clflushopt = %u\n", util_cpu_caps.has_clflushopt);
       printf("util_cpu_caps.num_L3_caches = %u\n", util_cpu_caps.num_L3_caches);
       printf("util_cpu_caps.num_cpu_mask_bits = %u\n", util_cpu_caps.num_cpu_mask_bits);

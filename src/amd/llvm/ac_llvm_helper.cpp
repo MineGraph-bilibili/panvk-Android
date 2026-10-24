@@ -5,6 +5,7 @@
  */
 
 #include <llvm-c/Core.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -13,6 +14,10 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/MC/MCSubtargetInfo.h>
 #include <llvm/Support/CommandLine.h>
+#if LLVM_VERSION_MAJOR >= 24
+#include <llvm/TargetParser/AMDGPUTargetParser.h>
+#include <llvm/TargetParser/Triple.h>
+#endif
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Utils.h>
@@ -77,6 +82,25 @@ bool ac_is_llvm_processor_supported(LLVMTargetMachineRef tm, const char *process
       return TM->getMCSubtargetInfo()->isCPUStringValid(processor);
    #endif
 }
+
+#if LLVM_VERSION_MAJOR >= 24
+/* The returned StringRef points into LLVM's static name table and is
+ * NUL-terminated, so it's safe to return as a C string.
+ */
+const char *ac_get_llvm_subarch_name(enum radeon_family family)
+{
+   AMDGPU::GPUKind kind = AMDGPU::parseArchAMDGCN(ac_get_llvm_processor_name(family));
+   return AMDGPU::getSubArchName(AMDGPU::getSubArch(kind)).data();
+}
+
+/* Validate the subarch before target machine creation, which would otherwise
+ * fatal-error on an unrecognized one.
+ */
+bool ac_is_llvm_subarch_supported(const char *subarch)
+{
+   return Triple::parseSubArch(subarch) != Triple::NoSubArch;
+}
+#endif
 
 void ac_reset_llvm_all_options_occurrences()
 {

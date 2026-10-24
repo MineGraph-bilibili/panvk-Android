@@ -381,6 +381,14 @@ update_pcbuf(struct rendering_state *state, mesa_shader_stage pstage,
 
 static void emit_compute_state(struct rendering_state *state)
 {
+   struct lvp_shader *shader = state->shaders[MESA_SHADER_COMPUTE];
+
+   memset(&state->dispatch_info, 0, sizeof(state->dispatch_info));
+
+   if (!shader)
+      return;
+
+   state->has_pcbuf[MESA_SHADER_COMPUTE] = shader->push_constant_size > 0;
    if (state->pcbuf_dirty[MESA_SHADER_COMPUTE] && state->has_pcbuf[MESA_SHADER_COMPUTE])
       update_pcbuf(state, MESA_SHADER_COMPUTE, MESA_SHADER_COMPUTE);
 
@@ -393,6 +401,11 @@ static void emit_compute_state(struct rendering_state *state)
 
    if (state->compute_shader_dirty)
       state->pctx->bind_compute_state(state->pctx, state->shaders[MESA_SHADER_COMPUTE]->shader_cso);
+
+
+   state->dispatch_info.block[0] = shader->pipeline_nir->nir->info.workgroup_size[0];
+   state->dispatch_info.block[1] = shader->pipeline_nir->nir->info.workgroup_size[1];
+   state->dispatch_info.block[2] = shader->pipeline_nir->nir->info.workgroup_size[2];
 
    state->compute_shader_dirty = false;
 
@@ -692,11 +705,6 @@ handle_compute_shader(struct rendering_state *state, struct lvp_shader *shader)
 {
    state->shaders[MESA_SHADER_COMPUTE] = shader;
 
-   state->has_pcbuf[MESA_SHADER_COMPUTE] = shader->push_constant_size > 0;
-
-   state->dispatch_info.block[0] = shader->pipeline_nir->nir->info.workgroup_size[0];
-   state->dispatch_info.block[1] = shader->pipeline_nir->nir->info.workgroup_size[1];
-   state->dispatch_info.block[2] = shader->pipeline_nir->nir->info.workgroup_size[2];
    state->compute_shader_dirty = true;
 
    if (shader->heaps && shader->embedded_samplers)
@@ -1496,7 +1504,7 @@ static struct pipe_surface create_img_surface(struct rendering_state *state,
    VkImageSubresourceRange imgv_subres =
       vk_image_view_subresource_range(&imgv->vk);
 
-   return create_img_surface_bo(state, &imgv_subres, image->planes[0].bo,
+   return create_img_surface_bo(state, &imgv_subres, image->planes[imgv->planes[0].image_plane].bo,
                                 lvp_vk_format_to_pipe_format(format),
                                 base_layer, layer_count, 0);
 }
@@ -1730,8 +1738,8 @@ resolve_ds(struct rendering_state *state, bool multi)
 
       struct pipe_blit_info info = {0};
 
-      info.src.resource = src_image->planes[0].bo;
-      info.dst.resource = dst_image->planes[0].bo;
+      info.src.resource = src_image->planes[src_imgv->planes[0].image_plane].bo;
+      info.dst.resource = dst_image->planes[dst_imgv->planes[0].image_plane].bo;
       info.src.format = src_imgv->pformat;
       info.dst.format = dst_imgv->pformat;
       info.filter = PIPE_TEX_FILTER_NEAREST;
@@ -1780,8 +1788,8 @@ resolve_color(struct rendering_state *state, bool multi)
 
       struct pipe_blit_info info = { 0 };
 
-      info.src.resource = src_image->planes[0].bo;
-      info.dst.resource = dst_image->planes[0].bo;
+      info.src.resource = src_image->planes[src_imgv->planes[0].image_plane].bo;
+      info.dst.resource = dst_image->planes[dst_imgv->planes[0].image_plane].bo;
       info.src.format = src_imgv->pformat;
       info.dst.format = dst_imgv->pformat;
       info.filter = PIPE_TEX_FILTER_NEAREST;
@@ -1833,12 +1841,12 @@ replicate_attachment(struct rendering_state *state,
       .x = 0,
       .y = 0,
       .z = 0,
-      .width = u_minify(dst_image->planes[0].bo->width0, level),
-      .height = u_minify(dst_image->planes[0].bo->height0, level),
-      .depth = u_minify(dst_image->planes[0].bo->depth0, level),
+      .width = u_minify(dst_image->planes[dst->planes[0].image_plane].bo->width0, level),
+      .height = u_minify(dst_image->planes[dst->planes[0].image_plane].bo->height0, level),
+      .depth = u_minify(dst_image->planes[dst->planes[0].image_plane].bo->depth0, level),
    };
-   state->pctx->resource_copy_region(state->pctx, dst_image->planes[0].bo, level,
-                                     0, 0, 0, src_image->planes[0].bo, level, &box);
+   state->pctx->resource_copy_region(state->pctx, dst_image->planes[dst->planes[0].image_plane].bo, level,
+                                     0, 0, 0, src_image->planes[src->planes[0].image_plane].bo, level, &box);
 }
 
 static struct lvp_image_view *
@@ -2749,6 +2757,30 @@ static void handle_copy_memory(struct vk_cmd_queue_entry *cmd,
    }
 }
 
+static void
+apply_blit_depth_dst(const struct lvp_image *img, struct pipe_box *box, const VkImageSubresourceLayers *srl, const VkOffset3D *offsets)
+{
+   if (img->planes[0].bo->target != PIPE_TEXTURE_3D) {
+      box->z = srl->baseArrayLayer;
+      box->depth = subresource_layercount(img, srl);
+   } else {
+      box->z = MIN2(offsets[0].z, offsets[1].z);
+      box->depth = abs(offsets[0].z - offsets[1].z);
+   }
+}
+
+static void
+apply_blit_depth_src(const struct lvp_image *img, struct pipe_box *box, const VkImageSubresourceLayers *srl, const VkOffset3D *offsets, bool zflip)
+{
+   if (img->planes[0].bo->target != PIPE_TEXTURE_3D) {
+      box->z = srl->baseArrayLayer;
+      box->depth = subresource_layercount(img, srl);
+   } else {
+      box->z = offsets[zflip].z;
+      box->depth = offsets[!zflip].z - offsets[zflip].z;
+   }
+}
+
 static void handle_blit_image(struct vk_cmd_queue_entry *cmd,
                               struct rendering_state *state)
 {
@@ -2773,22 +2805,18 @@ static void handle_blit_image(struct vk_cmd_queue_entry *cmd,
    }
 
    for (uint32_t i = 0; i < blitcmd->regionCount; i++) {
-      int srcX0, srcX1, srcY0, srcY1, srcZ0, srcZ1;
-      unsigned dstX0, dstX1, dstY0, dstY1, dstZ0, dstZ1;
+      int srcX0, srcX1, srcY0, srcY1;
+      unsigned dstX0, dstX1, dstY0, dstY1;
 
       srcX0 = blitcmd->pRegions[i].srcOffsets[0].x;
       srcX1 = blitcmd->pRegions[i].srcOffsets[1].x;
       srcY0 = blitcmd->pRegions[i].srcOffsets[0].y;
       srcY1 = blitcmd->pRegions[i].srcOffsets[1].y;
-      srcZ0 = blitcmd->pRegions[i].srcOffsets[0].z;
-      srcZ1 = blitcmd->pRegions[i].srcOffsets[1].z;
 
       dstX0 = blitcmd->pRegions[i].dstOffsets[0].x;
       dstX1 = blitcmd->pRegions[i].dstOffsets[1].x;
       dstY0 = blitcmd->pRegions[i].dstOffsets[0].y;
       dstY1 = blitcmd->pRegions[i].dstOffsets[1].y;
-      dstZ0 = blitcmd->pRegions[i].dstOffsets[0].z;
-      dstZ1 = blitcmd->pRegions[i].dstOffsets[1].z;
 
       if (dstX0 < dstX1) {
          info.dst.box.x = dstX0;
@@ -2816,34 +2844,9 @@ static void handle_blit_image(struct vk_cmd_queue_entry *cmd,
 
       assert_subresource_layers(info.src.resource, src_image, &blitcmd->pRegions[i].srcSubresource, blitcmd->pRegions[i].srcOffsets);
       assert_subresource_layers(info.dst.resource, dst_image, &blitcmd->pRegions[i].dstSubresource, blitcmd->pRegions[i].dstOffsets);
-      if (src_image->planes[0].bo->target == PIPE_TEXTURE_3D) {
-         if (dstZ0 < dstZ1) {
-            if (dst_image->planes[0].bo->target == PIPE_TEXTURE_3D) {
-               info.dst.box.z = dstZ0;
-               info.dst.box.depth = dstZ1 - dstZ0;
-            } else {
-               info.dst.box.z = blitcmd->pRegions[i].dstSubresource.baseArrayLayer;
-               info.dst.box.depth = subresource_layercount(dst_image, &blitcmd->pRegions[i].dstSubresource);
-            }
-            info.src.box.z = srcZ0;
-            info.src.box.depth = srcZ1 - srcZ0;
-         } else {
-            if (dst_image->planes[0].bo->target == PIPE_TEXTURE_3D) {
-               info.dst.box.z = dstZ1;
-               info.dst.box.depth = dstZ0 - dstZ1;
-            } else {
-               info.dst.box.z = blitcmd->pRegions[i].dstSubresource.baseArrayLayer;
-               info.dst.box.depth = subresource_layercount(dst_image, &blitcmd->pRegions[i].dstSubresource);
-            }
-            info.src.box.z = srcZ1;
-            info.src.box.depth = srcZ0 - srcZ1;
-         }
-      } else {
-         info.src.box.z = blitcmd->pRegions[i].srcSubresource.baseArrayLayer;
-         info.dst.box.z = blitcmd->pRegions[i].dstSubresource.baseArrayLayer;
-         info.src.box.depth = subresource_layercount(src_image, &blitcmd->pRegions[i].srcSubresource);
-         info.dst.box.depth = subresource_layercount(dst_image, &blitcmd->pRegions[i].dstSubresource);
-      }
+      bool zflip = blitcmd->pRegions[i].dstOffsets[0].z > blitcmd->pRegions[i].dstOffsets[1].z;
+      apply_blit_depth_src(src_image, &info.src.box, &blitcmd->pRegions[i].srcSubresource, blitcmd->pRegions[i].srcOffsets, zflip);
+      apply_blit_depth_dst(dst_image, &info.dst.box, &blitcmd->pRegions[i].dstSubresource, blitcmd->pRegions[i].dstOffsets);
 
       info.src.level = blitcmd->pRegions[i].srcSubresource.mipLevel;
       info.dst.level = blitcmd->pRegions[i].dstSubresource.mipLevel;
@@ -4467,20 +4470,18 @@ handle_shaders(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
 static void handle_draw_mesh_tasks(struct vk_cmd_queue_entry *cmd,
                                    struct rendering_state *state)
 {
+   memset(&state->dispatch_info, 0, sizeof(state->dispatch_info));
    state->dispatch_info.grid[0] = cmd->u.draw_mesh_tasks_ext.group_count_x;
    state->dispatch_info.grid[1] = cmd->u.draw_mesh_tasks_ext.group_count_y;
    state->dispatch_info.grid[2] = cmd->u.draw_mesh_tasks_ext.group_count_z;
-   state->dispatch_info.grid_base[0] = 0;
-   state->dispatch_info.grid_base[1] = 0;
-   state->dispatch_info.grid_base[2] = 0;
    state->dispatch_info.draw_count = 1;
-   state->dispatch_info.indirect = NULL;
    state->pctx->draw_mesh_tasks(state->pctx, &state->dispatch_info);
 }
 
 static void handle_draw_mesh_tasks_indirect(struct vk_cmd_queue_entry *cmd,
                                             struct rendering_state *state)
 {
+   memset(&state->dispatch_info, 0, sizeof(state->dispatch_info));
    state->dispatch_info.indirect = lvp_buffer_from_handle(cmd->u.draw_mesh_tasks_indirect_ext.buffer)->bo;
    state->dispatch_info.indirect_offset = cmd->u.draw_mesh_tasks_indirect_ext.offset;
    state->dispatch_info.indirect_stride = cmd->u.draw_mesh_tasks_indirect_ext.stride;
@@ -4491,6 +4492,7 @@ static void handle_draw_mesh_tasks_indirect(struct vk_cmd_queue_entry *cmd,
 static void handle_draw_mesh_tasks_indirect2(struct vk_cmd_queue_entry *cmd,
                                              struct rendering_state *state)
 {
+   memset(&state->dispatch_info, 0, sizeof(state->dispatch_info));
    state->dispatch_info.indirect = get_bda_internal_resource(state, cmd->u.draw_mesh_tasks_indirect2_ext.info->addressRange.address, &state->dispatch_info.indirect_offset);
    state->dispatch_info.indirect_stride = cmd->u.draw_mesh_tasks_indirect2_ext.info->addressRange.stride;
    state->dispatch_info.draw_count = cmd->u.draw_mesh_tasks_indirect2_ext.info->drawCount;
@@ -4500,6 +4502,7 @@ static void handle_draw_mesh_tasks_indirect2(struct vk_cmd_queue_entry *cmd,
 static void handle_draw_mesh_tasks_indirect_count(struct vk_cmd_queue_entry *cmd,
                                                   struct rendering_state *state)
 {
+   memset(&state->dispatch_info, 0, sizeof(state->dispatch_info));
    state->dispatch_info.indirect = lvp_buffer_from_handle(cmd->u.draw_mesh_tasks_indirect_count_ext.buffer)->bo;
    state->dispatch_info.indirect_offset = cmd->u.draw_mesh_tasks_indirect_count_ext.offset;
    state->dispatch_info.indirect_stride = cmd->u.draw_mesh_tasks_indirect_count_ext.stride;
@@ -4512,6 +4515,7 @@ static void handle_draw_mesh_tasks_indirect_count(struct vk_cmd_queue_entry *cmd
 static void handle_draw_mesh_tasks_indirect_count2(struct vk_cmd_queue_entry *cmd,
                                                    struct rendering_state *state)
 {
+   memset(&state->dispatch_info, 0, sizeof(state->dispatch_info));
    state->dispatch_info.indirect = get_bda_internal_resource(state, cmd->u.draw_mesh_tasks_indirect_count2_ext.info->addressRange.address, &state->dispatch_info.indirect_offset);
    state->dispatch_info.indirect_stride = cmd->u.draw_mesh_tasks_indirect_count2_ext.info->addressRange.stride;
    state->dispatch_info.draw_count = cmd->u.draw_mesh_tasks_indirect_count2_ext.info->maxDrawCount;
@@ -5284,10 +5288,6 @@ handle_dispatch_unaligned(struct vk_cmd_queue_entry *cmd, struct rendering_state
    state->dispatch_info.grid[0] = cmd->u.dispatch.group_count_x / last_block_size;
    state->dispatch_info.grid[1] = 1;
    state->dispatch_info.grid[2] = 1;
-   state->dispatch_info.grid_base[0] = 0;
-   state->dispatch_info.grid_base[1] = 0;
-   state->dispatch_info.grid_base[2] = 0;
-   state->dispatch_info.indirect = NULL;
    state->pctx->launch_grid(state->pctx, &state->dispatch_info);
 
    if (cmd->u.dispatch.group_count_x % last_block_size) {

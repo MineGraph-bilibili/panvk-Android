@@ -129,6 +129,7 @@ anv_per_hw_ver_files = files(
   'genX_cmd_draw.c',
   'genX_cmd_draw_generated_flush.h',
   'genX_cmd_draw_generated_indirect.h',
+  'genX_huc.h',
   'genX_cmd_video.c',
   'genX_cmd_video_enc.c',
   'genX_gfx_state.c',
@@ -263,6 +264,7 @@ anv_deps = [
   idep_intel_blorp,
   idep_mda,
   idep_anv_drirc,
+  idep_metrics_library_intel,
 ]
 
 if with_platform_x11

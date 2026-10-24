@@ -79,7 +79,7 @@ gen_msg_dest_len(const struct intel_device_info *devinfo,
                      enum lsc_data_size data_sz,
                      unsigned n)
 {
-   return DIV_ROUND_UP(lsc_data_size_bytes(data_sz) * n,
+   return DIV_ROUND_UP(lsc_data_size_register_bytes(data_sz) * n,
                        devinfo->grf_size);
 }
 
@@ -440,7 +440,7 @@ struct gen_parser {
       if (consume('.')) {
          if (inst.opcode == GEN_OP_MATH) {
             auto func = consume_ident_token();
-            inst.math.func = gen_math_function_from_string(SV_ARGS(func), &valid);
+            inst.math.func = gen_math_function_from_string(devinfo, SV_ARGS(func), &valid);
             if (!valid)
                return errorf("invalid math function '%.*s'", SV_FMT(func));
 
@@ -1730,7 +1730,7 @@ struct gen_parser {
       if (x_off < -512 || x_off > 511 || y_off < -512 || y_off > 511)
          return errorf("block2d offset out of signed 10-bit range");
 
-      const unsigned element_bytes = lsc_data_size_bytes(lsc.desc.data_size);
+      const unsigned element_bytes = lsc_data_size_register_bytes(lsc.desc.data_size);
       if ((x_off * (int)element_bytes) % 4 != 0 ||
           (y_off * (int)element_bytes) % 4 != 0)
          return errorf("block2d offset must be dword aligned in bytes");

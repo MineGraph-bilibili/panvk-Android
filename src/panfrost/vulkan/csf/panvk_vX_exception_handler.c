@@ -47,6 +47,18 @@ copy_fbd(struct cs_builder *b, bool has_zs_ext, uint32_t rt_count,
                 offsetof(struct panvk_fb_layer_state, tiler));
    cs_load_to(b, cs_scratch_reg_tuple(b, 2, 6), src_other, BITFIELD_MASK(6),
               2 * sizeof(uint32_t));
+
+   /* IR processes only part of the original render and cannot maintain the
+    * full-frame CRC table, so disable CRC and ETE in copied FBDs.
+    */
+   const unsigned flags2_reg =
+      offsetof(struct panvk_fb_layer_state, flags2) / sizeof(uint32_t);
+   struct cs_index mask = cs_scratch_reg32(b, 8);
+
+   cs_move32_to(b, mask, BITFIELD_MASK(28));
+   cs_and32(b, cs_scratch_reg32(b, flags2_reg), cs_scratch_reg32(b, flags2_reg),
+            mask);
+
    cs_store(b, cs_scratch_reg_tuple(b, 0, 8), dst, BITFIELD_MASK(8), 0);
 
    cs_load_to(b, cs_scratch_reg_tuple(b, 0, 2), src_other, BITFIELD_MASK(2),
@@ -73,6 +85,14 @@ copy_fbd(struct cs_builder *b, bool has_zs_ext, uint32_t rt_count,
               BITFIELD_MASK(6), 8 * sizeof(uint32_t));
    cs_load64_to(b, cs_scratch_reg64(b, 6), src_tiler,
                 14 * sizeof(uint32_t));
+#if PAN_ARCH >= 11
+   /* IR processes only part of the original render and cannot maintain the
+    * full-frame CRC table, so disable CRC and ETE in copied FBDs.
+    */
+   struct cs_index mask = cs_scratch_reg32(b, 16);
+   cs_move32_to(b, mask, BITFIELD_MASK(28));
+   cs_and32(b, cs_scratch_reg32(b, 4), cs_scratch_reg32(b, 4), mask);
+#endif
    cs_store(b, cs_scratch_reg_tuple(b, 0, 8), dst, BITFIELD_MASK(8),
             8 * sizeof(uint32_t));
 #endif
@@ -102,6 +122,53 @@ copy_fbd(struct cs_builder *b, bool has_zs_ext, uint32_t rt_count,
                  BITFIELD_MASK(8), rt_offset + (8 * sizeof(uint32_t)));
       cs_store(b, cs_scratch_reg_tuple(b, 0, 8), dst,
                BITFIELD_MASK(8), rt_offset + (8 * sizeof(uint32_t)));
+   }
+}
+
+static void
+invalidate_crc_addrs_from_oom_ctx(struct cs_builder *b,
+                                  struct cs_index subqueue_ctx)
+{
+   /* Reuse scratch offsets whose values are dead or reloaded after invalidation
+    * while preserving ir_count at offset 9. */
+   struct cs_index count = cs_scratch_reg32(b, 8);
+   struct cs_index addrs = cs_scratch_reg64(b, 10);
+   struct cs_index addr = cs_scratch_reg64(b, 12);
+#if PAN_ARCH == 10
+   struct cs_index valid = cs_scratch_reg32(b, 14);
+#elif PAN_ARCH >= 11
+   struct cs_index init = cs_scratch_reg32(b, 14);
+   struct cs_index mask = cs_scratch_reg32(b, 15);
+#endif
+
+   cs_load32_to(b, count, subqueue_ctx,
+                TILER_OOM_CTX_FIELD_OFFSET(crc_header_addr_count));
+   cs_add_imm64(b, addrs, subqueue_ctx,
+                TILER_OOM_CTX_FIELD_OFFSET(crc_header_addrs));
+
+#if PAN_ARCH == 10
+   cs_move32_to(b, valid, 0);
+#elif PAN_ARCH >= 11
+   cs_move32_to(b, mask, PAN_CRC_INIT_MASK);
+#endif
+
+   cs_while(b, MALI_CS_CONDITION_GREATER, count) {
+      cs_load64_to(b, addr, addrs, 0);
+#if PAN_ARCH == 10
+      cs_store32(b, valid, addr, PAN_CRC_VALID_OFFSET);
+#elif PAN_ARCH >= 11
+      cs_load32_to(b, init, addr, PAN_CRC_INIT_OFFSET);
+
+      cs_add_imm32(b, init, init, 1);
+      cs_and32(b, init, init, mask);
+      cs_store32(b, init, addr, PAN_CRC_INIT_OFFSET);
+#endif
+
+      /* Required before reusing register as the next load destination. */
+      cs_flush_stores(b);
+
+      cs_add_imm64(b, addrs, addrs, sizeof(uint64_t));
+      cs_add_imm32(b, count, count, -1);
    }
 }
 
@@ -248,6 +315,8 @@ generate_tiler_oom_handler(struct panvk_device *dev,
        * to use the last IR config.
        */
       cs_if(&b, MALI_CS_CONDITION_EQUAL, ir_count) {
+         invalidate_crc_addrs_from_oom_ctx(&b, subqueue_ctx);
+
          cs_load64_to(&b, current_fbd_ptr_reg, subqueue_ctx,
                       TILER_OOM_CTX_FIELD_OFFSET(layer_fbd_ptr));
          cs_load64_to(&b, ir_descs_ptr, subqueue_ctx,

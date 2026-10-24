@@ -850,6 +850,8 @@ main(int argc, char *argv[])
    if (option_print_offsets)
       batch_flags |= INTEL_BATCH_DECODE_OFFSETS;
    batch_flags |= INTEL_BATCH_DECODE_FLOATS;
+   batch_flags |= INTEL_BATCH_DECODE_SURFACES;
+   batch_flags |= INTEL_BATCH_DECODE_SAMPLERS;
 
    getline(&line, &line_size, file);
    rewind(file);

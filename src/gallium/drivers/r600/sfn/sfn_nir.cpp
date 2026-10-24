@@ -890,6 +890,10 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    NIR_PASS(_, sh, nir_lower_phis_to_scalar, NULL, NULL);
    NIR_PASS(_, sh, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
    NIR_PASS(_, sh, r600_nir_lower_int_tg4);
+
+
+   if (gfx_level < EVERGREEN)
+      NIR_PASS(_, sh, r600::r600_nir_lower_buf_txf_pre_eg);
    NIR_PASS(_, sh, r600::r600_nir_lower_tex_to_backend, gfx_level);
 
    if (lower_64bit_io_to_vec2) {

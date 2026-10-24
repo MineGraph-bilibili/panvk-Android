@@ -1,7 +1,7 @@
 // Copyright © 2024 Mel Henning
 // SPDX-License-Identifier: MIT
 
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
 use std::hash::{BuildHasher, Hash};
 
 #[derive(Copy, Clone)]
@@ -16,40 +16,31 @@ enum Node<X: Copy> {
     Root(Root<X>),
 }
 
-/// Union-find structure
-///
-/// This implementation follows Tarjan and van Leeuwen - specifically the
-/// "link by size" and "halving" variant.
-///
-/// Robert E. Tarjan and Jan van Leeuwen. 1984. Worst-case Analysis of Set
-///     Union Algorithms. J. ACM 31, 2 (April 1984), 245–281.
-///     <https://doi.org/10.1145/62.2160>
-pub struct UnionFind<X: Copy + Hash + Eq, H: BuildHasher + Default> {
-    idx_map: HashMap<X, usize, H>,
-    nodes: Vec<Node<X>>,
-}
+struct NodeVec<X: Copy>(Vec<Node<X>>);
 
-impl<X: Copy + Hash + Eq, H: BuildHasher + Default> UnionFind<X, H> {
-    /// Create a new union-find structure
-    ///
-    /// At initialization, each possible value is in its own set
-    pub fn new() -> Self {
-        UnionFind {
-            idx_map: Default::default(),
-            nodes: Vec::new(),
-        }
+impl<X: Copy> NodeVec<X> {
+    fn new() -> Self {
+        NodeVec(Vec::new())
     }
 
-    fn find_root(&mut self, mut idx: usize) -> (usize, Root<X>) {
+    fn push(&mut self, representative: X) -> usize {
+        self.0.push(Node::Root(Root {
+            size: 1,
+            representative,
+        }));
+        self.0.len() - 1
+    }
+
+    fn find_update_root(&mut self, mut idx: usize) -> (usize, Root<X>) {
         loop {
-            match self.nodes[idx] {
+            match self.0[idx] {
                 Node::Child { parent_idx } => {
-                    match self.nodes[parent_idx] {
+                    match self.0[parent_idx] {
                         Node::Child {
                             parent_idx: grandparent_idx,
                         } => {
                             // "Halving" in Tarjan and van Leeuwen
-                            self.nodes[idx] = Node::Child {
+                            self.0[idx] = Node::Child {
                                 parent_idx: grandparent_idx,
                             };
                             idx = grandparent_idx;
@@ -63,12 +54,38 @@ impl<X: Copy + Hash + Eq, H: BuildHasher + Default> UnionFind<X, H> {
             }
         }
     }
+}
+
+/// Union-find structure
+///
+/// This implementation follows Tarjan and van Leeuwen - specifically the
+/// "link by size" and "halving" variant.
+///
+/// Robert E. Tarjan and Jan van Leeuwen. 1984. Worst-case Analysis of Set
+///     Union Algorithms. J. ACM 31, 2 (April 1984), 245–281.
+///     <https://doi.org/10.1145/62.2160>
+pub struct UnionFind<X: Copy + Hash + Eq, H: BuildHasher + Default> {
+    idx_map: HashMap<X, usize, H>,
+    nodes: NodeVec<X>,
+}
+
+impl<X: Copy + Hash + Eq, H: BuildHasher + Default> UnionFind<X, H> {
+    /// Create a new union-find structure
+    ///
+    /// At initialization, each possible value is in its own set
+    pub fn new() -> Self {
+        UnionFind {
+            idx_map: Default::default(),
+            nodes: NodeVec::new(),
+        }
+    }
 
     /// Find the representative element for x
     pub fn find(&mut self, x: X) -> X {
         match self.idx_map.get(&x) {
             Some(&idx) => {
-                let (_, Root { representative, .. }) = self.find_root(idx);
+                let (_, Root { representative, .. }) =
+                    self.nodes.find_update_root(idx);
                 representative
             }
             None => x,
@@ -76,13 +93,7 @@ impl<X: Copy + Hash + Eq, H: BuildHasher + Default> UnionFind<X, H> {
     }
 
     fn map_or_create(&mut self, x: X) -> usize {
-        *self.idx_map.entry(x).or_insert_with(|| {
-            self.nodes.push(Node::Root(Root {
-                size: 1,
-                representative: x,
-            }));
-            self.nodes.len() - 1
-        })
+        *self.idx_map.entry(x).or_insert_with(|| self.nodes.push(x))
     }
 
     /// Union the sets containing a and b
@@ -96,8 +107,8 @@ impl<X: Copy + Hash + Eq, H: BuildHasher + Default> UnionFind<X, H> {
 
         let a_idx = self.map_or_create(a);
         let b_idx = self.map_or_create(b);
-        let (a_root_idx, a_root) = self.find_root(a_idx);
-        let (b_root_idx, b_root) = self.find_root(b_idx);
+        let (a_root_idx, a_root) = self.nodes.find_update_root(a_idx);
+        let (b_root_idx, b_root) = self.nodes.find_update_root(b_idx);
 
         if a_root_idx != b_root_idx {
             // Keep the tree balanced
@@ -107,11 +118,11 @@ impl<X: Copy + Hash + Eq, H: BuildHasher + Default> UnionFind<X, H> {
                 (b_root_idx, a_root_idx)
             };
 
-            self.nodes[new_root_idx] = Node::Root(Root {
+            self.nodes.0[new_root_idx] = Node::Root(Root {
                 size: a_root.size + b_root.size,
                 representative: a_root.representative,
             });
-            self.nodes[new_child_idx] = Node::Child {
+            self.nodes.0[new_child_idx] = Node::Child {
                 parent_idx: new_root_idx,
             };
         }
@@ -119,7 +130,36 @@ impl<X: Copy + Hash + Eq, H: BuildHasher + Default> UnionFind<X, H> {
 
     /// Return true if find() is the identity mapping
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.nodes.0.is_empty()
+    }
+}
+
+pub struct IntoIter<X: Copy> {
+    idx_map: hash_map::IntoIter<X, usize>,
+    nodes: NodeVec<X>,
+}
+
+impl<X: Copy> Iterator for IntoIter<X> {
+    type Item = (X, X);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (k, idx) = self.idx_map.next()?;
+        let (_, root) = self.nodes.find_update_root(idx);
+        Some((k, root.representative))
+    }
+}
+
+impl<X: Copy + Hash + Eq, H: BuildHasher + Default> IntoIterator
+    for UnionFind<X, H>
+{
+    type Item = (X, X);
+    type IntoIter = IntoIter<X>;
+
+    fn into_iter(self) -> IntoIter<X> {
+        IntoIter {
+            idx_map: self.idx_map.into_iter(),
+            nodes: self.nodes,
+        }
     }
 }
 
@@ -150,8 +190,8 @@ mod tests {
     impl<'a, X: Copy + Hash + Eq, H: BuildHasher + Default> HeightCalc<'a, X, H> {
         fn new(uf: &'a UnionFind<X, H>) -> Self {
             let mut downward_edges: Vec<Vec<usize>> =
-                uf.nodes.iter().map(|_| Vec::new()).collect();
-            for (i, node) in uf.nodes.iter().enumerate() {
+                uf.nodes.0.iter().map(|_| Vec::new()).collect();
+            for (i, node) in uf.nodes.0.iter().enumerate() {
                 if let Node::Child { parent_idx } = node {
                     downward_edges[*parent_idx].push(i);
                 }
@@ -173,7 +213,7 @@ mod tests {
         fn check_roots(&self) -> u32 {
             let mut total_size = 0;
             let mut max_height = 0;
-            for (i, node) in self.uf.nodes.iter().enumerate() {
+            for (i, node) in self.uf.nodes.0.iter().enumerate() {
                 if let Node::Root(root) = node {
                     let info = self.calc_info(i);
                     assert_eq!(root.size, info.size);
@@ -191,7 +231,7 @@ mod tests {
                     assert!(info.height <= max_expected_height);
                 }
             }
-            assert_eq!(total_size, self.uf.nodes.len());
+            assert_eq!(total_size, self.uf.nodes.0.len());
             assert_eq!(total_size, self.uf.idx_map.len());
             max_height
         }

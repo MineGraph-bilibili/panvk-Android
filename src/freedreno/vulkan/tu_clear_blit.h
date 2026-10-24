@@ -32,6 +32,11 @@ tu6_dirty_lrz_fc(struct tu_cmd_buffer *cmd, struct tu_cs *cs, struct tu_image* i
 
 template <chip CHIP>
 void
+tu6_clear_lrz_partial(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+                      struct tu_image *image, const VkClearValue *value);
+
+template <chip CHIP>
+void
 tu_resolve_sysmem(struct tu_cmd_buffer *cmd,
                   struct tu_cs *cs,
                   const struct tu_image_view *src,

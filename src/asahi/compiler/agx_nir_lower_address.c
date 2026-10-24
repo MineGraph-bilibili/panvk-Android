@@ -128,11 +128,13 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
    } else if (intr->intrinsic == nir_intrinsic_global_atomic) {
       repl =
          nir_global_atomic_agx(b, bit_size, new_base, offset, intr->src[1].ssa,
+                               .access = nir_intrinsic_access(intr),
                                .atomic_op = nir_intrinsic_atomic_op(intr),
                                .sign_extend = match.sign_extend);
    } else if (intr->intrinsic == nir_intrinsic_global_atomic_swap) {
       repl = nir_global_atomic_swap_agx(
          b, bit_size, new_base, offset, intr->src[1].ssa, intr->src[2].ssa,
+         .access = nir_intrinsic_access(intr),
          .atomic_op = nir_intrinsic_atomic_op(intr),
          .sign_extend = match.sign_extend);
    } else {

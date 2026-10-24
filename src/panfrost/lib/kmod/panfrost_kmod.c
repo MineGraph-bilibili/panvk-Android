@@ -792,7 +792,10 @@ panfrost_kmod_perf_thread(void *data)
       if (fds[1].revents & POLLIN) {
          uint64_t expired = 0;
 
-         read(session->timerfd, &expired, sizeof(expired));
+         ret = read(session->timerfd, &expired, sizeof(expired));
+         if (ret < 0)
+            goto err;
+
          pthread_mutex_lock(&session->lock);
          panfrost_kmod_perf_sample_locked(session);
          pthread_mutex_unlock(&session->lock);

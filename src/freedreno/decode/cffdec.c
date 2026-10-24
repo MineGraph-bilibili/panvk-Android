@@ -2859,6 +2859,27 @@ cp_fixed_stride_draw_table(const uint32_t *dwords, uint32_t sizedwords,
 }
 
 static void
+cp_reg_to_scratch(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_REG_TO_SCRATCH");
+   internal_packet(dwords, sizedwords, rnn, domain);
+}
+
+static void
+cp_scratch_to_reg(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_SCRATCH_TO_REG");
+   internal_packet(dwords, sizedwords, rnn, domain);
+}
+
+static void
+cp_scratch_write(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_SCRATCH_WRITE");
+   internal_packet(dwords, sizedwords, rnn, domain);
+}
+
+static void
 cp_wfi(const uint32_t *dwords, uint32_t sizedwords, int level)
 {
    needs_wfi = false;
@@ -2888,7 +2909,7 @@ cp_mem_write(const uint32_t *dwords, uint32_t sizedwords, int level)
 }
 
 static void
-cp_rmw(const uint32_t *dwords, uint32_t sizedwords, int level)
+cp_reg_rmw(const uint32_t *dwords, uint32_t sizedwords, int level)
 {
    struct rnndomain *domain;
    const char *str;
@@ -2904,7 +2925,7 @@ cp_rmw(const uint32_t *dwords, uint32_t sizedwords, int level)
 }
 
 static void
-cp_reg_mem(const uint32_t *dwords, uint32_t sizedwords, int level)
+cp_reg_mem(const uint32_t *dwords, int level)
 {
    uint32_t val = dwords[0] & 0xffff;
    printl(3, "%sbase register: %s\n", levels[level], regname(val, 1));
@@ -2919,6 +2940,22 @@ cp_reg_mem(const uint32_t *dwords, uint32_t sizedwords, int level)
       uint32_t cnt = (dwords[0] >> 19) & 0x3ff;
       dump_hex(ptr, cnt, level + 1);
    }
+}
+
+static void
+cp_reg_to_mem(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_REG_TO_MEM");
+   internal_packet(dwords, sizedwords, rnn, domain);
+   cp_reg_mem(dwords, level);
+}
+
+static void
+cp_mem_to_reg(const uint32_t *dwords, uint32_t sizedwords, int level)
+{
+   struct rnndomain *domain = rnn_finddomain(rnn->db, "CP_MEM_TO_REG");
+   internal_packet(dwords, sizedwords, rnn, domain);
+   cp_reg_mem(dwords, level);
 }
 
 struct draw_state {
@@ -3308,9 +3345,9 @@ static const struct type3_op {
    CP(INDIRECT_BUFFER, cp_indirect),
    CP(INDIRECT_BUFFER_PFD, cp_indirect),
    CP(WAIT_FOR_IDLE, cp_wfi),
-   CP(REG_RMW, cp_rmw),
-   CP(REG_TO_MEM, cp_reg_mem),
-   CP(MEM_TO_REG, cp_reg_mem), /* same layout as CP_REG_TO_MEM */
+   CP(REG_RMW, cp_reg_rmw),
+   CP(REG_TO_MEM, cp_reg_to_mem),
+   CP(MEM_TO_REG, cp_mem_to_reg),
    CP(MEM_WRITE, cp_mem_write),
    CP(EVENT_WRITE, cp_event_write),
    CP(RUN_OPENCL, cp_run_cl),
@@ -3356,6 +3393,10 @@ static const struct type3_op {
    CP(START_BIN, cp_start_bin),
 
    CP(FIXED_STRIDE_DRAW_TABLE, cp_fixed_stride_draw_table),
+
+   CP(REG_TO_SCRATCH, cp_reg_to_scratch),
+   CP(SCRATCH_TO_REG, cp_scratch_to_reg),
+   CP(SCRATCH_WRITE, cp_scratch_write),
 
    /* for a7xx */
    CP(THREAD_CONTROL, cp_set_thread_control),

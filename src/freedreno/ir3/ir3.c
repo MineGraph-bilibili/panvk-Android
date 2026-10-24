@@ -267,13 +267,7 @@ ir3_get_reg_independent_max_waves(struct ir3_shader_variant *v,
 
    /* If this is a compute shader, compute the limit based on shared size */
    if (ir3_shader_compute(v)) {
-      unsigned threads_per_wg =
-         v->local_size[0] * v->local_size[1] * v->local_size[2];
-      unsigned waves_per_wg =
-         DIV_ROUND_UP(threads_per_wg, compiler->info->threadsize_base *
-                                         (double_threadsize ? 2 : 1) *
-                                         compiler->info->wave_granularity) *
-         compiler->info->wave_granularity;
+      unsigned waves_per_wg = ir3_get_waves_per_wg(v, double_threadsize);
 
       /* Shared is allocated in chunks of 1k */
       unsigned shared_per_wg = ALIGN_POT(v->shared_size, 1024);
@@ -350,6 +344,32 @@ ir3_get_min_reg_count(const struct ir3_shader_variant *v, bool double_threadsize
    return (v->compiler->info->props.reg_size_vec4 /
       ((max_waves / v->compiler->info->wave_granularity) *
        (double_threadsize ? 2 : 1) + 1)) + 1;
+}
+
+unsigned
+ir3_get_waves_per_wg(struct ir3_shader_variant *v, bool double_threadsize)
+{
+   assert(ir3_shader_compute(v));
+
+   struct ir3_compiler *compiler = v->compiler;
+   unsigned threads_per_wg;
+
+   if (v->local_size_variable) {
+      if (v->type == MESA_SHADER_KERNEL) {
+         threads_per_wg =
+            compiler->info->threadsize_base * (double_threadsize ? 2 : 1);
+      } else {
+         /* We have to expect the worst case. */
+         threads_per_wg = compiler->max_variable_workgroup_size;
+      }
+   } else {
+      threads_per_wg = v->local_size[0] * v->local_size[1] * v->local_size[2];
+   }
+
+   return DIV_ROUND_UP(threads_per_wg, compiler->info->threadsize_base *
+                                          (double_threadsize ? 2 : 1) *
+                                          compiler->info->wave_granularity) *
+          compiler->info->wave_granularity;
 }
 
 void

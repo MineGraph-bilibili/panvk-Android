@@ -54,6 +54,7 @@ static void blorp_measure_end(struct blorp_batch *_batch,
                          params->op,
                          params->x1 - params->x0,
                          params->y1 - params->y0,
+                         params->num_layers,
                          params->num_samples,
                          params->shader_pipeline,
                          params->depth.enabled ? params->depth.view.format :
@@ -79,7 +80,7 @@ blorp_emit_reloc(struct blorp_batch *batch,
       .bo = address.buffer,
       .offset = address.offset,
    };
-   anv_reloc_list_add_bo(cmd_buffer->batch.relocs, anv_addr.bo);
+   anv_cmd_buffer_add_reloc_bo(cmd_buffer, anv_addr.bo);
    return anv_address_physical(anv_address_add(anv_addr, delta));
 }
 
@@ -130,19 +131,15 @@ blorp_alloc_dynamic_state(struct blorp_batch *batch,
    return state.map;
 }
 
-UNUSED static void *
-blorp_alloc_general_state(struct blorp_batch *batch,
-                          uint32_t size,
-                          uint32_t alignment,
-                          uint32_t *offset)
+static struct blorp_address
+blorp_dynamic_state_address(struct blorp_batch *batch,
+                            uint32_t offset)
 {
    struct anv_cmd_buffer *cmd_buffer = batch->driver_batch;
-
-   struct anv_state state =
-      anv_cmd_buffer_alloc_general_state(cmd_buffer, size, alignment);
-
-   *offset = state.offset;
-   return state.map;
+   return (struct blorp_address) {
+      .buffer = anv_device_get_dynamic_state_pool(cmd_buffer->device)->block_pool.bo,
+      .offset = offset,
+   };
 }
 
 static bool

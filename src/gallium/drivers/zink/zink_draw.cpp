@@ -217,7 +217,7 @@ draw(struct zink_context *ctx,
 
 template <zink_dynamic_state DYNAMIC_STATE, bool BATCH_CHANGED>
 static bool
-update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum mesa_prim mode)
+update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum mesa_prim mode, bool *pipeline_changed_out)
 {
    VkPipeline prev_pipeline = ctx->gfx_pipeline_state.pipeline;
    const struct zink_screen *screen = zink_screen(ctx->base.screen);
@@ -233,7 +233,9 @@ update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum 
          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, true, false>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
       else
          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, false, false>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
-      assert(pipeline);
+      /* creation failed and was logged there; the caller skips the draw */
+      if (unlikely(pipeline == VK_NULL_HANDLE))
+         return false;
       pipeline_changed = prev_pipeline != pipeline || ctx->shobj_draw;
       if (BATCH_CHANGED || pipeline_changed)
          VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -265,7 +267,8 @@ update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum 
       }
       ctx->shobj_draw = true;
    }
-   return pipeline_changed;
+   *pipeline_changed_out = pipeline_changed;
+   return true;
 }
 
 static enum mesa_prim
@@ -695,9 +698,11 @@ zink_draw(struct pipe_context *pctx,
    if (have_streamout && ctx->dirty_so_targets)
       zink_emit_stream_output_targets(pctx);
 
-   bool pipeline_changed = ctx->gfx_pipeline_state.dirty || rp_state != ctx->gfx_pipeline_state.rp_state || ctx->gfx_dirty || ctx->dirty_gfx_stages || prim_changed || BATCH_CHANGED ?
-                           update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>(ctx, bs, mode) :
-                           false;
+   bool pipeline_changed = false;
+   if (ctx->gfx_pipeline_state.dirty || rp_state != ctx->gfx_pipeline_state.rp_state || ctx->gfx_dirty || ctx->dirty_gfx_stages || prim_changed || BATCH_CHANGED) {
+      if (!update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>(ctx, bs, mode, &pipeline_changed))
+         return;
+   }
 
    emit_dynamic_state<DYNAMIC_STATE, BATCH_CHANGED>(ctx, pipeline_changed, ctx->vp_state.num_viewports, ctx->curr_program->base.uses_shobj);
 
@@ -946,7 +951,7 @@ zink_draw(struct pipe_context *pctx,
 
 template <bool BATCH_CHANGED>
 static bool
-update_mesh_pipeline(struct zink_context *ctx, struct zink_batch_state *bs)
+update_mesh_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, bool *pipeline_changed_out)
 {
    VkPipeline prev_pipeline = ctx->gfx_pipeline_state.pipeline;
    const struct zink_screen *screen = zink_screen(ctx->base.screen);
@@ -959,7 +964,9 @@ update_mesh_pipeline(struct zink_context *ctx, struct zink_batch_state *bs)
          pipeline = zink_get_gfx_pipeline<ZINK_DYNAMIC_STATE3, true, true>(ctx, ctx->mesh_program, &ctx->gfx_pipeline_state, MESA_PRIM_COUNT);
       else
          pipeline = zink_get_gfx_pipeline<ZINK_DYNAMIC_STATE3, false, true>(ctx, ctx->mesh_program, &ctx->gfx_pipeline_state, MESA_PRIM_COUNT);
-      assert(pipeline);
+      /* creation failed and was logged there; the caller skips the draw */
+      if (unlikely(pipeline == VK_NULL_HANDLE))
+         return false;
       pipeline_changed = prev_pipeline != pipeline || ctx->shobj_draw;
       if (BATCH_CHANGED || pipeline_changed)
          VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -984,7 +991,8 @@ update_mesh_pipeline(struct zink_context *ctx, struct zink_batch_state *bs)
       }
       ctx->shobj_draw = true;
    }
-   return pipeline_changed;
+   *pipeline_changed_out = pipeline_changed;
+   return true;
 }
 
 template <bool BATCH_CHANGED>
@@ -1044,9 +1052,11 @@ zink_draw_mesh_tasks(struct pipe_context *pctx, const struct pipe_grid_info *inf
    if (BATCH_CHANGED)
       zink_update_descriptor_refs(ctx, false);
 
-   bool pipeline_changed = need_rp_update || ctx->mesh_dirty || ctx->dirty_mesh_stages || BATCH_CHANGED ?
-                           update_mesh_pipeline<BATCH_CHANGED>(ctx, bs) :
-                           false;
+   bool pipeline_changed = false;
+   if (need_rp_update || ctx->mesh_dirty || ctx->dirty_mesh_stages || BATCH_CHANGED) {
+      if (!update_mesh_pipeline<BATCH_CHANGED>(ctx, bs, &pipeline_changed))
+         return;
+   }
 
    emit_dynamic_state<ZINK_DYNAMIC_STATE3, BATCH_CHANGED>(ctx, pipeline_changed, ctx->vp_state.mesh_num_viewports, ctx->mesh_program->base.uses_shobj);
 
@@ -1279,6 +1289,9 @@ zink_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
 
    VkPipeline pipeline = zink_get_compute_pipeline(screen, ctx->curr_compute,
                                                &ctx->compute_pipeline_state);
+   /* creation failed and was logged there; skip the dispatch */
+   if (unlikely(pipeline == VK_NULL_HANDLE))
+      return;
 
    bool pipeline_changed = prev_pipeline != pipeline;
    if (pipeline_changed || BATCH_CHANGED)

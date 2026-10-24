@@ -13,7 +13,7 @@ variables:
   # 4. lava/health-check-docker - the slim container used for fastboot
   # Set image: directly instead of extending .set-image to avoid conflicts
   # with MESA_IMAGE_PATH and FDO_DISTRIBUTION_TAG between the containers.
-  image: registry.freedesktop.org/gfx-ci/lava-job-submitter/alpine/x86_64_lava-trigger:20260710.1
+  image: registry.freedesktop.org/gfx-ci/lava-job-submitter/alpine/x86_64_lava-trigger:20260810.0
   # Cancel job if a newer commit is pushed to the same branch
   interruptible: true
   # The jobs themselves shouldn't actually run for an hour, of course.
@@ -129,6 +129,19 @@ variables:
       artifacts: false
       optional: true
     - job: debian-x86_64
+      artifacts: false
+
+.lava-x86_64-test-video-no_gfx_compute:
+  extends:
+    - .use-debian/x86_64_test-video
+    - .lava-x86_64-test
+  variables:
+    S3_ARTIFACT_NAME: mesa-x86_64-no_gfx_compute-debugoptimized
+  needs:
+    - job: debian/x86_64_test-video
+      artifacts: false
+      optional: true
+    - job: debian-x86_64-no_gfx_compute
       artifacts: false
 
 .lava-x86_64-test-vk:

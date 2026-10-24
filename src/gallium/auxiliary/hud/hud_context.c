@@ -568,6 +568,7 @@ hud_draw_results(struct hud_context *hud, struct pipe_resource *tex)
 
    cso_set_framebuffer(cso, &fb);
    cso_set_sample_mask(cso, ~0);
+   cso_set_sample_coverage(cso, 1.0f, false);
    cso_set_min_samples(cso, 1);
    cso_set_depth_stencil_alpha(cso, &hud->dsa);
    cso_set_rasterizer(cso, &hud->rasterizer);

@@ -98,6 +98,16 @@ vtn_cast_pointer_to_byte_pointer(struct vtn_builder *b, struct vtn_pointer *p)
    return vtn_cast_pointer(b, p, t);
 }
 
+static bool
+desc_type_is_signed(const struct glsl_type *type)
+{
+   if (type->cmat_desc.element_type == GLSL_TYPE_INT8 ||
+       type->cmat_desc.element_type == GLSL_TYPE_INT16 ||
+       type->cmat_desc.element_type == GLSL_TYPE_INT)
+      return true;
+   return false;
+}
+
 void
 vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
                                    const uint32_t *w, unsigned count)
@@ -202,12 +212,32 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
+   case SpvOpCooperativeMatrixGetCoordinateEXT: {
+      nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
+      nir_def *coord = vtn_get_nir_ssa(b, w[4]);
+      nir_def *def = nir_cmat_get_coordinate(&b->nb, coord, .cmat_desc = src->type->cmat_desc);
+      vtn_push_nir_ssa(b, w[2], def);
+      break;
+   }
+
    case SpvOpCooperativeMatrixConvertNV: {
+      struct vtn_value *val = vtn_untyped_value(b, w[2]);
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
+      const bool transpose = vtn_has_decoration(b, val, SpvDecorationCooperativeMatrixTransposeEXT);
+      unsigned signed_mask = 0;
+
+      if (desc_type_is_signed(dst_type->type))
+         signed_mask |= NIR_CMAT_RESULT_SIGNED;
+
+      if (desc_type_is_signed(src->type))
+         signed_mask |= NIR_CMAT_A_SIGNED;
 
       nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_convert_nv");
-      nir_cmat_convert(&b->nb, &dst->def, &src->def);
+      if (transpose)
+         nir_cmat_transpose(&b->nb, &dst->def, &src->def, .cmat_signed_mask = signed_mask);
+      else
+         nir_cmat_convert(&b->nb, &dst->def, &src->def, .cmat_signed_mask = signed_mask);
       vtn_push_var_ssa(b, w[2], dst->var);
       break;
    }
@@ -215,14 +245,21 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpCooperativeMatrixTransposeNV: {
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
+      unsigned signed_mask = 0;
+
+      if (desc_type_is_signed(dst_type->type))
+         signed_mask |= NIR_CMAT_RESULT_SIGNED;
+
+      if (desc_type_is_signed(src->type))
+         signed_mask |= NIR_CMAT_A_SIGNED;
 
       nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_transpose_nv");
-      nir_cmat_transpose(&b->nb, &dst->def, &src->def);
+      nir_cmat_transpose(&b->nb, &dst->def, &src->def, .cmat_signed_mask = signed_mask);
       vtn_push_var_ssa(b, w[2], dst->var);
       break;
    }
 
-   case SpvOpCooperativeMatrixReduceNV: {
+   case SpvOpCooperativeMatrixReduceEXT: {
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
 
@@ -230,7 +267,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
 
       reduce_fn->referenced = true;
       reduce_fn->nir_func->cmat_call = true;
-      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_reduce_nv");
+      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_reduce");
       nir_cmat_call_instr *call = nir_cmat_call_instr_create(b->nb.shader, nir_cmat_call_op_reduce, reduce_fn->nir_func);
       call->params[0] = nir_src_for_ssa(&dst->def);
       call->params[1] = nir_src_for_ssa(&src->def);
@@ -240,7 +277,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
-   case SpvOpCooperativeMatrixPerElementOpNV: {
+   case SpvOpCooperativeMatrixPerElementOpEXT: {
       struct vtn_type *dst_type = vtn_get_type(b, w[1]);
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[3]);
 
@@ -248,7 +285,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
 
       per_element_fn->referenced = true;
       per_element_fn->nir_func->cmat_call = true;
-      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_per_element_nv");
+      nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_per_element");
 
       nir_cmat_call_instr *call = nir_cmat_call_instr_create(b->nb.shader, nir_cmat_call_op_per_element_op, per_element_fn->nir_func);
       call->params[0] = nir_src_for_ssa(&dst->def);
@@ -430,9 +467,14 @@ vtn_handle_cooperative_alu(struct vtn_builder *b, struct vtn_value *dest_val,
             (vtn_convert_op_dst_type(opcode) == nir_type_int ? NIR_CMAT_RESULT_SIGNED : 0);
 
          const bool saturate = vtn_has_decoration(b, dest_val, SpvDecorationSaturatedToLargestFloat8NormalConversionEXT);
+         const bool transpose = vtn_has_decoration(b, dest_val, SpvDecorationCooperativeMatrixTransposeEXT);
 
          nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_convert");
-         nir_cmat_convert(&b->nb, &dst->def, &src->def, .saturate = saturate, .cmat_signed_mask = signed_mask);
+
+         if (transpose)
+            nir_cmat_transpose(&b->nb, &dst->def, &src->def, .saturate = saturate, .cmat_signed_mask = signed_mask);
+         else
+            nir_cmat_convert(&b->nb, &dst->def, &src->def, .saturate = saturate, .cmat_signed_mask = signed_mask);
          vtn_push_var_ssa(b, w[2], dst->var);
 
          break;

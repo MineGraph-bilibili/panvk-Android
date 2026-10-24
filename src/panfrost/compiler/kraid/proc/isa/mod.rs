@@ -1,6 +1,7 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
+pub mod decoder;
 pub mod encoder;
 pub mod enums;
 pub mod expr;

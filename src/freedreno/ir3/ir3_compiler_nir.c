@@ -3478,6 +3478,12 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 
       make_dst_dummy(sam);
       array_insert(ctx->block, ctx->block->keeps, sam);
+
+      if (ctx->so->type == MESA_SHADER_FRAGMENT &&
+          ir3_prefetch_sam_needs_helpers(ctx->compiler, sam)) {
+         ctx->so->need_pixlod = true;
+      }
+
       break;
    }
    case nir_intrinsic_prefetch_tex_ir3: {
@@ -3669,7 +3675,8 @@ get_tex_samp_tex_src(struct ir3_context *ctx, nir_tex_instr *tex)
                                    texture2_idx >= 0 ? &tex->src[texture2_idx].src : NULL,
                                    sampler2_idx >= 0 ? &tex->src[sampler2_idx].src : NULL);
 
-      if (tex->texture_non_uniform || tex->sampler_non_uniform)
+      if (tex->texture_non_uniform || tex->sampler_non_uniform ||
+          tex->texture_2_non_uniform || tex->sampler_2_non_uniform)
          info.flags |= IR3_INSTR_NONUNIF;
    } else {
       info.flags |= IR3_INSTR_S2EN;
@@ -5380,6 +5387,8 @@ setup_output(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       case VARYING_SLOT_CLIP_DIST1:
       case VARYING_SLOT_CLIP_VERTEX:
       case VARYING_SLOT_LAYER:
+      /* no hw edge flags, and gallium has no way to decline the output */
+      case VARYING_SLOT_EDGE:
          break;
       default:
          if (slot >= VARYING_SLOT_VAR0)
@@ -5803,6 +5812,8 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
       goto out;
    }
 
+   bool is_preamble_speculatable = ir3_nir_is_preamble_speculatable(ctx->s);
+
    emit_instructions(ctx);
 
    if (ctx->error) {
@@ -6191,9 +6202,9 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
    /* We need to do legalize after (for frag shader's) the "bary.f"
     * offsets (inloc) have been assigned.
     */
-   IR3_PASS(ir, ir3_legalize, so, &max_bary);
+   IR3_PASS(ir, ir3_legalize, so, &max_bary, is_preamble_speculatable);
 
-   if (ctx->compiler->cs_lock_unlock_quirk && ir3_shader_compute(so)) {
+   if (ctx->compiler->info->props.cs_lock_unlock_quirk && ir3_shader_compute(so)) {
       struct ir3_instruction *end = ir3_find_end(so->ir);
       struct ir3_instruction *lock =
          ir3_build_instr(&ctx->build, OPC_LOCK, 0, 0);

@@ -232,6 +232,13 @@ typedef enum {
     */
    nir_io_compact_to_higher_16 = BITFIELD_BIT(13),
 
+   /**
+    * Whether nir_opt_varyings should converge non-interpolated varyings to
+    * uint type instead of float. Some hardware may not preserve bit-exact
+    * representations of float varyings even when not interpolated.
+    */
+   nir_io_non_interpolated_as_uint = BITFIELD_BIT(14),
+
    /* Options affecting the GLSL compiler or Gallium are below. */
 
    /**
@@ -779,6 +786,42 @@ typedef struct nir_shader_compiler_options {
    unsigned max_unroll_iterations_aggressive;
    unsigned max_unroll_iterations_fp64;
 
+   /** Register pressure a loop can be under before nir_opt_gcm stops moving
+    * instructions out of it for free.
+    *
+    * Pressure is counted in 32-bit slots, as the number of components live at
+    * the busiest point in the loop.  A loop below this has registers going
+    * spare, so holding one more value across it costs nothing and GCM will
+    * hoist without asking what the move frees up.  Above it every move has to
+    * pay for itself out of the sources it stops keeping alive.
+    *
+    * How far below the register file this wants to sit depends on the
+    * hardware: on a target that compiles the same NIR at several SIMD widths
+    * it has to leave room for the widest one, where each component costs
+    * several registers.  It is worth measuring before turning it on.
+    *
+    * Zero, the default, leaves GCM guessing at how much room a loop has from
+    * how many instructions are in it, which is cheaper but a good deal less
+    * accurate.
+    */
+   unsigned max_gcm_loop_pressure;
+
+   /* What a value that varies between SIMD lanes costs, relative to one that
+    * doesn't, when weighing a loop against max_gcm_loop_pressure.
+    *
+    * A target that compiles the same NIR at several SIMD widths sees a
+    * divergent value take a register per lane, so its cost doubles with every
+    * step up in width, while a value that is the same in every lane costs what
+    * it costs whatever the width.  Setting this to the number of registers a
+    * divergent component takes at the widest width worth protecting is what
+    * keeps a loop that fits at the width GCM is looking at from overflowing the
+    * register file at a wider one.
+    *
+    * Zero and one both mean no scaling, which is right for a target that
+    * compiles at a single width.  Above one, GCM needs nir_metadata_divergence.
+    */
+   unsigned gcm_divergent_pressure_scale;
+
    bool lower_uniforms_to_ubo;
 
    /* Specifies if indirect sampler array access will trigger forced loop
@@ -906,6 +949,9 @@ typedef struct nir_shader_compiler_options {
     * nir_lower_packing().
     */
    unsigned skip_lower_packing_ops;
+
+   /** Backend supports tanh. */
+   bool has_tanh;
 
    /** Driver callback where drivers can define how to lower mediump.
     *  Used by nir_lower_io_passes.

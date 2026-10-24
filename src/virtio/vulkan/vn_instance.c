@@ -10,11 +10,11 @@
 
 #include "vn_instance.h"
 
-#include "vn_drirc.h"
-#include "venus-protocol/vn_protocol_driver_info.h"
-#include "venus-protocol/vn_protocol_driver_instance.h"
-#include "venus-protocol/vn_protocol_driver_transport.h"
+#include "vn_protocol_driver_info.h"
+#include "vn_protocol_driver_instance.h"
+#include "vn_protocol_driver_transport.h"
 
+#include "vn_drirc.h"
 #include "vn_icd.h"
 #include "vn_physical_device.h"
 #include "vn_renderer.h"

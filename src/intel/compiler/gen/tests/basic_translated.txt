@@ -8,8 +8,8 @@ bmg | 31 00 0c 00 00 00 0c 02 0c 00 3e 6e 00 00 04 00 |         fence.urb.gpu.ev
 bmg | 31 00 00 00 00 00 16 06 8c 05 00 fa 00 00 78 02 <         load.ugm.d32x32t.a32.ca.cc.bss[a0.0] (1) r6:2 r5:1
 bmg | 31 00 00 00 00 00 24 0a 0c 50 06 f8 00 00 00 00 |         load_block2d.ugm.d32.a64 (1) r10:4 [r80:1]                                {ExBSO}
 bmg | 31 00 00 00 00 00 00 00 0c 50 06 f8 00 00 00 00 |         load_block2d.ugm.d32.a64 (1) null:0 [r80:1]                               {ExBSO}
-bmg | 31 00 00 00 00 00 24 0a 0c 50 06 f4 00 00 20 00 |         load_block2d.ugm.d16t.a64 (1) r10:4 [r80:1]                               {ExBSO}
-bmg | 31 00 00 00 40 00 24 0a 0d 50 06 f1 00 00 20 00 |         load_block2d.ugm.d8tv.a64 (1) r10:4 [r80:1 + (4, 4)]                      {ExBSO}
+bmg | 31 00 00 00 00 00 24 0a 0c 50 06 f8 00 00 20 00 |         load_block2d.ugm.d32t.a64 (1) r10:4 [r80:1]                               {ExBSO}
+bmg | 31 00 00 00 40 00 24 0a 0d 50 06 f9 00 00 20 00 |         load_block2d.ugm.d32tv.a64 (1) r10:4 [r80:1 + (4, 4)]                     {ExBSO}
 bmg | 31 00 00 00 f0 7f 24 0a 0c 50 06 f8 00 00 00 00 |         load_block2d.ugm.d32.a64 (1) r10:4 [r80:1 + (-1, 1)]                      {ExBSO}
 bmg | 31 00 00 00 00 00 00 00 0c 50 0e f4 44 14 80 00 |         store_block2d.ugm.d16.a64.uc.uc (1)  [r80:1] r20:8                        {ExBSO}
 mtl | 31 00 03 00 00 00 0e 28 8c 23 18 fa 04 08 00 02 <         atomic_add.ugm.d32.a32.wt.wb.bss[a0.0] (8) r40:1 r35:1 r8:1

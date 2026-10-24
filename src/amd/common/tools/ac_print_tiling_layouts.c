@@ -396,15 +396,23 @@ print_tiling_layouts(const struct amdgpu_device *dev)
             }
          }
 
+         char name[128];
+         snprintf(name, sizeof(name), "%s", dev->name);
+
+         /* Replace _ with space. */
+         char *underscore;
+         while ((underscore = strchr(name, '_')))
+            *underscore = ' ';
+
          /* Print inputs. */
          if (gfx_version >= 9) {
-            printf("%-17s, bpe %2u, sw %2u, %3ux%-3u, {", dev->name, bpp / 8, swizzle_mode,
+            printf("%-17s| bpe %2u| sw %2u| %3ux%-3u| {", name, bpp / 8, swizzle_mode,
                    tile_width, tile_height);
          } else {
             unsigned mode = swizzle_mode & ~DISPLAYABLE;
             bool display = swizzle_mode & DISPLAYABLE;
 
-            printf("%-17s, bpe %2u, sw%*s%u, %3ux%-3u, {", dev->name, bpp / 8,
+            printf("%-17s| bpe %2u| am%*s%u| %3ux%-3u| {", name, bpp / 8,
                    mode < 10 ? 2 : 1, display ? "D" : "", mode, tile_width, tile_height);
          }
 

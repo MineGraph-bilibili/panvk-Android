@@ -931,7 +931,7 @@ nv50_screen_tic_alloc(struct nv50_screen *screen, void *entry)
 {
    int i = screen->tic.next;
 
-   while (screen->tic.lock[i / 32] & (1 << (i % 32)))
+   while (screen->tic.lock[i / 32] & (1u << (i % 32)))
       i = (i + 1) & (NV50_TIC_MAX_ENTRIES - 1);
 
    screen->tic.next = (i + 1) & (NV50_TIC_MAX_ENTRIES - 1);
@@ -948,7 +948,7 @@ nv50_screen_tsc_alloc(struct nv50_screen *screen, void *entry)
 {
    int i = screen->tsc.next;
 
-   while (screen->tsc.lock[i / 32] & (1 << (i % 32)))
+   while (screen->tsc.lock[i / 32] & (1u << (i % 32)))
       i = (i + 1) & (NV50_TSC_MAX_ENTRIES - 1);
 
    screen->tsc.next = (i + 1) & (NV50_TSC_MAX_ENTRIES - 1);

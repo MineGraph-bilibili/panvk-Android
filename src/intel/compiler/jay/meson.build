@@ -63,6 +63,7 @@ libintel_compiler_jay_files = files(
   'jay_opt_postra_vectorize.c',
   'jay_opt_predicate.c',
   'jay_opt_propagate.c',
+  'jay_opt_sampler_vectorize.c',
   'jay_partition.c',
   'jay_performance.c',
   'jay_print.c',

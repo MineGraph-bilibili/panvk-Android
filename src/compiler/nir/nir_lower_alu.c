@@ -166,21 +166,15 @@ lower_alu_instr(nir_builder *b, nir_alu_instr *instr, UNUSED void *cb_data)
           !nir_alu_instr_is_signed_zero_preserve(instr))
          break;
 
-      nir_def *s0 = nir_ssa_for_alu_src(b, instr, 0);
-      nir_def *s1 = nir_ssa_for_alu_src(b, instr, 1);
-
       bool max = instr->op == nir_op_fmax;
 
       /* Lower the fmin/fmax to a no_signed_zero fmin/fmax. This ensures that
        * nir_lower_alu is idempotent, and allows the backend to implement
        * soundly the no_signed_zero subset of fmin/fmax.
        */
-      b->fp_math_ctrl &= ~nir_fp_preserve_signed_zero;
-      nir_def *fminmax = max ? nir_fmax(b, s0, s1) : nir_fmin(b, s0, s1);
-      b->fp_math_ctrl = instr->fp_math_ctrl;
 
       /* If we have a constant source, we can usually optimize */
-      if (s0->num_components == 1 && s0->bit_size == 32) {
+      if (instr->def.num_components == 1 && instr->def.bit_size == 32) {
          for (unsigned i = 0; i < 2 && lowered == NULL; ++i) {
             if (!nir_src_is_const(instr->src[i].src))
                continue;
@@ -188,30 +182,42 @@ lower_alu_instr(nir_builder *b, nir_alu_instr *instr, UNUSED void *cb_data)
             uint32_t x = nir_alu_src_as_uint(instr->src[i]);
             bool pos_zero = x == fui(+0.0);
             bool neg_zero = x == fui(-0.0);
-            nir_def *zero = i == 0 ? s0 : s1;
-            nir_def *other = i == 0 ? s1 : s0;
 
             if (!pos_zero && !neg_zero) {
                /* The lowering is only required when both sources are zero, so
-                * if we have a nonzero constant source, skip the lowering.
+                * if we have a nonzero constant source, skip and do not remove
+                * the preserve_sz bit so other passes can take this
+                * into account.
                 */
-               lowered = fminmax;
-            } else if (pos_zero && max) {
-               b->fp_math_ctrl &= ~nir_fp_preserve_signed_zero;
-               /* max(x, +0.0) = +0.0 < x ? x : +0.0 */
-               lowered = nir_bcsel(b, nir_flt(b, zero, other), other, zero);
-            } else if (neg_zero && !max) {
-               b->fp_math_ctrl &= ~nir_fp_preserve_signed_zero;
-               /* min(x, -0.0) = x < -0.0 ? x : -0.0 */
-               lowered = nir_bcsel(b, nir_flt(b, other, zero), other, zero);
+               return false;
+            } else {
+               nir_def *s0 = nir_ssa_for_alu_src(b, instr, 0);
+               nir_def *s1 = nir_ssa_for_alu_src(b, instr, 1);
+               nir_def *zero = i == 0 ? s0 : s1;
+               nir_def *other = i == 0 ? s1 : s0;
+
+               if (pos_zero && max) {
+                  b->fp_math_ctrl &= ~nir_fp_preserve_signed_zero;
+                  /* max(x, +0.0) = +0.0 < x ? x : +0.0 */
+                  lowered = nir_bcsel(b, nir_flt(b, zero, other), other, zero);
+               } else if (neg_zero && !max) {
+                  b->fp_math_ctrl &= ~nir_fp_preserve_signed_zero;
+                  /* min(x, -0.0) = x < -0.0 ? x : -0.0 */
+                  lowered = nir_bcsel(b, nir_flt(b, other, zero), other, zero);
+               }
             }
          }
       }
 
-      b->fp_math_ctrl = instr->fp_math_ctrl;
-
       /* Fallback on the emulation */
       if (!lowered) {
+         nir_def *s0 = nir_ssa_for_alu_src(b, instr, 0);
+         nir_def *s1 = nir_ssa_for_alu_src(b, instr, 1);
+
+         b->fp_math_ctrl &= ~nir_fp_preserve_signed_zero;
+         nir_def *fminmax = max ? nir_fmax(b, s0, s1) : nir_fmin(b, s0, s1);
+         b->fp_math_ctrl = instr->fp_math_ctrl;
+
          nir_def *iminmax = max ? nir_imax(b, s0, s1) : nir_imin(b, s0, s1);
          iminmax = nir_fcanonicalize(b, iminmax);
          lowered = nir_bcsel(b, nir_feq(b, s0, s1), iminmax, fminmax);

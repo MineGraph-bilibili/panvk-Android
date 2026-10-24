@@ -567,6 +567,7 @@ elk_type_size_xvec4(const struct glsl_type *type, bool as_vec4, bool bindless)
    case GLSL_TYPE_INT8:
    case GLSL_TYPE_UINT64:
    case GLSL_TYPE_INT64:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       if (glsl_type_is_matrix(type)) {
          const glsl_type *col_type = glsl_get_column_type(type);
          unsigned col_slots =

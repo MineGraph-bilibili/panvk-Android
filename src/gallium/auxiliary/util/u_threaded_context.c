@@ -1613,6 +1613,32 @@ tc_set_framebuffer_state(struct pipe_context *_pipe,
    tc->in_renderpass = false;
 }
 
+struct tc_sample_coverage {
+   struct tc_call_base base;
+   float value;
+   bool invert;
+};
+
+static uint16_t ALWAYS_INLINE
+tc_call_set_sample_coverage(struct pipe_context *pipe, void *call)
+{
+   struct tc_sample_coverage *p = to_call(call, tc_sample_coverage);
+
+   pipe->set_sample_coverage(pipe, p->value, p->invert);
+   return call_size(tc_sample_coverage);
+}
+
+static void
+tc_set_sample_coverage(struct pipe_context *_pipe, float value, bool invert)
+{
+   struct threaded_context *tc = threaded_context(_pipe);
+   struct tc_sample_coverage *p =
+      tc_add_call(tc, TC_CALL_set_sample_coverage, tc_sample_coverage);
+
+   p->value = value;
+   p->invert = invert;
+}
+
 struct tc_tess_state {
    struct tc_call_base base;
    float state[6];
@@ -5690,6 +5716,7 @@ threaded_context_create(struct pipe_context *pipe,
    CTX_INIT(set_blend_color);
    CTX_INIT(set_stencil_ref);
    CTX_INIT(set_sample_mask);
+   CTX_INIT(set_sample_coverage);
    CTX_INIT(set_min_samples);
    CTX_INIT(set_clip_state);
    CTX_INIT(set_constant_buffer);

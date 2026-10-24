@@ -122,6 +122,11 @@ get_embedded_size(struct ac_uvd_decoder *dec)
 
    size += sizeof(struct ruvd_msg);
 
+   if (!dec->sw_ctx_size) {
+      size = align(size, 256);
+      size += sizeof(struct ruvd_msg);
+   }
+
    switch (dec->base.param.codec) {
    case AC_VIDEO_CODEC_AVC:
       it_probs_size = IT_SCALING_TABLE_SIZE;
@@ -171,16 +176,8 @@ static int
 uvd_build_create_cmd(struct ac_video_dec *decoder, struct ac_video_dec_create_cmd *cmd)
 {
    struct ac_uvd_decoder *dec = (struct ac_uvd_decoder *)decoder;
-
-   struct ruvd_msg *msg = cmd->embedded_ptr;
-   memset(msg, 0, sizeof(*msg));
-   msg->size = sizeof(*msg);
-   msg->msg_type = RUVD_MSG_CREATE;
-   msg->stream_handle = dec->stream_handle;
-
-   msg->body.create.stream_type = dec->stream_type;
-   msg->body.create.width_in_samples = decoder->param.max_width;
-   msg->body.create.height_in_samples = decoder->param.max_height;
+   uint8_t *emb = cmd->embedded_ptr;
+   uint64_t msg_va = cmd->embedded_va;
 
    struct cmd_buffer cmd_buf = {
       .dec = dec,
@@ -190,9 +187,32 @@ uvd_build_create_cmd(struct ac_video_dec *decoder, struct ac_video_dec_create_cm
       }
    };
 
-   if (cmd->session_va)
+   struct ruvd_msg *msg = (struct ruvd_msg *)emb;
+   memset(msg, 0, sizeof(*msg));
+
+   if (!dec->sw_ctx_size) {
+      msg->size = sizeof(*msg);
+      msg->msg_type = RUVD_MSG_DESTROY;
+      msg->stream_handle = dec->stream_handle;
+
+      send_cmd(&cmd_buf, RUVD_CMD_MSG_BUFFER, msg_va);
+
+      msg_va = cmd->embedded_va + align(sizeof(struct ruvd_msg), 256);
+      msg = (struct ruvd_msg *)(emb + align(sizeof(struct ruvd_msg), 256));
+      memset(msg, 0, sizeof(*msg));
+   }
+
+   msg->size = sizeof(*msg);
+   msg->msg_type = RUVD_MSG_CREATE;
+   msg->stream_handle = dec->stream_handle;
+
+   msg->body.create.stream_type = dec->stream_type;
+   msg->body.create.width_in_samples = decoder->param.max_width;
+   msg->body.create.height_in_samples = decoder->param.max_height;
+
+   if (dec->sw_ctx_size)
       send_cmd(&cmd_buf, RUVD_CMD_SESSION_CONTEXT_BUFFER, cmd->session_va);
-   send_cmd(&cmd_buf, RUVD_CMD_MSG_BUFFER, cmd->embedded_va);
+   send_cmd(&cmd_buf, RUVD_CMD_MSG_BUFFER, msg_va);
 
    cmd->out.cmd_dw = cmd_buf.cs.cdw;
    return 0;
@@ -213,7 +233,7 @@ uvd_build_destroy_cmd(struct ac_video_dec *decoder, struct ac_video_dec_destroy_
       .dec = dec,
       .cs = {
          .buf = cmd->cmd_buffer,
-         .max_dw = decoder->max_create_cmd_dw,
+         .max_dw = decoder->max_destroy_cmd_dw,
       }
    };
 
@@ -477,9 +497,81 @@ build_vc1_msg(struct cmd_buffer *cmd_buf, struct ac_video_dec_decode_cmd *cmd, s
    return sizeof(msg);
 }
 
+/**
+ * Apply tiling settings to a UVD decode message on GFX6-8.
+ */
+static void
+uvd_msg_apply_tiling_gfx6(struct ruvd_msg *msg,
+                          const struct ac_uvd_decoder *const dec,
+                          const struct radeon_surf *const surf_y,
+                          const struct radeon_surf *const surf_uv)
+{
+   const enum radeon_surf_mode surf_mode = surf_y->u.legacy.level->mode;
+
+   /* Only displayable microtiling seems to work */
+   assert(surf_y->micro_tile_mode == 0);
+
+   if (surf_mode == RADEON_SURF_MODE_1D) {
+      msg->body.decode.dt_tiling_mode = RUVD_TILE_8X8;
+      msg->body.decode.dt_array_mode = RUVD_ARRAY_MODE_1D_THIN;
+      msg->body.decode.dt_surf_tile_config =
+         RUVD_MICRO_TILE_MODE(surf_y->micro_tile_mode);
+   } else if (surf_mode == RADEON_SURF_MODE_2D) {
+      msg->body.decode.dt_tiling_mode = RUVD_TILE_8X8;
+      msg->body.decode.dt_array_mode = RUVD_ARRAY_MODE_2D_THIN;
+      msg->body.decode.dt_surf_tile_config =
+         RUVD_MICRO_TILE_MODE(surf_y->micro_tile_mode) |
+         RUVD_BANK_WIDTH(util_logbase2(surf_y->u.legacy.bankw)) |
+         RUVD_BANK_HEIGHT(util_logbase2(surf_y->u.legacy.bankh)) |
+         RUVD_MACRO_TILE_ASPECT_RATIO(util_logbase2(surf_y->u.legacy.mtilea)) |
+         RUVD_NUM_BANKS(util_logbase2(surf_y->u.legacy.num_banks / 2)) |
+         RUVD_PIPE_CONFIG(surf_y->u.legacy.pipe_config) |
+         RUVD_TILE_SPLIT(util_logbase2(surf_y->u.legacy.tile_split / 64));
+   }
+
+   /* There are some Y-only formats which don't have a UV plane. */
+   if (!surf_uv) {
+      msg->body.decode.dt_uv_surf_tile_config = 0;
+      return;
+   }
+
+   /* Mode must be the same between Y and UV planes. */
+   assert(surf_y->u.legacy.level->mode == surf_uv->u.legacy.level->mode);
+
+   /* Only displayable microtiling seems to work */
+   assert(surf_uv->micro_tile_mode == 0);
+
+   /* Only UVD 6+ allow different macro tiling parameters for Y and UV planes */
+   if (dec->family <= CHIP_TONGA) {
+      assert(surf_y->u.legacy.bankw == surf_uv->u.legacy.bankw);
+      assert(surf_y->u.legacy.bankh == surf_uv->u.legacy.bankh);
+      assert(surf_y->u.legacy.mtilea == surf_uv->u.legacy.mtilea);
+      assert(surf_y->u.legacy.num_banks == surf_uv->u.legacy.num_banks);
+      assert(surf_y->u.legacy.pipe_config == surf_uv->u.legacy.pipe_config);
+      assert(surf_y->u.legacy.tile_split == surf_uv->u.legacy.tile_split);
+   }
+
+   if (surf_mode == RADEON_SURF_MODE_1D) {
+      msg->body.decode.dt_uv_surf_tile_config =
+         RUVD_MICRO_TILE_MODE(surf_uv->micro_tile_mode);
+   } else if (surf_mode == RADEON_SURF_MODE_2D) {
+      msg->body.decode.dt_uv_surf_tile_config =
+         RUVD_MICRO_TILE_MODE(surf_uv->micro_tile_mode) |
+         RUVD_BANK_WIDTH(util_logbase2(surf_uv->u.legacy.bankw)) |
+         RUVD_BANK_HEIGHT(util_logbase2(surf_uv->u.legacy.bankh)) |
+         RUVD_MACRO_TILE_ASPECT_RATIO(util_logbase2(surf_uv->u.legacy.mtilea)) |
+         RUVD_NUM_BANKS(util_logbase2(surf_uv->u.legacy.num_banks / 2)) |
+         RUVD_PIPE_CONFIG(surf_uv->u.legacy.pipe_config) |
+         RUVD_TILE_SPLIT(util_logbase2(surf_uv->u.legacy.tile_split / 64));
+   }
+}
+
 static int
 uvd_build_decode_cmd(struct ac_video_dec *decoder, struct ac_video_dec_decode_cmd *cmd)
 {
+   const struct radeon_surf *const surf_y = cmd->decode_surface.planes[0].surf;
+   const struct radeon_surf *const surf_uv = cmd->decode_surface.planes[1].surf;
+
    struct ac_uvd_decoder *dec = (struct ac_uvd_decoder *)decoder;
    uint8_t *emb = cmd->embedded_ptr;
 
@@ -508,18 +600,20 @@ uvd_build_decode_cmd(struct ac_video_dec *decoder, struct ac_video_dec_decode_cm
    uint32_t dt_pitch;
 
    if (dec->gfx_level >= GFX9) {
-      dt_pitch = cmd->decode_surface.planes[0].surf->u.gfx9.surf_pitch;
-      msg->body.decode.dt_wa_chroma_bottom_offset = cmd->decode_surface.planes[0].surf->u.gfx9.swizzle_mode;
+      dt_pitch = surf_y->u.gfx9.surf_pitch;
+      msg->body.decode.dt_wa_chroma_bottom_offset = surf_y->u.gfx9.swizzle_mode;
       msg->body.decode.dt_luma_top_offset = 0;
       msg->body.decode.dt_chroma_top_offset = cmd->decode_surface.planes[1].va - cmd->decode_surface.planes[0].va;
    } else {
       dt_pitch =
-         cmd->decode_surface.planes[0].surf->u.legacy.level[0].nblk_x * cmd->decode_surface.planes[0].surf->blk_w;
+         surf_y->u.legacy.level[0].nblk_x * surf_y->blk_w;
       msg->body.decode.dt_luma_top_offset = 0;
       if (dec->is_amdgpu)
          msg->body.decode.dt_chroma_top_offset = cmd->decode_surface.planes[1].va - cmd->decode_surface.planes[0].va;
       else
          msg->body.decode.dt_chroma_top_offset = cmd->decode_surface.planes[1].va;
+
+      uvd_msg_apply_tiling_gfx6(msg, dec, surf_y, surf_uv);
    }
 
    msg->body.decode.dt_pitch = dt_pitch;
@@ -557,7 +651,7 @@ uvd_build_decode_cmd(struct ac_video_dec *decoder, struct ac_video_dec_decode_cm
       break;
    }
 
-   if (cmd->session_va)
+   if (dec->sw_ctx_size)
       send_cmd(&cmd_buf, RUVD_CMD_SESSION_CONTEXT_BUFFER, cmd->session_va);
    send_cmd(&cmd_buf, RUVD_CMD_MSG_BUFFER, cmd->embedded_va);
    if (cmd->ref_surfaces[0].planes[0].va)
@@ -625,7 +719,9 @@ ac_uvd_dec_dpb_size(const struct radeon_info *info, struct ac_video_dec_session_
 
    switch (param->codec) {
    case AC_VIDEO_CODEC_AVC:
-      max_references = 17; /* TODO: Remove the dpb size check in kernel */
+      /* Old kernel requires max size allocation */
+      if (!info->is_amdgpu || info->drm_minor < 65)
+         max_references = 17;
       dpb_size = image_size * max_references;
       if (info->family < CHIP_POLARIS10) {
          dpb_size += max_references * align(width_in_mb * height_in_mb * 192, 64);

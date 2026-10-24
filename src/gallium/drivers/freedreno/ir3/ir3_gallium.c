@@ -221,6 +221,42 @@ create_initial_compute_variants_async(void *job, void *gdata, int thread_index)
    shader->initial_variants_done = true;
 }
 
+static nir_mem_access_size_align
+mem_access_scratch_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
+                                 uint8_t bit_size, uint32_t align,
+                                 uint32_t align_offset, bool offset_is_const,
+                                 enum gl_access_qualifier access, const void *cb_data)
+{
+   bit_size = MIN2(bit_size, 32);
+   bytes = MIN2(bytes, 4);
+   align = nir_combined_align(align, align_offset);
+
+   assert(util_is_power_of_two_nonzero(align));
+
+   return (nir_mem_access_size_align){
+      .num_components = MIN2(bytes / (bit_size / 8), 4),
+      .bit_size = bit_size,
+      .align = bit_size / 8,
+      .shift = nir_mem_access_shift_method_scalar,
+   };
+}
+
+/**
+ * For compute shaders with heavy scratch/private memory use it is recommended
+ * to use per-wave pvt mem layout.  For this, we need to ensure that ldp/stp
+ * is no more than 32b and aligned to 32b.
+ */
+static bool
+lower_scratch_to_scalar(nir_shader *nir)
+{
+   nir_lower_mem_access_bit_sizes_options lower_scratch_mem_access_options = {
+      .modes = nir_var_function_temp | nir_var_shader_temp,
+      .may_lower_unaligned_stores_to_atomics = true,
+      .callback = mem_access_scratch_size_align_cb,
+   };
+   return nir_lower_mem_access_bit_sizes(nir, &lower_scratch_mem_access_options);
+}
+
 /* a bit annoying that compute-shader and normal shader state objects
  * aren't a bit more aligned.
  */
@@ -260,8 +296,8 @@ ir3_shader_compute_state_create(struct pipe_context *pctx,
       nir = tgsi_to_nir(cso->prog, pctx->screen, false);
    }
 
-   if (ctx->screen->gen >= 6)
-      ir3_nir_lower_io_to_bindless(nir);
+   NIR_PASS(_, nir, ir3_nir_lower_io_gallium, ctx->screen->gen >= 6 /* lower_to_bindless */);
+   NIR_PASS(_, nir, lower_scratch_to_scalar);
 
    struct ir3_shader *shader =
       ir3_shader_from_nir(compiler, nir, &ir3_options);
@@ -314,8 +350,7 @@ ir3_shader_state_create(struct pipe_context *pctx,
       nir = tgsi_to_nir(cso->tokens, pctx->screen, false);
    }
 
-   if (ctx->screen->gen >= 6)
-      ir3_nir_lower_io_to_bindless(nir);
+   NIR_PASS(_, nir, ir3_nir_lower_io_gallium, ctx->screen->gen >= 6 /* lower_to_bindless */);
 
    enum ir3_wavesize_option api_wavesize = IR3_SINGLE_OR_DOUBLE;
    enum ir3_wavesize_option real_wavesize = IR3_SINGLE_OR_DOUBLE;

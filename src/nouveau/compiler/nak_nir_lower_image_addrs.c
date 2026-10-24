@@ -485,12 +485,14 @@ lower_image_access(nir_builder *b, nir_intrinsic_instr *intrin)
       if (intrin->intrinsic == nir_intrinsic_image_deref_atomic) {
          res_ib = nir_global_atomic(b, bit_size, full_addr,
                                     intrin->src[3].ssa,
-                                    .atomic_op = atomic_op);
+                                    .atomic_op = atomic_op,
+                                    .access = nir_intrinsic_access(intrin));
       } else {
          res_ib = nir_global_atomic_swap(b, bit_size, full_addr,
                                          intrin->src[3].ssa,
                                          intrin->src[4].ssa,
-                                         .atomic_op = atomic_op);
+                                         .atomic_op = atomic_op,
+                                         .access = nir_intrinsic_access(intrin));
       }
       nir_push_else(b, NULL); {
          res_oob = nir_imm_intN_t(b, 0, bit_size);

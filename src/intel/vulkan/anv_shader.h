@@ -117,6 +117,8 @@ struct anv_shader_data {
 
    bool uses_bt_for_push_descs;
 
+   const struct vk_color_attachment_location_state *fs_color_map;
+
    const unsigned *code;
 
    debug_archiver *archiver;

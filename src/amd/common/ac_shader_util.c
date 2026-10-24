@@ -996,7 +996,7 @@ uint32_t ac_compute_num_tess_patches(const struct ac_compiler_info *info, uint32
        (wave_size - threads_per_tg % wave_size >= MAX2(num_threads_per_patch, 8)))
       num_patches = (threads_per_tg & ~(wave_size - 1)) / num_threads_per_patch;
 
-   if (info->gfx_level == GFX6) {
+   if (info->has_lbpw_tcs_wg_bug) {
       /* GFX6 bug workaround, related to power management. Limit LS-HS
        * threadgroups to only one wave.
        */

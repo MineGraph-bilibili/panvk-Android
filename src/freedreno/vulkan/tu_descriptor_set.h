@@ -61,6 +61,12 @@ struct tu_descriptor_set_binding_layout
 
    /* Shader stages that use this binding */
    uint32_t shader_stages;
+
+   /* Whether statically accessing this binding guarantees that the descriptor
+    * accessed is valid. If true, only dynamically accessed descriptors are
+    * valid and we cannot speculate descriptor access.
+    */
+   bool partially_bound;
 };
 
 struct tu_descriptor_set_layout
@@ -164,6 +170,11 @@ struct tu_descriptor_pool
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_descriptor_pool, base, VkDescriptorPool,
                                VK_OBJECT_TYPE_DESCRIPTOR_POOL)
 
+struct tu_descriptor_update_template_sampler {
+   VkSamplerCreateFlags flags;
+   uint32_t descriptor[A6XX_TEX_SAMP_DWORDS];
+};
+
 struct tu_descriptor_update_template_entry
 {
    VkDescriptorType descriptor_type;
@@ -181,7 +192,7 @@ struct tu_descriptor_update_template_entry
    uint32_t buffer_offset;
 
    /* Only valid for combined image samplers and samplers */
-   const struct tu_sampler *immutable_samplers;
+   const struct tu_descriptor_update_template_sampler *immutable_samplers;
 
    /* In bytes */
    size_t src_offset;
@@ -426,7 +437,8 @@ static inline void
 tu_desc_set_tex_line_offset(uint32_t *desc, uint32_t tex_line_offset)
 {
    if (CHIP >= A8XX) {
-      desc[6] = pkt_field_set(A8XX_TEX_MEMOBJ_6_TEX_LINE_OFFSET, desc[6], tex_line_offset);
+      /* TEX_LINE_OFFSET is in bits */
+      desc[6] = pkt_field_set(A8XX_TEX_MEMOBJ_6_TEX_LINE_OFFSET, desc[6], tex_line_offset * 8);
    } else {
       desc[2] = pkt_field_set(A6XX_TEX_MEMOBJ_2_PITCH, desc[2], tex_line_offset);
    }

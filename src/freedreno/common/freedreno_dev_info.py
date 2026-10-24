@@ -105,8 +105,11 @@ class GPUInfo(Struct):
                  tile_max_w, tile_max_h, num_vsc_pipes,
                  cs_shared_mem_size, num_sp_cores, wave_granularity, fibers_per_sp,
                  highest_bank_bit = 0, ubwc_swizzle = 0x7, macrotile_mode = 0,
-                 threadsize_base = 64, max_waves = 16, compute_lb_size = 0):
+                 threadsize_base = 64, max_waves = 16, compute_lb_size = 0,
+                 reg_size_vec4 = 0):
         self.chip          = chip.value
+        self.props = Struct()
+        self.props.reg_size_vec4 = reg_size_vec4
         self.gmem_align_w  = gmem_align_w
         self.gmem_align_h  = gmem_align_h
         self.tile_align_w  = tile_align_w

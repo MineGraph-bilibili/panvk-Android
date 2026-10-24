@@ -363,6 +363,13 @@ fn op_upred_latency(op: &Op) -> UpredLatencySM100 {
                 Coupled
             }
         }
+        Op::FSetP(_) => {
+            if uniform_op {
+                Udp
+            } else {
+                Coupled
+            }
+        }
         Op::PSetP(_) => {
             if uniform_op {
                 Udp

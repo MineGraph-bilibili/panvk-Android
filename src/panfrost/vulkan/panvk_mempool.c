@@ -153,6 +153,15 @@ panvk_pool_alloc_mem(struct panvk_pool *pool, struct panvk_pool_alloc_info info)
          panvk_priv_bo_ref(bo);
    }
 
+   /* Track how far allocations have reached so panvk_pool_flush_maps() can
+    * flush only the written prefix.  Only pool-owned BOs are flushed through
+    * the pool lists. */
+   if (bo != NULL && pool->props.owns_bos) {
+      size_t end = offset + info.size;
+      if (end > bo->flush_end)
+         bo->flush_end = end;
+   }
+
    uint32_t flags = 0;
 
    if (pool->props.owns_bos)
@@ -216,6 +225,13 @@ panvk_pool_init(struct panvk_pool *pool, struct panvk_device *dev,
 void
 panvk_pool_reset(struct panvk_pool *pool)
 {
+   /* Recycled BOs start from offset 0 again. */
+   list_for_each_entry(struct panvk_priv_bo, bo, &pool->bos, node)
+      bo->flush_end = 0;
+
+   list_for_each_entry(struct panvk_priv_bo, bo, &pool->big_bos, node)
+      bo->flush_end = 0;
+
    if (pool->bo_pool) {
       list_splicetail(&pool->bos, &pool->bo_pool->free_bos);
       list_inithead(&pool->bos);
@@ -262,6 +278,35 @@ panvk_pool_get_bo_handles(struct panvk_pool *pool, uint32_t *handles)
 }
 
 void
+panvk_pool_get_bos(struct panvk_pool *pool, struct pan_kmod_bo **bos)
+{
+   unsigned idx = 0;
+
+   list_for_each_entry(struct panvk_priv_bo, bo, &pool->bos, node)
+      bos[idx++] = bo->bo;
+
+   list_for_each_entry(struct panvk_priv_bo, bo, &pool->big_bos, node)
+      bos[idx++] = bo->bo;
+}
+
+static void
+panvk_pool_flush_bo(struct panvk_pool *pool, struct panvk_priv_bo *bo)
+{
+   size_t bo_size = pan_kmod_bo_size(bo->bo);
+   size_t end = MIN2(bo->flush_end, bo_size);
+
+   if (!end)
+      return;
+
+   /* Cache maintenance must be aligned to nonCoherentAtomSize. */
+   size_t atom = MAX2((size_t)64,
+                      (size_t)pool->dev->vk.physical->properties.nonCoherentAtomSize);
+   end = MIN2(ALIGN_POT(end, atom), bo_size);
+
+   panvk_priv_bo_flush(bo, 0, end);
+}
+
+void
 panvk_pool_flush_maps(struct panvk_pool *pool)
 {
    /* Don't walk the buffers if we know the synchronization is not needed. */
@@ -269,10 +314,10 @@ panvk_pool_flush_maps(struct panvk_pool *pool)
       return;
 
    list_for_each_entry(struct panvk_priv_bo, bo, &pool->bos, node)
-      panvk_priv_bo_flush(bo, 0, bo->bo->size);
+      panvk_pool_flush_bo(pool, bo);
 
    list_for_each_entry(struct panvk_priv_bo, bo, &pool->big_bos, node)
-      panvk_priv_bo_flush(bo, 0, bo->bo->size);
+      panvk_pool_flush_bo(pool, bo);
 }
 
 void

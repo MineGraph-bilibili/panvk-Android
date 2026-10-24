@@ -342,7 +342,7 @@ build_coordinate(struct move_tex_coords_state *state, nir_scalar scalar, coord_i
       }
    }
 
-   return &info.load->def;
+   return nir_mov_scalar(b, scalar);
 }
 
 static bool can_optimize_txd(nir_shader *shader, struct loop_if_state *loop_if, nir_tex_instr *tex,
@@ -394,6 +394,7 @@ move_tex_coords(struct move_tex_coords_state *state, nir_function_impl *impl, ni
    case GLSL_SAMPLER_DIM_3D:
    case GLSL_SAMPLER_DIM_CUBE:
    case GLSL_SAMPLER_DIM_EXTERNAL:
+   case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
       break;
    case GLSL_SAMPLER_DIM_RECT:
    case GLSL_SAMPLER_DIM_BUF:

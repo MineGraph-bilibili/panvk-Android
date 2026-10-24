@@ -5,12 +5,18 @@
  */
 
 #include "panvk_buffer.h"
+#include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_device_memory.h"
 #include "panvk_entrypoints.h"
 
 #include "pan_desc.h"
 #include "pan_util.h"
+
+#if PAN_ARCH == 9
+#include "util/u_debug.h"
+DEBUG_GET_ONCE_OPTION(v9_rt128, "PANVK_V9_RT128", NULL)
+#endif
 
 static enum pan_fb_load_op
 get_att_fb_load_op(const VkRenderingAttachmentInfo *att)
@@ -116,6 +122,19 @@ avoid_direct_resolve_to(const struct pan_image *img)
 }
 
 static void
+panvk_fb_store_set_crc_header_addr(struct pan_fb_store_target *store,
+                                   const struct panvk_image_view *iview)
+{
+   if (!store->store || !pan_image_view_has_crc(&iview->pview))
+      return;
+
+   const struct panvk_image *image =
+      container_of(iview->vk.image, struct panvk_image, vk);
+
+   store->crc_header_addr = panvk_image_plane_crc_header_addr(image);
+}
+
+static void
 render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
                                   const VkRenderingAttachmentInfo *att,
                                   uint32_t index)
@@ -178,8 +197,12 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
    };
    render->fb.spill.load.rts[index] = pan_fb_load_iview(&iview->pview);
    render->fb.spill.store.rts[index] = pan_fb_store_iview(&iview->pview);
-   if (att->storeOp == VK_ATTACHMENT_STORE_OP_STORE && !ms2ss)
+   panvk_fb_store_set_crc_header_addr(&render->fb.spill.store.rts[index],
+                                      iview);
+   if (att->storeOp == VK_ATTACHMENT_STORE_OP_STORE && !ms2ss) {
       render->fb.store.rts[index] = pan_fb_store_iview(&iview->pview);
+      panvk_fb_store_set_crc_header_addr(&render->fb.store.rts[index], iview);
+   }
 
    if (att->resolveMode != VK_RESOLVE_MODE_NONE) {
       VK_FROM_HANDLE(panvk_image_view, resolve_iview, att->resolveImageView);
@@ -215,9 +238,13 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
          };
          render->fb.store.rts[index] =
             pan_fb_always_store_iview_s0(&resolve.dst_iview->pview);
+         panvk_fb_store_set_crc_header_addr(&render->fb.store.rts[index],
+                                            resolve.dst_iview);
       } else {
          /* We need to store so we can do the MSAA resolve later */
          render->fb.store.rts[index] = pan_fb_store_iview(&iview->pview);
+         panvk_fb_store_set_crc_header_addr(&render->fb.store.rts[index],
+                                            iview);
          render->color_attachments.resolve[index] = resolve;
       }
    }
@@ -602,6 +629,13 @@ panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
       .tile_z_budget_B =
          pan_query_optimal_z_tib_size(PAN_ARCH, phys_dev->model),
    };
+#if PAN_ARCH == 9
+   /* Bisect knob for the bc_decode RGBA32F blit: an eighth of the colour
+    * budget (64-pixel tiles at 16 B/px). */
+   const char *rt128_dbg = debug_get_option_v9_rt128();
+   if (rt128_dbg && strstr(rt128_dbg, "tile"))
+      render->fb.layout.tile_rt_budget_B /= 8;
+#endif
    /* In case ms2ss is enabled, use the provided sample count.
     * All attachments need to have sample count == 1 or the provided value.
     * But, if all attachments have 1, we would end up choosing the wrong value
@@ -806,10 +840,85 @@ prepare_iam_sysvals(struct panvk_cmd_buffer *cmdbuf, BITSET_WORD *dirty_sysvals)
       set_gfx_sysval(cmdbuf, dirty_sysvals, iam[i], iam[i]);
 }
 
-/* This value has been selected to get
- * dEQP-VK.draw.renderpass.inverted_depth_ranges.nodepthclamp_deltazero passing.
- */
-#define MIN_DEPTH_CLIP_RANGE 37.7E-06f
+#if PAN_ARCH >= 9
+static void
+panvk_upload_prerast_viewports(struct panvk_cmd_buffer *cmdbuf,
+                               BITSET_WORD *dirty_sysvals)
+{
+   if (!panvk_prerast_viewport_shader(&cmdbuf->state.gfx))
+      return;
+
+   /* Not keyed on VS dirty: every generated GS draw sets that bit. */
+   bool dirty =
+      dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_SCISSORS) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORT_COUNT) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_SCISSOR_COUNT) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE) ||
+      dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLIP_ENABLE) ||
+      dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLAMP_ENABLE) ||
+      cmdbuf->state.gfx.sysvals.gpu_prerast_viewports == 0;
+   if (!dirty)
+      return;
+
+   const struct vk_viewport_state *vp = &cmdbuf->vk.dynamic_graphics_state.vp;
+   const struct vk_rasterization_state *rs =
+      &cmdbuf->vk.dynamic_graphics_state.rs;
+   struct panvk_prerast_vp_table table = { 0 };
+   uint32_t n = vp->viewport_count ? vp->viewport_count : 1;
+
+   n = MIN2(n, ARRAY_SIZE(table.vp));
+   table.count = n;
+   for (uint32_t i = 0; i < n; i++) {
+      const VkViewport *viewport = &vp->viewports[i];
+      struct panvk_prerast_viewport *out = &table.vp[i];
+
+      out->scale[0] = 0.5f * viewport->width;
+      out->scale[1] = 0.5f * viewport->height;
+      panvk_viewport_z_coeffs(vp, rs, i, &out->scale[2], &out->offset[2]);
+      out->offset[0] = viewport->x + out->scale[0];
+      out->offset[1] = viewport->y + out->scale[1];
+
+      float minx = viewport->x;
+      float maxx = viewport->x + viewport->width;
+      float y0 = viewport->y;
+      float y1 = viewport->y + viewport->height;
+      float miny = MIN2(y0, y1);
+      float maxy = MAX2(y0, y1);
+
+      if (i < vp->scissor_count) {
+         const VkRect2D *sc = &vp->scissors[i];
+
+         minx = MAX2(minx, (float)sc->offset.x);
+         miny = MAX2(miny, (float)sc->offset.y);
+         maxx = MIN2(maxx, (float)sc->offset.x + (float)sc->extent.width);
+         maxy = MIN2(maxy, (float)sc->offset.y + (float)sc->extent.height);
+      } else {
+         maxx = minx - 1.0f;
+         maxy = miny - 1.0f;
+      }
+      /* max <= min must kill every fragment, including a pixel centre. */
+      if (!(maxx > minx && maxy > miny)) {
+         minx = 0.0f;
+         miny = 0.0f;
+         maxx = -1.0f;
+         maxy = -1.0f;
+      }
+      out->minx = minx;
+      out->miny = miny;
+      out->maxx = maxx;
+      out->maxy = maxy;
+   }
+
+   struct pan_ptr ptr =
+      panvk_cmd_alloc_dev_mem(cmdbuf, desc, sizeof(table), 16);
+   if (!ptr.gpu)
+      return;
+
+   memcpy(ptr.cpu, &table, sizeof(table));
+   set_gfx_sysval(cmdbuf, dirty_sysvals, gpu_prerast_viewports, ptr.gpu);
+}
+#endif
 
 void
 panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
@@ -824,13 +933,16 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
                   noperspective_varyings);
    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.first_vertex, info->vertex.base);
    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.base_instance, info->instance.base);
-   set_gfx_sysval(cmdbuf, dirty_sysvals, vs.draw_id,
-                  info->indirect.record_index);
 
 #if PAN_ARCH < 9
    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.raw_vertex_offset,
                   info->vertex.raw_offset);
+#endif
+#if PAN_ARCH <= 9
    set_gfx_sysval(cmdbuf, dirty_sysvals, layer_id, info->layer_id);
+#endif
+#if PAN_ARCH == 9
+   set_gfx_sysval(cmdbuf, dirty_sysvals, draw_id, info->indirect.draw_index);
 #endif
 
    if (dyn_gfx_state_dirty(cmdbuf, CB_BLEND_CONSTANTS)) {
@@ -855,32 +967,6 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
          &cmdbuf->vk.dynamic_graphics_state.vp;
       const VkViewport *viewport = &vp->viewports[0];
 
-      /* Doing the viewport transform in the vertex shader and then depth
-       * clipping with the viewport depth range gets a similar result to
-       * clipping in clip-space, but loses precision when the viewport depth
-       * range is very small. When minDepth == maxDepth, this completely
-       * flattens the clip-space depth and results in never clipping.
-       *
-       * To work around this, set a lower limit on depth range when clipping is
-       * enabled. This results in slightly incorrect fragment depth values, and
-       * doesn't help with the precision loss, but at least clipping isn't
-       * completely broken.
-       */
-      float z_min = viewport->minDepth;
-      float z_max = viewport->maxDepth;
-      if (vk_rasterization_state_depth_clip_enable(rs) &&
-          fabsf(z_max - z_min) < MIN_DEPTH_CLIP_RANGE) {
-         float z_sign = z_min <= z_max ? 1.0f : -1.0f;
-
-         float z_center = 0.5f * (z_max + z_min);
-         /* Bump offset off-center if necessary, to not go out of range */
-         z_center = CLAMP(z_center, 0.5f * MIN_DEPTH_CLIP_RANGE,
-                          1.0f - 0.5f * MIN_DEPTH_CLIP_RANGE);
-
-         z_min = z_center - 0.5f * z_sign * MIN_DEPTH_CLIP_RANGE;
-         z_max = z_center + 0.5f * z_sign * MIN_DEPTH_CLIP_RANGE;
-      }
-
       /* Upload the viewport scale. Defined as (px/2, py/2, pz) at the start of
        * section 24.5 ("Controlling the Viewport") of the Vulkan spec. At the
        * end of the section, the spec defines:
@@ -890,13 +976,13 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
        * pz = maxDepth - minDepth         if negativeOneToOne is false
        * pz = (maxDepth - minDepth) / 2   if negativeOneToOne is true
        */
+      float z_scale, z_offset;
+      panvk_viewport_z_coeffs(vp, rs, 0, &z_scale, &z_offset);
       set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.scale.x,
                      0.5f * viewport->width);
       set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.scale.y,
                      0.5f * viewport->height);
-      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.scale.z,
-                     vp->depth_clip_negative_one_to_one ?
-                        0.5f * (z_max - z_min) : z_max - z_min);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.scale.z, z_scale);
 
       /* Upload the viewport offset. Defined as (ox, oy, oz) at the start of
        * section 24.5 ("Controlling the Viewport") of the Vulkan spec. At the
@@ -911,11 +997,33 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
                      (0.5f * viewport->width) + viewport->x);
       set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.offset.y,
                      (0.5f * viewport->height) + viewport->y);
-      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.offset.z,
-                     vp->depth_clip_negative_one_to_one ?
-                        0.5f * (z_min + z_max) : z_min);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.offset.z, z_offset);
 
    }
+
+#if PAN_ARCH >= 9
+   panvk_upload_prerast_viewports(cmdbuf, dirty_sysvals);
+#endif
+
+#if PAN_ARCH >= 9
+   {
+      const struct vk_depth_stencil_state *dss =
+         &cmdbuf->vk.dynamic_graphics_state.ds;
+      const bool db_enable =
+         dss->depth.bounds_test.enable &&
+         (cmdbuf->state.gfx.render.bound_attachments &
+          MESA_VK_RP_ATTACHMENT_DEPTH_BIT);
+
+      set_gfx_sysval(cmdbuf, dirty_sysvals, ds.bounds[0],
+                     dss->depth.bounds_test.min);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, ds.bounds[1],
+                     dss->depth.bounds_test.max);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, ds.enable, (uint32_t)db_enable);
+      set_gfx_sysval(
+         cmdbuf, dirty_sysvals, ds.samples,
+         MAX2(cmdbuf->vk.dynamic_graphics_state.ms.rasterization_samples, 1));
+   }
+#endif
 
    if (dyn_gfx_state_dirty(cmdbuf, INPUT_ATTACHMENT_MAP))
       prepare_iam_sysvals(cmdbuf, dirty_sysvals);
@@ -940,10 +1048,12 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
                      fs_desc_state->dyn_ssbos);
    }
 
-   for (uint32_t i = 0; i < MAX_SETS; i++) {
-      uint32_t used_set_mask =
-         vs->desc_info.used_set_mask | (fs ? fs->desc_info.used_set_mask : 0);
+   uint32_t used_set_mask = 0;
+   used_set_mask |= cmdbuf->state.gfx.vs.shader->desc_info.used_set_mask;
+   if (fs)
+      used_set_mask |= cmdbuf->state.gfx.fs.shader->desc_info.used_set_mask;
 
+   for (uint32_t i = 0; i < MAX_SETS; i++) {
       if (used_set_mask & BITFIELD_BIT(i)) {
          set_gfx_sysval(cmdbuf, dirty_sysvals, desc.sets[i],
                         desc_state->sets[i]->descs.dev);
@@ -957,6 +1067,25 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
    BITSET_AND(dirty_shader_sysvals, dirty_sysvals, vs->fau.used_sysvals);
    if (!BITSET_IS_EMPTY(dirty_shader_sysvals))
       gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
+
+#if PAN_ARCH >= 9
+   {
+      /* The raster VS for a geometry draw is the GS passthrough, not the
+       * HW VS masked above. Mask that variant too.
+       */
+      const struct panvk_shader *pshader =
+         panvk_prerast_viewport_shader(&cmdbuf->state.gfx);
+      if (pshader) {
+         const struct panvk_shader_variant *pt =
+            pshader == cmdbuf->state.gfx.gs.shader
+               ? &pshader->variants[PANVK_GS_VARIANT_PASSTHROUGH]
+               : &pshader->variants[PANVK_VS_VARIANT_GPU_PASSTHROUGH];
+         BITSET_AND(dirty_shader_sysvals, dirty_sysvals, pt->fau.used_sysvals);
+         if (!BITSET_IS_EMPTY(dirty_shader_sysvals))
+            gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
+      }
+   }
+#endif
 
    if (fs) {
       BITSET_AND(dirty_shader_sysvals, dirty_sysvals, fs->fau.used_sysvals);

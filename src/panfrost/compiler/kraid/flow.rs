@@ -19,7 +19,9 @@ pub enum FlowWaitBit {
 #[repr(u8)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum FlowCtrlBit {
+    #[allow(dead_code)]
     MsgSlotBit0 = 0,
+    #[allow(dead_code)]
     MsgSlotBit1 = 1,
     Reconverge,
     Discard,
@@ -87,6 +89,7 @@ impl FlowCtrl {
         self.get_ctrl_bit(FlowCtrlBit::Discard)
     }
 
+    #[allow(dead_code)]
     pub fn set_discard(&mut self) {
         self.set_ctrl_bit(FlowCtrlBit::Discard)
     }

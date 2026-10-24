@@ -42,13 +42,14 @@ static void
 radv_emit_wait_for_idle(const struct radv_device *device, struct radv_cmd_stream *cs)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   enum rgp_flush_bits sqtt_flush_bits = 0;
+   enum ac_rgp_flush_bits rgp_flush_bits = 0;
    radv_cs_emit_cache_flush(
       device->ws, cs, pdev->info.gfx_level, NULL, 0,
-      (cs->hw_ip == AMD_IP_COMPUTE ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
-                                   : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
+      (cs->hw_ip == AMD_IP_COMPUTE
+          ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
+          : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_VS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
          RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_L2,
-      &sqtt_flush_bits, 0);
+      &rgp_flush_bits, RADV_PWS_ACQUIRE_POINT_PFP, 0);
 }
 
 static void
@@ -285,16 +286,15 @@ radv_sqtt_init_bo(struct radv_device *device)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    unsigned max_se = pdev->info.max_se;
    VkResult result;
-   uint64_t per_se_size, size;
+   uint64_t size;
 
-   /* The buffer size and address need to be aligned in HW regs. Align the
-    * size as early as possible so that we do all the allocation & addressing
-    * correctly. */
-   per_se_size = align64(device->sqtt.buffer_size, 1ull << SQTT_BUFFER_ALIGN_SHIFT);
+   /* The buffer size and address need to be aligned in HW regs. The size is
+    * aligned when it is set. */
+   assert(!(device->sqtt.buffer_size & ((1u << SQTT_BUFFER_ALIGN_SHIFT) - 1)));
 
    /* Compute total size of the thread trace BO for all SEs. */
    size = align64(sizeof(struct ac_sqtt_data_info) * max_se, 1ull << SQTT_BUFFER_ALIGN_SHIFT);
-   size += per_se_size * (uint64_t)max_se;
+   size += device->sqtt.buffer_size * (uint64_t)max_se;
 
    /* Allocate the SQTT buffer (it must be in VRAM). */
    result = radv_backed_buffer_init(
@@ -419,7 +419,7 @@ radv_sqtt_init(struct radv_device *device)
    if (!radv_sqtt_init_queue_event(device))
       return false;
 
-   if (!radv_device_acquire_performance_counters(device))
+   if (radv_device_acquire_performance_counters(device, 1000000000ull /* 1s */) != VK_SUCCESS)
       return false;
 
    ac_sqtt_init(sqtt);
@@ -453,11 +453,11 @@ radv_sqtt_finish(struct radv_device *device)
 static bool
 radv_sqtt_resize_bo(struct radv_device *device)
 {
-   /* Destroy the previous thread trace BO. */
-   radv_sqtt_finish_bo(device);
-
    if (!ac_sqtt_update_bo_size(&device->sqtt, "RADV"))
       return false;
+
+   /* Destroy the previous thread trace BO*/
+   radv_sqtt_finish_bo(device);
 
    /* Re-create the thread trace BO. */
    return radv_sqtt_init_bo(device);
@@ -696,6 +696,8 @@ radv_sqtt_start_capturing(struct radv_queue *queue)
       return;
    }
 
+   device->sqtt.capture_cancelled = false;
+
    /* Reserve a VMID to allow the KMD to update SPM_VMID accordingly. */
    if (device->ws->reserve_vmid(device->ws) < 0) {
       fprintf(stderr, "radv: Failed to reserve VMID for SQTT tracing.\n");
@@ -731,17 +733,20 @@ radv_sqtt_stop_capturing(struct radv_queue *queue)
 
    device->ws->unreserve_vmid(device->ws);
 
-   if (radv_get_sqtt_trace(queue, &sqtt_trace) && (!device->spm.bo || radv_get_spm_trace(queue, &spm_trace))) {
-      struct ac_rgp_capture_info capture_info = {
-         .mode = instance->vk.trace_per_submit ? AC_RGP_CAPTURE_MODE_SUBMIT : AC_RGP_CAPTURE_MODE_FRAME,
-      };
+   const bool sqtt_ok = radv_get_sqtt_trace(queue, &sqtt_trace);
+   const bool spm_ok = !device->spm.bo || radv_get_spm_trace(queue, &spm_trace);
 
-      if (instance->vk.trace_per_submit) {
-         capture_info.submit_idx = device->rgp_num_submits;
-      } else {
-         capture_info.frame_idx = device->vk.current_frame;
-      }
+   struct ac_rgp_capture_info capture_info = {
+      .mode = instance->vk.trace_per_submit ? AC_RGP_CAPTURE_MODE_SUBMIT : AC_RGP_CAPTURE_MODE_FRAME,
+   };
 
+   if (instance->vk.trace_per_submit) {
+      capture_info.submit_idx = device->rgp_num_submits;
+   } else {
+      capture_info.frame_idx = device->vk.current_frame;
+   }
+
+   if (sqtt_ok && spm_ok) {
       ac_dump_rgp_capture(&pdev->info, &sqtt_trace, device->spm.bo ? &spm_trace : NULL, &capture_info);
    } else {
       /* Failed to capture because the buffer was too small. */

@@ -87,8 +87,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
    /* Find out which frag coord components are used. */
    uint8_t frag_coord_mask = 0;
 
-   nir_divergence_analysis(nir);
-
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, ac_nir_assign_fs_input_locations);
 
@@ -173,8 +171,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
             case nir_intrinsic_load_per_primitive_input:
             case nir_intrinsic_load_interpolated_input: {
                if (nir->info.stage == MESA_SHADER_VERTEX) {
-                  shader->info.uses_vmem_load_other = true;
-
                   if (intr->intrinsic == nir_intrinsic_load_input &&
                       (shader->key.ge.mono.instance_divisor_is_one |
                        shader->key.ge.mono.instance_divisor_is_fetched) &
@@ -183,8 +179,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
                      shader->info.uses_sysval_instance_id = true;
                      shader->info.uses_sysval_base_instance = true;
                   }
-               } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
-                  shader->info.uses_vmem_load_other = true;
                } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
                   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
                   unsigned index = nir_intrinsic_base(intr);
@@ -222,43 +216,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
                   interp == INTERP_MODE_NONE ? INTERP_MODE_COLOR : interp;
                break;
             }
-            case nir_intrinsic_load_ubo:
-               if (intr->src[1].ssa->divergent)
-                  shader->info.uses_vmem_load_other = true;
-               break;
-            case nir_intrinsic_load_constant:
-               if (intr->src[0].ssa->divergent)
-                  shader->info.uses_vmem_load_other = true;
-               break;
-            /* Global */
-            case nir_intrinsic_load_global:
-            case nir_intrinsic_global_atomic:
-            case nir_intrinsic_global_atomic_swap:
-            /* SSBOs (this list is from si_nir_lower_resource.c) */
-            case nir_intrinsic_load_ssbo:
-            case nir_intrinsic_ssbo_atomic:
-            case nir_intrinsic_ssbo_atomic_swap:
-            /* Images (this list is from si_nir_lower_resource.c) */
-            case nir_intrinsic_image_deref_load:
-            case nir_intrinsic_image_deref_sparse_load:
-            case nir_intrinsic_image_deref_fragment_mask_load_amd:
-            case nir_intrinsic_image_deref_atomic:
-            case nir_intrinsic_image_deref_atomic_swap:
-            case nir_intrinsic_bindless_image_load:
-            case nir_intrinsic_bindless_image_sparse_load:
-            case nir_intrinsic_bindless_image_fragment_mask_load_amd:
-            case nir_intrinsic_bindless_image_atomic:
-            case nir_intrinsic_bindless_image_atomic_swap:
-            /* Scratch */
-            case nir_intrinsic_load_scratch:
-            /* AMD-specific. */
-            case nir_intrinsic_load_buffer_amd:
-               /* Atomics without return are not treated as loads. */
-               if (nir_def_components_read(&intr->def) &&
-                   (!nir_intrinsic_has_atomic_op(intr) ||
-                    nir_intrinsic_atomic_op(intr) != nir_atomic_op_ordered_add_gfx12_amd))
-                  shader->info.uses_vmem_load_other = true;
-               break;
             case nir_intrinsic_store_output:
             case nir_intrinsic_store_per_vertex_output:
                if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -312,28 +269,6 @@ void si_get_shader_variant_info(struct si_shader *shader,
 
             temp_info->has_non_uniform_tex_access |= tex->texture_non_uniform || tex->sampler_non_uniform;
             temp_info->has_shadow_comparison |= tex->is_shadow;
-
-            /* Gather the types of used VMEM instructions that return something. */
-            switch (tex->op) {
-            case nir_texop_tex:
-            case nir_texop_txb:
-            case nir_texop_txl:
-            case nir_texop_txd:
-            case nir_texop_lod:
-            case nir_texop_tg4:
-               shader->info.uses_vmem_sampler_or_bvh = true;
-               break;
-            case nir_texop_txs:
-            case nir_texop_query_levels:
-            case nir_texop_texture_samples:
-            case nir_texop_descriptor_amd:
-            case nir_texop_sampler_descriptor_amd:
-               /* These just return the descriptor or information from it. */
-               break;
-            default:
-               shader->info.uses_vmem_load_other = true;
-               break;
-            }
             break;
          }
 

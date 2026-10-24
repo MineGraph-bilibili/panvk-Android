@@ -237,7 +237,7 @@ nak_optimize_nir(nir_shader *nir, const struct nak_compiler *nak)
          LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_loop_unroll);
       }
       LOOP_OPT(nir, nir_opt_remove_phis);
-      LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_gcm, false, true);
+      LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_gcm, false);
       LOOP_OPT(nir, nir_opt_undef);
    } while (progress);
    OPT(nir, nir_lower_undef_to_zero, NULL);
@@ -412,8 +412,11 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
    OPT(nir, nir_lower_system_values);
    OPT(nir, nir_lower_compute_system_values, NULL);
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+      OPT(nir, nir_opt_move_discards_to_top);
       OPT(nir, nir_lower_terminate_to_demote);
+   }
 }
 
 uint16_t
@@ -1256,10 +1259,33 @@ nak_nir_lower_load_store(nir_shader *nir, const struct nak_compiler *nak)
                nir_src *size = &intr->src[2];
                unsigned load_size = intr->def.num_components * intr->def.bit_size / 8;
 
+               nir_def *offset_bound, *size_bound;
+               /* TODO: It might make sense to check all uses to find some with
+                *       equal access size instead of this trivial check.
+                */
+               if (list_is_singular(&size->ssa->uses)) {
+                  /* If we only have a single user of the size we simply add
+                   * the load_size - 1 to it and do the bound check with that.
+                   * This won't overflow as we make sure we only have aligned
+                   * accesses at this point.
+                   * This is cheaper than the usub_sat path below.
+                   */
+                  offset_bound = nir_iadd_imm(&b, offset->ssa, load_size - 1);
+                  size_bound = size->ssa;
+               } else {
+                  /* If we have multiple uses of the size we reduce the size
+                   * by load_size - 1 with usub_sat. This way the offset will
+                   * be used by the address calculation and the bound check and
+                   * the usub_sat will be shared with all loads of equal size.
+                   */
+                  nir_def *load_size_def = nir_imm_intN_t(&b, (load_size - 1), size->ssa->bit_size);
+                  offset_bound = offset->ssa;
+                  size_bound = nir_usub_sat(&b, size->ssa, load_size_def);
+               }
+
                /* see addr_is_in_bounds in nir_lower_explicit_io.c */
                nir_def *addr = nir_iadd(&b, base->ssa, nir_u2u64(&b, offset->ssa));
-               nir_def *last_byte = nir_iadd_imm(&b, offset->ssa, load_size - 1);
-               nir_def *cond = nir_ult(&b, last_byte, size->ssa);
+               nir_def *cond = nir_ult(&b, offset_bound, size_bound);
                res = nir_load_global_nv(&b, intr->def.num_components, intr->def.bit_size, addr, uaddr, cond);
                break;
             }

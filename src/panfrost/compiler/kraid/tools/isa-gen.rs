@@ -11,4 +11,7 @@ fn main() {
 
     let ts = kraid_proc::isa::encoder::gen_encoder(xml_file, 9..15).unwrap();
     println!("{ts}");
+
+    let ts = kraid_proc::isa::decoder::gen_decoder(xml_file, 9..15).unwrap();
+    println!("{ts}");
 }

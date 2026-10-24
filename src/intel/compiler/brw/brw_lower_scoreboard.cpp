@@ -76,6 +76,13 @@ inferred_exec_pipe(const struct intel_device_info *devinfo, const brw_inst *inst
             inst->opcode == SHADER_OPCODE_BROADCAST ||
             inst->opcode == SHADER_OPCODE_SHUFFLE)
       return GEN_PIPE_INT;
+   else if (devinfo->ver >= 35 &&
+            (inst->opcode == BRW_OPCODE_MOV ||
+             inst->opcode == BRW_OPCODE_SRND) &&
+            inst->dst.type != inst->src[0].type &&
+            brw_type_size_bytes(inst->dst.type) <= 4 &&
+            brw_type_is_float_or_bfloat(inst->dst.type))
+      return GEN_PIPE_INT;
    else if (inst->opcode == FS_OPCODE_PACK_HALF_2x16_SPLIT)
       return GEN_PIPE_FLOAT;
    else if (devinfo->ver >= 20 &&
@@ -648,6 +655,12 @@ namespace {
 
    /** @} */
 
+   static bool
+   is_address_register(const brw_reg &r)
+   {
+      return r.file == ADDRESS || brw_reg_is_arf(r, BRW_ARF_ADDRESS);
+   }
+
    /**
     * Scoreboard representation.  This keeps track of the data dependencies of
     * registers with GRF granularity.
@@ -791,7 +804,7 @@ namespace {
                                reg_offset(r) / REG_SIZE);
 
          return (r.file == VGRF || r.file == FIXED_GRF ? &grf_deps[reg] :
-                 brw_reg_is_arf(r, BRW_ARF_ADDRESS) ? &addr_dep :
+                 is_address_register(r) ? &addr_dep :
                  brw_reg_is_arf(r, BRW_ARF_ACCUMULATOR) ? &accum_dep :
                  brw_reg_is_arf(r, BRW_ARF_FLAG) ? &flag_deps[r.nr & 0x0f] :
                  brw_reg_is_arf(r, BRW_ARF_SCALAR) ? &scalar_dep :
@@ -1058,9 +1071,19 @@ namespace {
        * subsequent redundant synchronization.
        */
       for (unsigned i = 0; i < inst->sources; i++) {
+         const bool is_send_address_descriptor =
+            inst->is_send() &&
+            (i == SEND_SRC_DESC || i == SEND_SRC_EX_DESC) &&
+            is_address_register(inst->src[i]);
+         const bool is_scalar_descriptor =
+            inst->is_send() && inst->as_send()->efficient_64bit &&
+            (i == SENDG_SRC_IND_0_DESC || i == SENDG_SRC_IND_1_DESC) &&
+            brw_reg_is_arf(inst->src[i], BRW_ARF_SCALAR);
          const dependency rd_dep =
             inst->opcode == BRW_OPCODE_DPAS ? dependency(GEN_SBID_SRC, ip, exec_all, UNIT_DPAS) :
             (inst->is_payload(i) ||
+             is_send_address_descriptor ||
+             is_scalar_descriptor ||
              is_unordered_math) ? dependency(GEN_SBID_SRC, ip, exec_all, UNIT_OTHER) :
             is_ordered ? dependency(TGL_REGDIST_SRC, jp, exec_all) :
             dependency::done;
@@ -1123,6 +1146,9 @@ namespace {
          for (unsigned j = 0; j < written; j++)
             sb.set(byte_offset(inst->dst, REG_SIZE * j), wr_dep);
       }
+
+      if (inst->uses_address_register_implicitly())
+         sb.set(brw_address_reg(0), dependency::done);
    }
 
    /**
@@ -1261,6 +1287,11 @@ namespace {
                UNIT_DPAS : UNIT_OTHER;
             add_dependency(ids, inst_deps,
                            dependency(GEN_SBID_SET, ip, exec_all, unit));
+         }
+
+         if (inst->uses_address_register_implicitly()) {
+            add_dependency(ids, inst_deps, dependency_for_write(devinfo, inst,
+               sb.get(brw_address_reg(0))));
          }
 
          if (inst->dst.file != BAD_FILE && !inst->dst.is_null() &&

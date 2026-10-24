@@ -1958,7 +1958,7 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
 
    if (!executable_info) {
       cache_hit = true;
-      bool application_cache_hit = false;
+      bool application_cache_hit = true;
 
       unsigned char shader_blake3[BLAKE3_KEY_LEN + 1];
       memcpy(shader_blake3, pipeline_blake3, sizeof(pipeline_blake3));
@@ -2269,7 +2269,7 @@ tu_pipeline_builder_parse_layout(struct tu_pipeline_builder *builder,
                                          library->num_sets);
          assert(builder->layout.num_sets <= builder->device->physical_device->usable_sets);
          for (unsigned j = 0; j < library->num_sets; j++) {
-            builder->layout.set[i].layout = library->layouts[i];
+            builder->layout.set[j].layout = library->layouts[j];
          }
 
          builder->layout.push_constant_size = library->push_constant_size;
@@ -2781,7 +2781,7 @@ fdm_apply_viewports(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
        */
       VkOffset2D tile_start = common_bin_offset;
       if (state->custom_resolve && !binning) {
-         if (tile->subsampled)
+         if (tile->custom_resolve_subsampled)
             tile_start = tile->subsampled_pos[view].offset;
          else
             tile_start = bin.offset;
@@ -2792,7 +2792,8 @@ fdm_apply_viewports(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
        * this, so we have to keep applying the transform for binning.
        */
       if (state->custom_resolve &&
-          !(tile->subsampled_views & (1u << view)) && !binning) {
+          (!(tile->subsampled_views & (1u << view)) ||
+           !tile->custom_resolve_subsampled) && !binning) {
          frag_area = (VkExtent2D) {1, 1};
       }
 
@@ -2911,7 +2912,7 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
 
       VkOffset2D tile_start = common_bin_offset;
       if (state->custom_resolve && !binning) {
-         if (tile->subsampled)
+         if (tile->custom_resolve_subsampled)
             tile_start = tile->subsampled_pos[view].offset;
          else
             tile_start = bin.offset;
@@ -2921,7 +2922,8 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
        * and not in the binning pass, because we use framebuffer coordinates.
        */
       if (state->custom_resolve &&
-          !(tile->subsampled_views & (1u << view)) && !binning) {
+          (!(tile->subsampled_views & (1u << view)) ||
+           !tile->custom_resolve_subsampled) && !binning) {
          frag_area = (VkExtent2D) {1, 1};
       }
 
@@ -3460,20 +3462,28 @@ static const enum mesa_vk_dynamic_graphics_state tu_rast_state[] = {
 };
 
 template <chip CHIP>
+bool
+tu_binning_conservative_rast(struct tu_device *dev, bool fdm)
+{
+   return CHIP == A7XX && fdm && !dev->instance->drirc.misc.disable_conservative_fdm_binning;
+}
+
+template <chip CHIP>
 uint32_t
 tu6_rast_size(struct tu_device *dev,
               const struct vk_rasterization_state *rs,
               const struct vk_viewport_state *vp,
               bool multiview,
               bool per_view_viewport,
-              bool disable_fs)
+              bool disable_fs,
+              bool fdm)
 {
    if (CHIP == A6XX && dev->physical_device->info->props.is_a702) {
       return 17;
    } else if (CHIP == A6XX) {
       return 15 + (dev->physical_device->info->props.has_legacy_pipeline_shading_rate ? 8 : 0);
    } else {
-      return 30;
+      return 30 + (tu_binning_conservative_rast<CHIP>(dev, fdm) ? 7 : 0);
    }
 }
 
@@ -3484,7 +3494,8 @@ tu6_emit_rast(struct tu_cs *cs,
               const struct vk_viewport_state *vp,
               bool multiview,
               bool per_view_viewport,
-              bool disable_fs)
+              bool disable_fs,
+              bool fdm)
 {
    enum a5xx_line_mode line_mode =
       rs->line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR ?
@@ -3537,8 +3548,9 @@ tu6_emit_rast(struct tu_cs *cs,
       .stream = rs->rasterization_stream,
       .discard = rs->rasterizer_discard_enable));
    if (CHIP == A6XX) {
-      tu_cs_emit_regs(cs, VPC_UNKNOWN_9107(CHIP,
-         .raster_discard = rs->rasterizer_discard_enable));
+      tu_cs_emit_regs(cs, PC_RAST_STREAM_CNTL(CHIP,
+         .stream = rs->rasterization_stream,
+         .discard = rs->rasterizer_discard_enable));
    } else {
       if (CHIP == A7XX) {
          tu_cs_emit_regs(cs, VPC_RAST_STREAM_CNTL_V2(CHIP,
@@ -3589,6 +3601,27 @@ tu6_emit_rast(struct tu_cs *cs,
       tu_cs_emit_regs(cs, GRAS_SU_CONSERVATIVE_RAS_CNTL(CHIP,
             .conservativerasen = conservative_ras_en,
             .shiftamount = shift_amount));
+
+      /* When FDM is enabled fragment's sample locations differ between full-size binning
+       * and non-identity FDM tiles, thus a small primitive that only covers a single sample
+       * in the binning pass may not be covering any during the rasterization pass and vice versa.
+       * To avoid this - use conservative rasterization during the binning pass, though more primitives
+       * than strictly necessary will pass binning, leading to slightly reduced performance.
+       */
+      if (tu_binning_conservative_rast<CHIP>(cs->device, fdm)) {
+         tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(RENDER_MODE) |
+                                CP_COND_REG_EXEC_0_BINNING);
+         tu_cs_emit_regs(cs, RB_RENDER_CNTL(CHIP,
+               .fs_disable = disable_fs,
+               .raster_mode = TYPE_TILED,
+               .raster_direction = LR_TB,
+               .conservativerasen = true));
+         tu_cs_emit_regs(cs, GRAS_SU_CONSERVATIVE_RAS_CNTL(CHIP,
+               .conservativerasen = true,
+               .shiftamount = conservative_ras_en ? shift_amount
+                                                  : HALF_PIXEL_SHIFT));
+         tu_cond_exec_end(cs);
+      }
    }
 
    /* move to hw ctx init? */
@@ -3948,10 +3981,17 @@ tu_pipeline_builder_emit_state(struct tu_pipeline_builder *builder,
               builder->graphics_state.vi);
    /* If (a) per-view viewport is used or (b) we don't know yet, then we need
     * to set viewport and stencil state dynamically.
+    *
+    * The same applies whenever the fragment shader uses FDM, even with a
+    * single viewport.  This matters on a6xx gens without
+    * has_per_view_viewport, where per_view_viewport is false even though
+    * FDM is in use.
     */
+   const struct tu_shader *fs = pipeline->shaders[MESA_SHADER_FRAGMENT];
    bool no_per_view_viewport = pipeline_contains_all_shader_state(pipeline) &&
       !pipeline->program.per_view_viewport &&
-      !pipeline->program.per_layer_viewport;
+      !pipeline->program.per_layer_viewport &&
+      !(fs && fs->fs.has_fdm);
    DRAW_STATE_COND(viewport, TU_DYNAMIC_STATE_VIEWPORT, no_per_view_viewport,
                    builder->graphics_state.vp,
                    builder->graphics_state.rs);
@@ -4029,7 +4069,8 @@ tu_pipeline_builder_emit_state(struct tu_pipeline_builder *builder,
                    builder->graphics_state.rs, builder->graphics_state.vp,
                    builder->graphics_state.mv->view_mask != 0,
                    pipeline->program.per_view_viewport,
-                   pipeline->disable_fs.disable_fs);
+                   pipeline->disable_fs.disable_fs,
+                   builder->fragment_density_map);
    DRAW_STATE_COND(ds, TU_DYNAMIC_STATE_DS,
               attachments_valid,
               builder->graphics_state.ds,
@@ -4204,12 +4245,6 @@ tu_emit_draw_state(struct tu_cmd_buffer *cmd)
          } else {                                                             \
             cmd->state.dynamic_state[id] = {};                                \
          }                                                                    \
-         tu_cs_begin_sub_stream(&cmd->sub_cs,                                 \
-                                tu6_##name##_size<CHIP>(cmd->device, __VA_ARGS__),  \
-                                &cs);                                         \
-         tu6_emit_##name<CHIP>(&cs, __VA_ARGS__);                             \
-         cmd->state.dynamic_state[id] =                                       \
-            tu_cs_end_draw_state(&cmd->sub_cs, &cs);                          \
       }                                                                       \
       dirty_draw_states |= (1u << id);                                        \
    }
@@ -4297,13 +4332,15 @@ tu_emit_draw_state(struct tu_cmd_buffer *cmd)
    }
    DRAW_STATE_COND(rast, TU_DYNAMIC_STATE_RAST,
                    cmd->state.dirty & (TU_CMD_DIRTY_SUBPASS |
+                                       TU_CMD_DIRTY_FDM |
                                        TU_CMD_DIRTY_PER_VIEW_VIEWPORT |
                                        TU_CMD_DIRTY_RAST),
                    &cmd->vk.dynamic_graphics_state.rs,
                    &cmd->vk.dynamic_graphics_state.vp,
                    cmd->state.vk_mv.view_mask != 0,
                    cmd->state.per_view_viewport,
-                   cmd->state.disable_fs);
+                   cmd->state.disable_fs,
+                   cmd->state.has_fdm);
    DRAW_STATE_COND(ds, TU_DYNAMIC_STATE_DS,
               cmd->state.dirty & TU_CMD_DIRTY_SUBPASS,
               &cmd->vk.dynamic_graphics_state.ds,

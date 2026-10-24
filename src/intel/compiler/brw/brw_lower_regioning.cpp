@@ -34,7 +34,18 @@ namespace {
    required_src_byte_stride(const intel_device_info *devinfo, const brw_inst *inst,
                             unsigned i)
    {
-      if (devinfo->has_bfloat16 && has_bfloat_operands(inst)) {
+      if (devinfo->ver >= 35 && inst->opcode < NUM_BRW_OPCODES &&
+          i >= 1) {
+         unsigned src_byte_stride = byte_stride(inst->src[i]);
+         unsigned dst_byte_stride =
+            MAX2(brw_type_size_bytes(inst->dst.type), byte_stride(inst->dst));
+
+         if (inst->src[i].file == IMM || src_byte_stride == 0 /* scalar */)
+            return src_byte_stride;
+         else
+            return dst_byte_stride; /* src stride must match dst */
+
+      } else if (devinfo->has_bfloat16 && has_bfloat_operands(inst)) {
          return brw_type_size_bytes(inst->src[i].type);
 
       } else if (has_dst_aligned_region_restriction(devinfo, inst)) {
@@ -64,7 +75,20 @@ namespace {
    required_src_byte_offset(const intel_device_info *devinfo, const brw_inst *inst,
                             unsigned i)
    {
-      if (has_dst_aligned_region_restriction(devinfo, inst)) {
+      if (devinfo->ver >= 35 && inst->opcode < NUM_BRW_OPCODES &&
+          i >= 1) {
+         const unsigned src_byte_stride = required_src_byte_stride(devinfo, inst, i);
+         const unsigned dst_byte_offset =
+            reg_offset(inst->dst) % (reg_unit(devinfo) * REG_SIZE);
+         const unsigned src_byte_offset =
+            reg_offset(inst->src[i]) % (reg_unit(devinfo) * REG_SIZE);
+
+         if (inst->src[i].file == IMM || src_byte_stride == 0 /* scalar */)
+            return src_byte_offset;
+         else
+            return dst_byte_offset; /* src offset must match dst */
+
+      } else if (has_dst_aligned_region_restriction(devinfo, inst)) {
          return reg_offset(inst->dst) % (reg_unit(devinfo) * REG_SIZE);
 
       } else if (has_subdword_integer_region_restriction(devinfo, inst,
@@ -331,6 +355,10 @@ namespace {
                src_byte_offset != dst_byte_offset)) ||
              (has_subdword_integer_region_restriction(devinfo, inst) &&
               (byte_stride(inst->src[i]) != required_src_byte_stride(devinfo, inst, i) ||
+               src_byte_offset != required_src_byte_offset(devinfo, inst, i))) ||
+             ((devinfo->ver >= 35  && inst->opcode < NUM_BRW_OPCODES &&
+               inst->sources > 1) &&
+              (byte_stride(inst->src[i]) != required_src_byte_stride(devinfo, inst, i) ||
                src_byte_offset != required_src_byte_offset(devinfo, inst, i)));
    }
 
@@ -342,7 +370,7 @@ namespace {
    has_invalid_dst_region(const intel_device_info *devinfo,
                           const brw_inst *inst)
    {
-      if (inst->is_send()) {
+      if (inst->is_send() || inst->opcode == BRW_OPCODE_DPAS) {
          return false;
 
       } else if (devinfo->has_bfloat16 && has_bfloat_operands(inst)) {

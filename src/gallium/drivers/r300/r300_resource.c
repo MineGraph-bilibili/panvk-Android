@@ -29,6 +29,11 @@ r300_3d_subdata_needs_layered_upload(struct pipe_context *pipe,
    if (!tex->tex.microtile && !tex->tex.macrotile[level])
       return false;
 
+   /* Multi-slice blits from linear staging into padded NPOT 3D textures
+    * corrupt aligned boxes too. Upload each slice separately instead. */
+   if (tex->tex.is_npot)
+      return true;
+
    tile_width = r300_get_pixel_alignment(resource->format,
                                          resource->nr_samples,
                                          tex->tex.microtile,

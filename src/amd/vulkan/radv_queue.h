@@ -103,6 +103,11 @@ radv_queue_device(const struct radv_queue *queue)
    return (struct radv_device *)queue->vk.base.device;
 }
 
+#define radv_queue_set_lost(queue, ...)                                                                                \
+   (radv_queue_handle_fault_state((queue)), vk_queue_set_lost(&(queue)->vk, __VA_ARGS__))
+
+void radv_queue_handle_fault_state(struct radv_queue *queue);
+
 int radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
                     const VkDeviceQueueCreateInfo *create_info,
                     const VkDeviceQueueGlobalPriorityCreateInfo *global_priority);

@@ -46,24 +46,12 @@ msm_device_new(int fd, drmVersionPtr version)
    dev->version = version->version_minor;
 
    if (version->version_minor >= FD_VERSION_CACHED_COHERENT) {
-      struct drm_msm_gem_new new_req = {
-         .size = os_page_size,
-         .flags = MSM_BO_CACHED_COHERENT,
-      };
-
       /* The kernel is new enough to support MSM_BO_CACHED_COHERENT,
        * but that is not a guarantee that the device we are running
        * on supports it.  So do a test allocation to find out.
        */
-      if (!drmCommandWriteRead(fd, DRM_MSM_GEM_NEW,
-                               &new_req, sizeof(new_req))) {
-         struct drm_gem_close close_req = {
-            .handle = new_req.handle,
-         };
-         drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &close_req);
-
-         dev->has_cached_coherent = true;
-      }
+      dev->has_cached_coherent = msm_common_is_memory_type_supported(
+         fd, os_page_size, MSM_BO_CACHED_COHERENT);
    }
 
    dev->bo_size = sizeof(struct msm_bo);

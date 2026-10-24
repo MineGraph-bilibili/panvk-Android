@@ -792,6 +792,7 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
         screen->ro = ro;
 
         list_inithead(&screen->bo_cache.time_list);
+        (void)mtx_init(&screen->bo_cache.lock, mtx_plain);
         (void)mtx_init(&screen->bo_handles_mutex, mtx_plain);
         screen->bo_handles = util_hash_table_create_ptr_keys();
 

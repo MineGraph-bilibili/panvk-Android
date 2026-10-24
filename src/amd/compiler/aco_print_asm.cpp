@@ -347,9 +347,16 @@ print_asm_llvm(Program* program, enum radeon_family family, std::vector<uint32_t
    }
 #endif
 
+#if LLVM_VERSION_MAJOR >= 24
+   std::string triple = std::string(ac_get_llvm_subarch_name(family)) + "-mesa-mesa3d";
+   const char* cpu = "";
+#else
+   std::string triple = "amdgcn-mesa-mesa3d";
+   const char* cpu = ac_get_llvm_processor_name(family);
+#endif
+
    LLVMDisasmContextRef disasm =
-      LLVMCreateDisasmCPUFeatures("amdgcn-mesa-mesa3d", ac_get_llvm_processor_name(family),
-                                  features.c_str(), &symbols, 0, NULL, NULL);
+      LLVMCreateDisasmCPUFeatures(triple.c_str(), cpu, features.c_str(), &symbols, 0, NULL, NULL);
 
    size_t pos = 0;
    bool invalid = false;
@@ -394,6 +401,8 @@ print_asm_llvm(Program* program, enum radeon_family family, std::vector<uint32_t
 
    print_constant_data(output, program);
 
+   fprintf(output, "MEM_ORDERED = %u\n", program->config->mem_ordered);
+
    return invalid;
 }
 #endif /* AMD_LLVM_AVAILABLE */
@@ -406,6 +415,14 @@ check_print_asm_support(Program* program, enum radeon_family family)
 #if AMD_LLVM_AVAILABLE
    if (program->gfx_level >= GFX8) {
       /* LLVM disassembler only supports GFX8+ */
+#if LLVM_VERSION_MAJOR >= 24
+      /* An unrecognized subarch is fatal in LLVMCreateTargetMachine, so check
+       * it first and fall back to CLRX otherwise.
+       */
+      const char* subarch = ac_get_llvm_subarch_name(family);
+      if (ac_is_llvm_subarch_supported(subarch))
+         return true;
+#else
       const char* name = ac_get_llvm_processor_name(family);
       const char* triple = "amdgcn--";
       LLVMTargetRef target = ac_get_llvm_target(triple);
@@ -418,6 +435,7 @@ check_print_asm_support(Program* program, enum radeon_family family)
 
       if (supported)
          return true;
+#endif
    }
 #endif
 

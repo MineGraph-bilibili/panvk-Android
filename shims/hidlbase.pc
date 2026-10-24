@@ -1,5 +1,0 @@
-Name: hidlbase
-Description: hidlbase
-Version: 1.15
-Libs: -lhidlbase
-Cflags:

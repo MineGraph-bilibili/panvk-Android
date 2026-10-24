@@ -436,7 +436,7 @@ apply_repacked_pos_output(nir_builder *b, nir_intrinsic_instr *intrin, void *sta
    unsigned store_pos_component = nir_intrinsic_component(intrin);
 
    for (unsigned comp = 0; comp < store_val->num_components; ++comp) {
-      nir_scalar val = nir_scalar_chase_movs(nir_get_scalar(store_val, comp));
+      nir_scalar val = nir_scalar_resolved(store_val, comp);
       b->cursor = nir_after_instr_and_phis(nir_def_instr(val.def));
       nir_def *reloaded = nir_load_var(b, s->position_value_var);
 
@@ -870,9 +870,23 @@ cull_primitive_accepted(nir_builder *b, void *state)
 
    nir_store_var(b, s->gs_accepted_var, nir_imm_true(b), 0x1u);
 
-   /* Store the accepted state to LDS for ES threads */
-   for (unsigned vtx = 0; vtx < s->options->num_vertices_per_primitive; ++vtx)
-      nir_store_shared(b, nir_imm_intN_t(b, 1, 8), s->vtx_addr[vtx], .base = lds_es_vertex_accepted);
+   /* Store the accepted state to LDS for ES threads.
+    * The accepted state is a 1-bit flag in the per-vertex structure,
+    * but the full byte is reserved for this flag.
+    *
+    * On Navi 10, we've seen power management related GPU hangs
+    * which are fixed by using an atomic OR instead, see:
+    * https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15926
+    * although it shouldn't be necessary to use atomics here.
+    */
+   for (unsigned vtx = 0; vtx < s->options->num_vertices_per_primitive; ++vtx) {
+      if (s->ac->gfx_level >= GFX10_3)
+         nir_store_shared(b, nir_imm_intN_t(b, 1, 8), s->vtx_addr[vtx], .base = lds_es_vertex_accepted);
+      else
+         nir_shared_atomic(b, 32, s->vtx_addr[vtx], nir_imm_int(b, 1),
+                           .base = lds_es_vertex_accepted,
+                           .atomic_op = nir_atomic_op_ior);
+   }
 }
 
 static void
@@ -1179,7 +1193,9 @@ add_deferred_attribute_culling(nir_builder *b, nir_cf_list *original_extracted_c
          }
 
          /* See if the current primitive is accepted */
-         ac_nir_cull_primitive(b, s->options->skip_viewport_state_culling, s->options->use_point_tri_intersection,
+         ac_nir_cull_primitive(b, s->options->skip_face_culling,
+                               s->options->skip_viewport_state_culling,
+                               s->options->use_point_tri_intersection,
                                accepted_by_clipdist, pos, s->options->num_vertices_per_primitive,
                                cull_primitive_accepted, s);
       }
@@ -1482,6 +1498,12 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
    assert(options->max_workgroup_size && options->wave_size);
    assert(!(options->can_cull && options->passthrough));
 
+   /* rasterizer_discard assumes that some paths are never taken. */
+   assert(!(options->rasterizer_discard && (options->passthrough || options->can_cull ||
+                                            options->export_primitive_id ||
+                                            options->export_primitive_id_per_prim ||
+                                            options->has_param_exports)));
+
    nir_variable *position_value_var = nir_local_variable_create(impl, glsl_vec4_type(), "position_value");
    nir_variable *prim_exp_arg_var = nir_local_variable_create(impl, glsl_uint_type(), "prim_exp_arg");
    nir_variable *es_accepted_var =
@@ -1584,15 +1606,20 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
          /* Allocate export space on wave 0 - confirm to the HW that we want to use all possible space */
          nir_if *if_wave_0 = nir_push_if(b, nir_ieq_imm(b, nir_load_subgroup_id(b), 0));
          {
-            nir_def *vtx_cnt = nir_load_workgroup_num_input_vertices_amd(b);
-            nir_def *prim_cnt = nir_load_workgroup_num_input_primitives_amd(b);
-            ac_nir_ngg_alloc_vertices_and_primitives(b, vtx_cnt, prim_cnt, false);
+            if (options->rasterizer_discard) {
+               ac_nir_ngg_alloc_vertices_and_primitives(b, nir_imm_int(b, 0), nir_imm_int(b, 0),
+                                                        options->compiler_info->has_ngg_fully_culled_bug);
+            } else {
+               nir_def *vtx_cnt = nir_load_workgroup_num_input_vertices_amd(b);
+               nir_def *prim_cnt = nir_load_workgroup_num_input_primitives_amd(b);
+               ac_nir_ngg_alloc_vertices_and_primitives(b, vtx_cnt, prim_cnt, false);
+            }
          }
          nir_pop_if(b, if_wave_0);
       }
 
       /* Take care of early primitive export, otherwise just pack the primitive export argument */
-      if (state.early_prim_export)
+      if (state.early_prim_export && !options->rasterizer_discard)
          emit_ngg_nogs_prim_export(b, &state, NULL);
       else
          nir_store_var(b, prim_exp_arg_var, emit_ngg_nogs_prim_exp_arg(b, &state), 0x1u);
@@ -1678,7 +1705,7 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
 
    /* Take care of late primitive export */
    nir_if *if_late_prim_export = NULL;
-   if (!state.early_prim_export) {
+   if (!state.early_prim_export && !options->rasterizer_discard) {
       b->cursor = nir_after_impl(impl);
 
       if (wait_attr_ring && options->export_primitive_id_per_prim) {
@@ -1713,9 +1740,11 @@ ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *option
       b->cursor = nir_after_cf_list(&if_es_thread->then_list);
    }
 
-   ac_nir_export_position(b, state.ac->gfx_level, options->export_clipdist_mask, options->can_cull,
-                          options->write_pos_to_clipvertex, !options->has_param_exports,
-                          options->force_vrs, export_outputs, &state.out, NULL);
+   if (!options->rasterizer_discard) {
+      ac_nir_export_position(b, state.ac->gfx_level, options->export_clipdist_mask, options->can_cull,
+                             options->write_pos_to_clipvertex, !options->has_param_exports,
+                             options->force_vrs, export_outputs, &state.out, NULL);
+   }
 
    if (options->has_param_exports && !options->compiler_info->has_attr_ring) {
       ac_nir_export_parameters(b, options->vs_output_param_offset,

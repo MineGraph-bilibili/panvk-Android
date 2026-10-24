@@ -57,9 +57,7 @@ spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect,Crash
 spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect_projvec4,Crash
 spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drectshadow,Crash
 spec@arb_transform_feedback_instanced@draw-auto instanced,Fail
-spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 spec@ext_base_instance@arb_base_instance-drawarrays_gles3,Fail
 spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
@@ -275,10 +273,10 @@ afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp,Fail
 afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full precision,Fail
 
 # uprev Piglit in Mesa
-afbcp-spec@arb_texture_view@tex-view,Fail
 glx@glx-copy-sub-buffer,Fail
 spec@!opengl 1.1@large-tex,Fail
-spec@arb_texture_view@tex-view,Fail
+spec@arb_framebuffer_object@framebuffer-blit-oblong tall,Fail
+spec@ext_transform_feedback2@draw-auto offset,Fail
 
 # Piglit tests require too much precision in alpha-to-coverage higher sample-counts
 spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 6,Fail
@@ -298,12 +296,6 @@ dEQP-VK.api.object_management.max_concurrent.device_group,Fail
 dEQP-VK.api.device_init.create_device_global_priority.basic,Fail
 dEQP-VK.api.device_init.create_device_global_priority_khr.basic,Fail
 
-# New failures with VKCTS 1.4.4.0
-dEQP-VK.pipeline.fast_linked_library.vertex_input.misc.unbound_input,Crash
-dEQP-VK.pipeline.fast_linked_library.vertex_input.misc.unbound_input_dynamic,Crash
-dEQP-VK.pipeline.monolithic.vertex_input.misc.unbound_input,Crash
-dEQP-VK.pipeline.monolithic.vertex_input.misc.unbound_input_dynamic,Crash
-
 # Regressions from https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/39987
 # ../src/panfrost/compiler/bifrost/bifrost/bi_pack.c:187: bi_pack_registers: Assertion `!(mode & 0x8)' failed.
 dEQP-VK.robustness.image_robustness.bind.notemplate.r32i.dontunroll.nonvolatile.storage_image.fmt_qual.img.samples_1.cube.comp,Crash
@@ -320,11 +312,6 @@ dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_fixed_trilinear_f
 dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_fixed_trilinearnon_zero_base_level_fragment,Fail
 dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_float_trilinear_fragment,Fail
 dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_float_trilinearnon_zero_base_level_fragment,Fail
-dEQP-VK.image.host_image_copy.properties.properties,Fail
-dEQP-VK.pipeline.fast_linked_library.vertex_input.misc.unbound_input_dynamic_integer,Crash
-dEQP-VK.pipeline.fast_linked_library.vertex_input.misc.unbound_input_integer,Crash
-dEQP-VK.pipeline.monolithic.vertex_input.misc.unbound_input_dynamic_integer,Crash
-dEQP-VK.pipeline.monolithic.vertex_input.misc.unbound_input_integer,Crash
 
 # VKCTS 1.4.5.3 -> 1.4.6.1 uprev
 dEQP-VK.rasterization.primitives.no_stipple.lines,Fail

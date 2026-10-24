@@ -251,17 +251,6 @@ const float round_values[] = {
       -FLT_MAX
 };
 
-static float fractf(float x)
-{
-   x -= floorf(x);
-   if (x >= 1.0f) {
-      // clamp to the largest number smaller than one
-      x = 1.0f - 0.5f*FLT_EPSILON;
-   }
-   return x;
-}
-
-
 const float fract_values[] = {
    // http://en.wikipedia.org/wiki/IEEE_754-1985#Examples
    0.0f,

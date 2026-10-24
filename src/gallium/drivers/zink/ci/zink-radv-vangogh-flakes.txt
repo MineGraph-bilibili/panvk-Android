@@ -44,4 +44,5 @@ spec@!opengl 1.1@copypixels-sync
 spec@!opengl 1.1@getteximage-formats
 spec@!opengl 1.3@gl-1.3-texture-env
 spec@!opengl 2.0@tex3d-npot
+spec@arb_timer_query@timestamp-get
 glx@glx-make-current

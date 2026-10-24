@@ -199,11 +199,6 @@ panfrost_device_kmod_version_minor(const struct panfrost_device *dev)
 
 int panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev);
 
-#ifdef HAVE_PAN_KMOD_KBASE
-int panfrost_open_device_kbase(void *memctx, const char *path,
-                               struct panfrost_device *dev);
-#endif
-
 void panfrost_close_device(struct panfrost_device *dev);
 
 bool panfrost_supports_compressed_format(struct panfrost_device *dev,

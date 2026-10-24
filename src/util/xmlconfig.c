@@ -652,6 +652,7 @@ struct OptConfData {
    const char *driverName, *execName;
    const char *kernelDriverName;
    const char *deviceName;
+   uint32_t deviceVersion;
    const char *engineName;
    const char *applicationName;
    union {
@@ -721,11 +722,13 @@ parseDeviceAttr(struct OptConfData *data, const char **attr)
 {
    uint32_t i;
    const char *driver = NULL, *screen = NULL, *kernel = NULL, *device = NULL;
+   const char *device_version_regexp = NULL;
    for (i = 0; attr[i]; i += 2) {
       if (!strcmp(attr[i], "driver")) driver = attr[i+1];
       else if (!strcmp(attr[i], "screen")) screen = attr[i+1];
       else if (!strcmp(attr[i], "kernel_driver")) kernel = attr[i+1];
       else if (!strcmp(attr[i], "device")) device = attr[i+1];
+      else if (!strcmp(attr[i], "device_version_regexp")) device_version_regexp = attr[i+1];
       else XML_WARNING("unknown device attribute: %s.", attr[i]);
    }
    if (driver && strcmp(driver, data->driverName))
@@ -736,7 +739,30 @@ parseDeviceAttr(struct OptConfData *data, const char **attr)
    else if (device && (!data->deviceName ||
                        strcmp(device, data->deviceName)))
       data->ignoringDevice = data->inDevice;
-   else if (screen) {
+   else if (device_version_regexp) {
+      /* device_version_regexp: Extended regex pattern matching on device version.
+       * Uses POSIX extended regular expressions (ERE).
+       *
+       * Examples:
+       *   "^(40|50|60)$"       - Match exact versions 40, 50, or 60
+       *   "^[4-6][0-9]$"       - Match versions 40-69
+       *   "^12[0-9]"           - Match versions starting with 12 (120-129)
+       */
+      if (!data->deviceVersion) {
+         data->ignoringDevice = data->inDevice;
+      } else {
+         regex_t re;
+         if (regcomp(&re, device_version_regexp, REG_EXTENDED|REG_NOSUB) == 0) {
+            char device_version_str[32];
+            snprintf(device_version_str, sizeof(device_version_str), "%u", data->deviceVersion);
+
+            if (regexec(&re, device_version_str, 0, NULL, 0) == REG_NOMATCH)
+               data->ignoringDevice = data->inDevice;
+            regfree(&re);
+         } else
+            XML_WARNING("Invalid device_version_regexp=\"%s\".", device_version_regexp);
+      }
+   } else if (screen) {
       driOptionValue screenNum;
       if (!parseValue(&screenNum, DRI_INT, screen))
          XML_WARNING("illegal screen number: %s.", screen);
@@ -1349,6 +1375,7 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
    userData.driverName = params->driverName;
    userData.kernelDriverName = params->kernelDriverName;
    userData.deviceName = params->deviceName;
+   userData.deviceVersion = params->deviceVersion;
    userData.applicationName = params->applicationName ? params->applicationName : "";
    userData.applicationVersion = params->applicationVersion;
    userData.engineName = params->engineName ? params->engineName : "";

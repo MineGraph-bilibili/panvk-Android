@@ -336,9 +336,8 @@ struct r300_surface {
 struct r300_texture_desc {
     /* Width, height, and depth.
      * Most of the time, these are equal to pipe_texture::width0, height0,
-     * and depth0. However, NPOT 3D textures must have dimensions aligned
-     * to POT, and this is the only case when these variables differ from
-     * pipe_texture. */
+     * and depth0. However, NPOT 3D and cube textures must have dimensions
+     * aligned to POT. */
     unsigned width0, height0, depth0;
 
     /* Buffer tiling.

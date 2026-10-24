@@ -243,7 +243,7 @@ iris_upload_shader(struct iris_screen *screen,
 bool
 iris_blorp_lookup_shader(struct blorp_batch *blorp_batch,
                          const void *key, uint32_t key_size,
-                         uint32_t *kernel_out, void *prog_data_out)
+                         uint64_t *kernel_out, void *prog_data_out)
 {
    struct blorp_context *blorp = blorp_batch->blorp;
    struct iris_context *ice = blorp->driver_ctx;
@@ -274,7 +274,7 @@ iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
                          const void *kernel, UNUSED uint32_t kernel_size,
                          const void *prog_data_templ,
                          UNUSED uint32_t prog_data_size,
-                         uint32_t *kernel_out, void *prog_data_out)
+                         uint64_t *kernel_out, void *prog_data_out)
 {
    struct blorp_context *blorp = blorp_batch->blorp;
    struct iris_context *ice = blorp->driver_ctx;
@@ -395,7 +395,7 @@ iris_ensure_indirect_generation_shader(struct iris_batch *batch)
 
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_opt_cse);
-   NIR_PASS(_, nir, nir_opt_gcm, true, true);
+   NIR_PASS(_, nir, nir_opt_gcm, true);
 
    nir_opt_peephole_select_options peephole_select_options = {
       .limit = 1,

@@ -283,7 +283,7 @@ impl QueueEvent {
     }
 
     fn deps(&self) -> &[Arc<Event>] {
-        &self.0.deps
+        self.0.deps()
     }
 
     fn into_inner(self) -> Arc<Event> {
@@ -294,7 +294,7 @@ impl QueueEvent {
     }
 
     fn has_same_queue_as(&self, ev: &Event) -> bool {
-        match (&self.0.queue, &ev.queue) {
+        match (self.0.queue(), ev.queue()) {
             (Some(a), Some(b)) => Weak::ptr_eq(a, b),
             _ => false,
         }
@@ -532,7 +532,7 @@ impl Queue {
 
     pub fn queue(&self, e: Arc<Event>) {
         if self.is_profiling_enabled() {
-            e.set_time(EventTimes::Queued, self.device.screen().get_timestamp());
+            e.mark_queued(self.device.screen().get_timestamp());
         }
         self.state.lock().unwrap().pending.push(e);
     }

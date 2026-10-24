@@ -151,6 +151,9 @@ void
 cso_set_min_samples(struct cso_context *cso, unsigned min_samples);
 
 void
+cso_set_sample_coverage(struct cso_context *cso, float value, bool invert);
+
+void
 cso_set_stencil_ref(struct cso_context *cso,
                     const struct pipe_stencil_ref sr);
 

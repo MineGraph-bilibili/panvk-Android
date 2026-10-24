@@ -1,9 +1,21 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
+use std::ptr;
+
 use crate::encode_v9::*;
 use crate::ir::*;
+use crate::isa::ExecUnit;
+use compiler::bitset::ConstBitSet;
 use kraid_bindings::*;
+
+pub use kraid_bindings::pan_model as PanModel;
+
+pub const MAX_REG_COUNT: usize = 128;
+pub const MAX_REG_BYTES: usize = MAX_REG_COUNT * size_of::<u32>();
+const MAX_REG_WORDS: usize = MAX_REG_BYTES / (u32::BITS as usize);
+
+pub type RegByteSet = ConstBitSet<MAX_REG_WORDS, u16>;
 
 pub struct SmallConstantTable(Vec<SmallConstant>);
 
@@ -43,11 +55,17 @@ impl FAUModel {
 pub trait Model {
     fn arch(&self) -> u8;
 
+    fn pan_model(&self) -> &PanModel;
+
     fn fau(&self) -> &FAUModel;
 
     fn encode_shader(&self, s: &Shader<'_>) -> Vec<u32>;
 
     fn op_is_supported(&self, op: &Op) -> bool;
+
+    fn op_exec_unit(&self, op: &Op) -> Option<ExecUnit>;
+
+    fn op_exec_time(&self, op: &Op) -> Option<u8>;
 
     fn op_is_message(&self, op: &Op) -> bool;
 
@@ -74,20 +92,33 @@ pub trait Model {
         self.op_dst_supported_lanes(op).contains(lanes)
     }
 
+    fn op_fixed_src_reg(&self, op: &Op, src: &Src) -> Option<RegRef>;
+
+    fn op_fixed_dst_reg(&self, op: &Op, dst: &Dst) -> Option<RegRef>;
+
     fn preload_reg(&self, preload: PreloadReg) -> Option<RegRef>;
 
     fn subgroup_size(&self) -> u8 {
         unsafe { pan_subgroup_size(self.arch().into()).try_into().unwrap() }
     }
+
+    fn max_threads(&self, registers_used: u8) -> u8;
+
+    fn max_reg_count(&self) -> u8;
 }
 
 struct ValhallModel {
     arch: u8,
+    pan_model: std::ptr::NonNull<PanModel>,
     fau: FAUModel,
 }
 
+// SAFETY: The pan_model pointer points to static data
+unsafe impl Send for ValhallModel {}
+unsafe impl Sync for ValhallModel {}
+
 impl ValhallModel {
-    fn new(arch: u8) -> ValhallModel {
+    fn new(arch: u8, pan_model: std::ptr::NonNull<PanModel>) -> ValhallModel {
         use crate::isa::{SmallConstantTable, v9};
         let sc_table = SmallConstantTable(v9::SmallConstantT::collect(arch));
         let fau = FAUModel {
@@ -98,7 +129,11 @@ impl ValhallModel {
             }),
             single_fau_ram_index: arch < 14,
         };
-        ValhallModel { arch, fau }
+        ValhallModel {
+            arch,
+            pan_model,
+            fau,
+        }
     }
 
     #[inline]
@@ -148,6 +183,7 @@ impl ValhallModel {
             idx: idx << 1, // FAURef::idx is in units of 32-bit words
             special: Some(special),
             load64: true,
+            imm32: None,
         })
     }
 }
@@ -155,6 +191,10 @@ impl ValhallModel {
 impl Model for ValhallModel {
     fn arch(&self) -> u8 {
         self.arch
+    }
+
+    fn pan_model(&self) -> &PanModel {
+        unsafe { self.pan_model.as_ref() }
     }
 
     fn fau(&self) -> &FAUModel {
@@ -167,6 +207,14 @@ impl Model for ValhallModel {
 
     fn op_is_supported(&self, op: &Op) -> bool {
         op.as_virtual().is_some() || v9_op_is_supported(op, self.arch)
+    }
+
+    fn op_exec_unit(&self, op: &Op) -> Option<ExecUnit> {
+        v9_op_exec_unit(op, self.arch)
+    }
+
+    fn op_exec_time(&self, op: &Op) -> Option<u8> {
+        v9_op_exec_time(op, self.arch)
     }
 
     fn op_is_message(&self, op: &Op) -> bool {
@@ -238,6 +286,51 @@ impl Model for ValhallModel {
         }
     }
 
+    fn op_fixed_src_reg(&self, op: &Op, src: &Src) -> Option<RegRef> {
+        let preg = |p| Some(self.preload_reg(p).unwrap());
+        let coverage = preg(PreloadReg::CumulativeCoverage);
+        match op {
+            Op::ATest(op) if ptr::eq(&op.coverage, src) => coverage,
+            Op::ZSEmit(op) if ptr::eq(&op.coverage, src) => coverage,
+            Op::Blend(op) if ptr::eq(&op.coverage, src) => coverage,
+            Op::BlendCall(op) => {
+                if ptr::eq(&op.color, src) {
+                    preg(PreloadReg::BlendInputSrc0)
+                } else if ptr::eq(&op.second_color, src) {
+                    if op.has_second_color {
+                        preg(PreloadReg::BlendInputSrc1)
+                    } else {
+                        assert!(op.second_color.src_ref == SrcRef::Zero);
+                        None
+                    }
+                } else if ptr::eq(&op.coverage, src) {
+                    coverage
+                } else if ptr::eq(&op.sample_id, src) {
+                    preg(PreloadReg::SampleCentroidId)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn op_fixed_dst_reg(&self, op: &Op, dst: &Dst) -> Option<RegRef> {
+        let coverage =
+            Some(self.preload_reg(PreloadReg::CumulativeCoverage).unwrap());
+        match op {
+            Op::ATest(op) => {
+                assert!(ptr::eq(&op.dst, dst));
+                coverage
+            }
+            Op::ZSEmit(op) => {
+                assert!(ptr::eq(&op.dst, dst));
+                coverage
+            }
+            _ => None,
+        }
+    }
+
     fn preload_reg(&self, preload: PreloadReg) -> Option<RegRef> {
         use PreloadReg::*;
 
@@ -259,29 +352,45 @@ impl Model for ValhallModel {
             PrimitiveFlags => 58,
             PositionXY => 59,
             CumulativeCoverage => 60,
-            RasterizerSampleCentroid => 61,
-            FrameArgLow => 62,
-            FrameArgHigh => 63,
+            RasterizerCoverage => 61,
+            SampleCentroidId => 61,
+            FrameArg => 62,
+            BlendInputSrc0 => 0,
+            BlendInputSrc1 => 4,
+            BlendReturnAddr => 48,
         };
 
         Some(RegRef {
-            idx,
-            range: RegRange::Regs(1),
-            preload: Some(preload),
+            idx: idx,
+            range: RegRange::Regs(preload.reg_size()),
         })
+    }
+
+    fn max_threads(&self, registers_used: u8) -> u8 {
+        64 / registers_used.max(32)
+    }
+
+    fn max_reg_count(&self) -> u8 {
+        debug_assert!(self.arch() >= 9, "Unknown GPU generation");
+        if self.arch() >= 15 { 128 } else { 64 }
     }
 }
 
 pub fn model_for_gpu_id(
     gpu_id: u64,
+    gpu_variant: u32,
 ) -> Result<Box<dyn Model + Sync + Send>, &'static str> {
     // SAFETY: pan_arch() just translates one integer to another
     let arch = u8::try_from(unsafe { pan_arch(gpu_id) }).unwrap();
+    let pan_model = unsafe {
+        let model = pan_get_model(gpu_id, gpu_variant) as *mut _;
+        std::ptr::NonNull::new(model).ok_or("Invalid GPU ID or variant")?
+    };
 
     if arch >= 15 {
         Err("Kraid does not yet support this GPU")
     } else if arch >= 9 {
-        Ok(Box::new(ValhallModel::new(arch)))
+        Ok(Box::new(ValhallModel::new(arch, pan_model)))
     } else {
         Err("Kraid only supports Valhall (v9) and later GPUs")
     }

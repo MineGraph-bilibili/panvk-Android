@@ -143,11 +143,6 @@ public:
    /** Byte-offset for the next logical, non-reused spill slot. */
    unsigned last_logical_scratch;
 
-   brw_reg frag_depth;
-   brw_reg frag_stencil;
-   brw_reg sample_mask;
-   brw_reg outputs[VARYING_SLOT_MAX];
-   brw_reg dual_src_output;
    brw_reg subgroup_barrier_index;
    /* This includes HW thread payload + push constants + URB(after brw_assign_xs_urb_setup()) */
    int first_non_payload_grf;
@@ -208,6 +203,9 @@ public:
       int per_primitive_offsets[VARYING_SLOT_MAX];
    } fs;
 
+   /* Whether we've seen an RT write already */
+   bool seen_rt_write;
+
    unsigned grf_used;
    bool spilled_any_registers;
    bool needs_register_pressure;
@@ -244,7 +242,15 @@ public:
    } inst_arena;
 };
 
-void brw_print_instructions(const brw_shader &s, FILE *file = stderr);
+enum brw_print_flags {
+   BRW_PRINT_DEFS         = 1 << 0,
+   BRW_PRINT_BLOCKS       = 1 << 1,
+   BRW_PRINT_REG_PRESSURE = 1 << 2,
+};
+
+void brw_print_instructions(const brw_shader &s, FILE *file = stderr,
+                            unsigned flags = BRW_PRINT_DEFS | BRW_PRINT_BLOCKS |
+                                             BRW_PRINT_REG_PRESSURE);
 
 void brw_print_instruction(const brw_shader &s, const brw_inst *inst,
                            FILE *file = stderr,
@@ -270,15 +276,6 @@ brw_dynamic_fs_config(struct brw_fs_prog_data *fs_prog_data)
       brw_uniform_reg(
          fs_prog_data->fs_config_param / REG_SIZE, BRW_TYPE_UD),
       fs_prog_data->fs_config_param % REG_SIZE);
-}
-
-inline brw_reg
-brw_dynamic_per_primitive_remap(const struct brw_fs_prog_data *fs_prog_data)
-{
-   return byte_offset(
-      brw_uniform_reg(
-         fs_prog_data->per_primitive_remap_param / REG_SIZE, BRW_TYPE_UW),
-      fs_prog_data->per_primitive_remap_param % REG_SIZE);
 }
 
 enum intel_barycentric_mode
@@ -346,6 +343,7 @@ bool brw_lower_scalar_fp64_MAD(brw_shader &s);
 bool brw_lower_scoreboard(brw_shader &s);
 bool brw_lower_send_descriptors(brw_shader &s);
 bool brw_lower_send_gather(brw_shader &s);
+bool brw_lower_sendg_ind_desc_to_arf(brw_shader &s);
 bool brw_lower_sends_overlapping_payload(brw_shader &s);
 bool brw_lower_simd_width(brw_shader &s);
 bool brw_lower_src_modifiers(brw_shader &s, brw_inst *inst, unsigned i);

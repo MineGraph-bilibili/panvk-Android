@@ -115,3 +115,4 @@ spec@glsl-1.50@execution@geometry@point-size-out
 spec@glsl-1.50@execution@redeclare-pervertex-out-subset-gs
 spec@glsl-es-3.00@execution@built-in-functions@fs-packhalf2x16
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb
+spec@arb_timer_query@timestamp-get

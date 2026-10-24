@@ -438,6 +438,32 @@ mat4x2		TYPE(120, 300, 120, 300, &glsl_type_builtin_mat4x2);
 mat4x3		TYPE(120, 300, 120, 300, &glsl_type_builtin_mat4x3);
 mat4x4		TYPE(120, 300, 120, 300, &glsl_type_builtin_mat4);
 
+yuvCscStandardEXT    TYPE_WITH_ALT(0, 0, 0, 0, yyextra->EXT_YUV_target_enable, &glsl_type_builtin_yuvCscStandardEXT);
+
+itu_601              {
+      if (!yyextra->EXT_YUV_target_enable)
+         return classify_identifier(yyextra, yytext, yyleng, yylval);
+
+      yylval->csc_standard = YUV_CSC_STANDARD_601;
+      return CSCSTANDARD;
+   }
+
+itu_601_full_range   {
+      if (!yyextra->EXT_YUV_target_enable)
+         return classify_identifier(yyextra, yytext, yyleng, yylval);
+
+      yylval->csc_standard = YUV_CSC_STANDARD_601_FULL_RANGE;
+      return CSCSTANDARD;
+   }
+
+itu_709              {
+      if (!yyextra->EXT_YUV_target_enable)
+         return classify_identifier(yyextra, yytext, yyleng, yylval);
+
+      yylval->csc_standard = YUV_CSC_STANDARD_709;
+      return CSCSTANDARD;
+   }
+
 in		return IN_TOK;
 out		return OUT_TOK;
 inout		return INOUT_TOK;
@@ -497,6 +523,14 @@ samplerCubeArrayShadow   TYPE_WITH_ALT(400, 310, 400, 320, yyextra->ARB_texture_
 samplerExternalOES		{
 			  if (yyextra->OES_EGL_image_external_enable || yyextra->OES_EGL_image_external_essl3_enable) {
 			     yylval->type = &glsl_type_builtin_samplerExternalOES;
+			     return BASIC_TYPE_TOK;
+			  } else
+			     return IDENTIFIER;
+		}
+
+__samplerExternal2DY2YEXT {
+			  if (yyextra->EXT_YUV_target_enable) {
+			     yylval->type = &glsl_type_builtin_samplerExternal2DY2YEXT;
 			     return BASIC_TYPE_TOK;
 			  } else
 			     return IDENTIFIER;

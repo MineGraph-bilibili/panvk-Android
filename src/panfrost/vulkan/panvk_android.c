@@ -3,13 +3,12 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "panvk_android.h"
 
-#include <errno.h>
-#include <sys/stat.h>
-
 #include "panvk_device.h"
-#include "panvk_entrypoints.h"
 #include "panvk_image.h"
 
 #include "vndk/hardware_buffer.h"
@@ -23,18 +22,18 @@
 bool
 panvk_android_is_gralloc_image(const VkImageCreateInfo *pCreateInfo)
 {
-   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
-      switch ((uint32_t)ext->sType) {
+   vk_foreach_struct_const(sType, ext, pCreateInfo->pNext) {
+      switch ((uint32_t)sType) {
       case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID:
          return true;
       case VK_STRUCTURE_TYPE_IMAGE_SWAPCHAIN_CREATE_INFO_KHR: {
-         const VkImageSwapchainCreateInfoKHR *swapchain_info = (void *)ext;
+         const VkImageSwapchainCreateInfoKHR *swapchain_info = ext;
          if (swapchain_info->swapchain != VK_NULL_HANDLE)
             return true;
          break;
       }
       case VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO: {
-         const VkExternalMemoryImageCreateInfo *external_info = (void *)ext;
+         const VkExternalMemoryImageCreateInfo *external_info = ext;
          if (external_info->handleTypes &
              VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID)
             return true;
@@ -114,7 +113,8 @@ panvk_android_get_buffer_mem_reqs(VkDevice dev_handle, VkBuffer buf_handle,
 }
 
 static VkResult
-panvk_android_anb_init(struct panvk_device *dev, VkImageCreateInfo *create_info,
+panvk_android_anb_init(struct panvk_device *dev,
+                       const VkImageCreateInfo *create_info,
                        struct panvk_image *img)
 {
    VkResult result;
@@ -134,19 +134,10 @@ panvk_android_anb_init(struct panvk_device *dev, VkImageCreateInfo *create_info,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
    };
 
-   /* create_info is a already local copy from the caller */
-   create_info->pNext = &external_info;
-   return panvk_image_init(img, create_info);
+   VkImageCreateInfo local_create = *create_info;
+   local_create.pNext = &external_info;
+   return panvk_image_init(img, &local_create);
 }
-
-/* panvk-local: panvk Android native buffer import, see
- * panvk_android_import_anb() below.
- */
-static VkResult
-panvk_android_import_anb(struct panvk_device *dev,
-                         const VkImageCreateInfo *pCreateInfo,
-                         const VkAllocationCallbacks *pAllocator,
-                         struct panvk_image *img);
 
 VkResult
 panvk_android_create_gralloc_image(VkDevice device,
@@ -156,10 +147,6 @@ panvk_android_create_gralloc_image(VkDevice device,
 {
    VK_FROM_HANDLE(panvk_device, dev, device);
    VkResult result;
-
-   mesa_logi("panvk: gralloc image: fmt=%d %ux%u tiling=%d",
-             pCreateInfo->format, pCreateInfo->extent.width,
-             pCreateInfo->extent.height, pCreateInfo->tiling);
 
    struct panvk_image *img =
       vk_image_create(&dev->vk, pCreateInfo, pAllocator, sizeof(*img));
@@ -189,12 +176,7 @@ panvk_android_create_gralloc_image(VkDevice device,
    }
 
    VkImage img_handle = panvk_image_to_handle(img);
-   /* panvk-local: use our own ANB import walking the native_handle fds (the
-    * common vk_android_import_anb blindly uses data[0], which on MTK gralloc
-    * handles fails silently -> VK_ERROR_INVALID_EXTERNAL_HANDLE).  Pass the
-    * original pCreateInfo: the local create_info copy's pNext points at
-    * stack-local structs dead by now. */
-   result = panvk_android_import_anb(dev, pCreateInfo, pAllocator, img);
+   result = vk_android_import_anb(&dev->vk, &create_info, pAllocator, &img->vk);
    if (result != VK_SUCCESS) {
       dev->vk.dispatch_table.DestroyImage(device, img_handle, pAllocator);
       return panvk_error(device, result);
@@ -269,132 +251,42 @@ panvk_android_ahb_image_init(struct AHardwareBuffer *ahb,
    return VK_SUCCESS;
 }
 
-static int
-get_valid_dma_buf_fd(VkDevice device, const native_handle_t *handle)
+int
+panvk_android_find_dma_buf_fd(VkDevice device,
+                              const native_handle_t *handle,
+                              uint64_t *size_out)
 {
+   if (!handle || handle->numFds <= 0)
+      return -1;
+
+   VK_FROM_HANDLE(vk_device, dev, device);
+
    for (int i = 0; i < handle->numFds; i++) {
       int fd = handle->data[i];
-      if (fd < 0) continue;
+      if (fd < 0)
+         continue;
 
-      // Ensure the fd is seekable (data handle instead of a fence fd)
-      if (lseek(fd, 0, SEEK_END) < 0) continue;
+      struct stat st;
+      if (fstat(fd, &st) < 0)
+         continue;
+
+      off_t size = lseek(fd, 0, SEEK_END);
+      if (size <= 0)
+         continue;
 
       VkMemoryFdPropertiesKHR fd_props = {
          .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
       };
-      VK_FROM_HANDLE(vk_device, dev, device);
       if (dev->dispatch_table.GetMemoryFdPropertiesKHR(
-            device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fd_props) == VK_SUCCESS) {
+             device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd,
+             &fd_props) == VK_SUCCESS) {
+         if (size_out)
+            *size_out = (uint64_t)size;
          return fd;
       }
    }
-   return handle->data[0];
-}
 
-/* panvk-local: Android native buffer (window buffer) import replacing the
- * common vk_android_import_anb().  The common helper blindly uses
- * handle->data[0]; on MTK gralloc handles that is not necessarily the
- * dma-buf, GetMemoryFdPropertiesKHR then fails silently and vkCreateImage
- * returns VK_ERROR_INVALID_EXTERNAL_HANDLE (Eden SIGABRT).  Walk the fds
- * instead and keep a full log trail on every step.
- */
-static VkResult
-panvk_android_import_anb(struct panvk_device *dev,
-                         const VkImageCreateInfo *pCreateInfo,
-                         const VkAllocationCallbacks *pAllocator,
-                         struct panvk_image *img)
-{
-   VkDevice device = panvk_device_to_handle(dev);
-   VK_FROM_HANDLE(vk_device, vk_dev, device);
-   const VkNativeBufferANDROID *anb =
-      vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
-
-   if (!anb || !anb->handle || anb->handle->numFds < 1) {
-      mesa_loge("panvk ANB import: no native buffer handle");
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   }
-
-   mesa_logi("panvk ANB import: numFds=%d numInts=%d fmt=0x%x stride=%d",
-             anb->handle->numFds, anb->handle->numInts, anb->format,
-             anb->stride);
-
-   int dma_buf_fd = get_valid_dma_buf_fd(device, anb->handle);
-   mesa_logi("panvk ANB import: dma_buf_fd=%d", dma_buf_fd);
-
-   /* Query image memory requirements for size and supported memory types. */
-   VkMemoryRequirements mem_reqs;
-   vk_dev->dispatch_table.GetImageMemoryRequirements(
-      device, panvk_image_to_handle(img), &mem_reqs);
-
-   VkMemoryFdPropertiesKHR fd_props = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
-   };
-   VkResult result = vk_dev->dispatch_table.GetMemoryFdPropertiesKHR(
-      device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, dma_buf_fd,
-      &fd_props);
-   if (result != VK_SUCCESS) {
-      mesa_loge("panvk ANB import: GetMemoryFdPropertiesKHR failed fd=%d "
-                "(errno=%d)", dma_buf_fd, errno);
-      return result;
-   }
-
-   uint32_t compatible_types = mem_reqs.memoryTypeBits & fd_props.memoryTypeBits;
-   if (!compatible_types) {
-      /* kbase: memoryTypeIndex is cosmetic for imports, fall back to the
-       * image requirements so the import can proceed. */
-      mesa_logw("panvk ANB import: no compatible mem type (img %u, fd %u), "
-                "falling back to image reqs",
-                mem_reqs.memoryTypeBits, fd_props.memoryTypeBits);
-      compatible_types = mem_reqs.memoryTypeBits;
-   }
-
-   int dup_fd = os_dupfd_cloexec(dma_buf_fd);
-   if (dup_fd < 0) {
-      mesa_loge("panvk ANB import: dup fd failed (errno=%d)", errno);
-      return (errno == EMFILE) ? VK_ERROR_TOO_MANY_OBJECTS
-                               : VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
-
-   const VkMemoryDedicatedAllocateInfo ded_alloc = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
-      .image = panvk_image_to_handle(img),
-   };
-   const VkImportMemoryFdInfoKHR import_info = {
-      .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-      .pNext = &ded_alloc,
-      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-      .fd = dup_fd,
-   };
-   const VkMemoryAllocateInfo alloc_info = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-      .pNext = &import_info,
-      .allocationSize = mem_reqs.size,
-      .memoryTypeIndex = ffs(compatible_types) - 1,
-   };
-   result = vk_dev->dispatch_table.AllocateMemory(device, &alloc_info,
-                                                  pAllocator,
-                                                  &img->vk.anb_memory);
-   if (result != VK_SUCCESS) {
-      mesa_loge("panvk ANB import: AllocateMemory failed (%d)", result);
-      close(dup_fd);
-      return result;
-   }
-
-   const VkBindImageMemoryInfo bind_info = {
-      .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
-      .image = panvk_image_to_handle(img),
-      .memory = img->vk.anb_memory,
-      .memoryOffset = 0,
-   };
-   result = vk_dev->dispatch_table.BindImageMemory2(device, 1, &bind_info);
-   if (result != VK_SUCCESS) {
-      mesa_loge("panvk ANB import: BindImageMemory2 failed (%d)", result);
-      vk_dev->dispatch_table.FreeMemory(device, img->vk.anb_memory, pAllocator);
-      img->vk.anb_memory = VK_NULL_HANDLE;
-      return result;
-   }
-
-   return VK_SUCCESS;
+   return -1;
 }
 
 static VkResult
@@ -407,9 +299,10 @@ panvk_android_import_ahb_memory(VkDevice device,
    VK_FROM_HANDLE(vk_device, dev, device);
    const native_handle_t *handle = AHardwareBuffer_getNativeHandle(ahb);
    assert(handle && handle->numFds > 0);
-   // int dma_buf_fd = handle->data[0];
-   int dma_buf_fd = get_valid_dma_buf_fd(device, handle);
-   mesa_logi("panvk_android_import_ahb_memory: dma_buf_fd=%d", dma_buf_fd);
+   uint64_t dma_buf_size = 0;
+   int dma_buf_fd = panvk_android_find_dma_buf_fd(device, handle, &dma_buf_size);
+   if (dma_buf_fd < 0)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    VkResult result;
 
    VkImage img_handle = VK_NULL_HANDLE;
@@ -483,7 +376,6 @@ panvk_android_import_ahb_memory(VkDevice device,
       .allocationSize = mem_reqs.size,
       .memoryTypeIndex = mem_type_index,
    };
-   mesa_logi("%s @ %d: fd_info.fd=%d, calling AllocateMemory", __func__, __LINE__, dup_fd);
    result = dev->dispatch_table.AllocateMemory(device, &alloc_info, pAllocator,
                                                pMemory);
    if (result != VK_SUCCESS)
@@ -495,8 +387,8 @@ panvk_android_import_ahb_memory(VkDevice device,
 bool
 panvk_android_is_ahb_memory(const VkMemoryAllocateInfo *pAllocateInfo)
 {
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
+      switch (sType) {
       case VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID:
          return true;
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
@@ -544,34 +436,22 @@ panvk_android_allocate_ahb_memory(VkDevice device,
    return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
+VkResult
 panvk_GetAndroidHardwareBufferPropertiesANDROID(
-   VkDevice device, const struct AHardwareBuffer *buffer,
+   VkDevice device_h, const struct AHardwareBuffer *buffer,
    VkAndroidHardwareBufferPropertiesANDROID *pProperties)
 {
-   VK_FROM_HANDLE(vk_device, dev, device);
-
-   const native_handle_t *handle = AHardwareBuffer_getNativeHandle(buffer);
-   if (!handle || handle->numFds < 1)
-      return panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
-
-   int dma_buf_fd = get_valid_dma_buf_fd(device, handle);
-
-   VkMemoryFdPropertiesKHR fd_props = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
-   };
-   VkResult result = dev->dispatch_table.GetMemoryFdPropertiesKHR(
-      device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, dma_buf_fd,
-      &fd_props);
+   VkResult result =
+      vk_common_GetAndroidHardwareBufferPropertiesANDROID(device_h, buffer, pProperties);
    if (result != VK_SUCCESS)
       return result;
 
-   struct stat st;
-   if (fstat(dma_buf_fd, &st) < 0)
-      return panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   const native_handle_t *handle = AHardwareBuffer_getNativeHandle(buffer);
+   uint64_t real_size = 0;
+   int fd = panvk_android_find_dma_buf_fd(device_h, handle, &real_size);
+   if (fd < 0 || real_size == 0)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
-   pProperties->allocationSize = st.st_size;
-   pProperties->memoryTypeBits = fd_props.memoryTypeBits;
-
+   pProperties->allocationSize = real_size;
    return VK_SUCCESS;
 }

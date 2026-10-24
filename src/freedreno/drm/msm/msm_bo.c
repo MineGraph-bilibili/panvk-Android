@@ -13,24 +13,16 @@ bo_allocate(struct msm_bo *msm_bo)
 {
    struct fd_bo *bo = &msm_bo->base;
    if (!msm_bo->offset) {
-      struct drm_msm_gem_info req = {
-         .handle = bo->handle,
-         .info = MSM_INFO_GET_OFFSET,
-      };
-      int ret;
-
       /* if the buffer is already backed by pages then this
        * doesn't actually do anything (other than giving us
        * the offset)
        */
-      ret =
-         drmCommandWriteRead(bo->dev->fd, DRM_MSM_GEM_INFO, &req, sizeof(req));
+      int ret = msm_common_gem_info_get(bo->dev->fd, bo->handle,
+                                        MSM_INFO_GET_OFFSET, &msm_bo->offset);
       if (ret) {
          ERROR_MSG("alloc failed: %s", strerror(errno));
          return ret;
       }
-
-      msm_bo->offset = req.value;
    }
 
    return 0;
@@ -84,92 +76,41 @@ msm_bo_madvise(struct fd_bo *bo, int willneed)
 static uint64_t
 msm_bo_iova(struct fd_bo *bo)
 {
-   struct drm_msm_gem_info req = {
-      .handle = bo->handle,
-      .info = MSM_INFO_GET_IOVA,
-   };
-   int ret;
-
-   ret = drmCommandWriteRead(bo->dev->fd, DRM_MSM_GEM_INFO, &req, sizeof(req));
+   uint64_t value;
+   int ret = msm_common_gem_info_get(bo->dev->fd, bo->handle, MSM_INFO_GET_IOVA,
+                                     &value);
    if (ret)
       return 0;
 
-   return req.value;
+   return value;
 }
 
 static void
 msm_bo_set_name(struct fd_bo *bo, const char *fmt, va_list ap)
 {
-   struct drm_msm_gem_info req = {
-      .handle = bo->handle,
-      .info = MSM_INFO_SET_NAME,
-   };
-   char buf[32];
+   char buf[FD_MSM_GEM_NAME_LENGTH + 1];
    int sz;
 
    if (bo->dev->version < FD_VERSION_SOFTPIN)
       return;
 
    sz = vsnprintf(buf, sizeof(buf), fmt, ap);
+   sz = MIN2(sz, FD_MSM_GEM_NAME_LENGTH);
 
-   req.value = VOID2U64(buf);
-   req.len = MIN2(sz, sizeof(buf));
-
-   drmCommandWrite(bo->dev->fd, DRM_MSM_GEM_INFO, &req, sizeof(req));
+   msm_common_bo_set_name(bo->dev->fd, bo->handle, buf, sz);
 }
 
 static void
 msm_bo_set_metadata(struct fd_bo *bo, void *metadata, uint32_t metadata_size)
 {
-   struct drm_msm_gem_info req = {
-      .handle = bo->handle,
-      .info = MSM_INFO_SET_METADATA,
-      .value = (uintptr_t)(void *)metadata,
-      .len = metadata_size,
-   };
-
-   int ret = drmCommandWrite(bo->dev->fd, DRM_MSM_GEM_INFO, &req, sizeof(req));
-   if (ret) {
-      mesa_logw_once("Failed to set BO metadata with DRM_MSM_GEM_INFO: %d",
-                     ret);
-   }
+   msm_common_set_metadata(bo->dev->fd, bo->handle, metadata, metadata_size);
 }
 
 static int
 msm_bo_get_metadata(struct fd_bo *bo, void *metadata, uint32_t metadata_size)
 {
-   /* Zero-initialize the caller's buffer so that any bytes the kernel does
-    * not fill (e.g. when no metadata was ever set on this BO) are zero
-    * rather than left uninitialized, and so that we are robust to kernels
-    * that don't report the actual stored length in req.len.
-    */
-   memset(metadata, 0, metadata_size);
-
-   struct drm_msm_gem_info req = {
-      .handle = bo->handle,
-      .info = MSM_INFO_GET_METADATA,
-      .value = (uintptr_t)(void *)metadata,
-      .len = metadata_size,
-   };
-
-   /* drmCommandWriteRead() (not drmCommandWrite()) so that the kernel's
-    * req.len -- the actual length of the stored metadata -- is copied back.
-    */
-   int ret = drmCommandWriteRead(bo->dev->fd, DRM_MSM_GEM_INFO, &req, sizeof(req));
-   if (ret) {
-      mesa_logw_once("Failed to get BO metadata with DRM_MSM_GEM_INFO: %d",
-                     ret);
-      return ret;
-   }
-
-   /* If the kernel has no metadata stored for this BO (or stored less than
-    * the caller requested), signal ENODATA so callers fall back to their own
-    * layout defaults instead of trusting a partial/zeroed struct.
-    */
-   if (req.len < metadata_size)
-      return -ENODATA;
-
-   return 0;
+   return msm_common_get_metadata(bo->dev->fd, bo->handle, metadata,
+                                  metadata_size);
 }
 
 static const struct fd_bo_funcs funcs = {
@@ -189,29 +130,20 @@ static const struct fd_bo_funcs funcs = {
 static int
 new_handle(struct fd_device *dev, uint32_t size, uint32_t flags, uint32_t *handle)
 {
-   struct drm_msm_gem_new req = {
-      .size = size,
-   };
-   int ret;
+   uint32_t msm_flags = 0;
 
    if (flags & FD_BO_SCANOUT)
-      req.flags |= MSM_BO_SCANOUT;
+      msm_flags |= MSM_BO_SCANOUT;
 
    if (flags & FD_BO_GPUREADONLY)
-      req.flags |= MSM_BO_GPU_READONLY;
+      msm_flags |= MSM_BO_GPU_READONLY;
 
    if (flags & FD_BO_CACHED_COHERENT)
-      req.flags |= MSM_BO_CACHED_COHERENT;
+      msm_flags |= MSM_BO_CACHED_COHERENT;
    else
-      req.flags |= MSM_BO_WC;
+      msm_flags |= MSM_BO_WC;
 
-   ret = drmCommandWriteRead(dev->fd, DRM_MSM_GEM_NEW, &req, sizeof(req));
-   if (ret)
-      return ret;
-
-   *handle = req.handle;
-
-   return 0;
+   return msm_common_gem_new(dev->fd, size, msm_flags, handle);
 }
 
 /* allocate a new buffer object */

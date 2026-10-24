@@ -561,13 +561,11 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_intrinsic_ballot:
                case nir_intrinsic_ballot_relaxed:
                case nir_intrinsic_unit_test_uniform_input: type = RegType::sgpr; break;
-               case nir_intrinsic_load_input:
-               case nir_intrinsic_load_per_primitive_input:
                case nir_intrinsic_load_output:
-               case nir_intrinsic_load_input_vertex:
+               case nir_intrinsic_load_input_vertex_amd:
                case nir_intrinsic_load_per_vertex_input:
                case nir_intrinsic_load_per_vertex_output:
-               case nir_intrinsic_load_interpolated_input:
+               case nir_intrinsic_load_interpolated_input_amd:
                case nir_intrinsic_write_invocation_amd:
                case nir_intrinsic_mbcnt_amd:
                case nir_intrinsic_lane_permute_16_amd:
@@ -616,6 +614,7 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_intrinsic_reduce:
                case nir_intrinsic_load_ubo:
                case nir_intrinsic_load_ssbo:
+               case nir_intrinsic_load_constant:
                case nir_intrinsic_load_global_amd:
                   type = intrinsic->def.divergent ? RegType::vgpr : RegType::sgpr;
                   break;

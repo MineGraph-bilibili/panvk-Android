@@ -941,24 +941,24 @@
     <field name="Media Command Opcode" dword="0" bits="26:23" type="uint" default="7" />
     <field name="Pipeline" dword="0" bits="28:27" type="uint" default="2" />
     <field name="Command Type" dword="0" bits="31:29" type="uint" default="3" />
-    <field name="HCP Indirect Bitstream Object - Base Address" dword="1" bits="63:0" type="address" />
-    <field name="HCP Indirect Bitstream Object - Memory Address Attributes" dword="3" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP Indirect Bitstream Object Base Address" dword="1" bits="63:0" type="address" />
+    <field name="HCP Indirect Bitstream Object Address - Attributes" dword="3" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
     <field name="HCP Indirect Bitstream Object - Access Upper Bound" dword="4" bits="63:0" type="address" />
-    <field name="HCP Indirect CU Object - Base Address" dword="6" bits="63:0" type="address" />
-    <field name="HCP Indirect CU Object - Memory Address Attributes" dword="8" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="HCP PAK-BSE Object - Base Address" dword="9" bits="63:0" type="address" />
-    <field name="HCP PAK-BSE Object - Memory Address Attributes" dword="11" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP Indirect CU Object Base Address" dword="6" bits="63:0" type="address" />
+    <field name="HCP Indirect CU Object Address - Attributes" dword="8" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP PAK-BSE Object Base Address" dword="9" bits="63:0" type="address" />
+    <field name="HCP PAK-BSE Object Address - Attributes" dword="11" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
     <field name="HCP PAK-BSE Object - Access Upper Bound" dword="12" bits="63:0" type="address" />
-    <field name="HCP VP9 PAK Compressed Header Syntax Stream-In - Base Address" dword="14" bits="63:0" type="address" />
-    <field name="HCP VP9 PAK Compressed Header Syntax Stream-In - Memory Address Attributes" dword="16" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="HCP VP9 PAK Probability Counter Stream-Out - Base Address" dword="17" bits="63:0" type="address" />
-    <field name="HCP VP9 PAK Probability Counter Stream-Out - Memory Address Attributes" dword="19" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="HCP VP9 PAK Probability Deltas Stream-In - Base Address" dword="20" bits="63:0" type="address" />
-    <field name="HCP VP9 PAK Probability Deltas Stream-In - Memory Address Attributes" dword="22" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="HCP VP9 PAK Tile Record Stream-Out - Base Address" dword="23" bits="63:0" type="address" />
-    <field name="HCP VP9 PAK Tile Record Stream-Out - Memory Address Attributes" dword="25" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="HCP VP9 PAK CU Level Statistic Stream-Out - Base Address" dword="26" bits="63:0" type="address" />
-    <field name="HCP VP9 PAK CU Level Statistic Stream-Out - Memory Address Attributes" dword="28" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP VP9 PAK Compressed Header Syntax Stream-In Base Address" dword="14" bits="63:0" type="address" />
+    <field name="HCP VP9 PAK Compressed Header Syntax Stream-In Address - Attributes" dword="16" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP VP9 PAK Probability Counter Stream-Out Base Address" dword="17" bits="63:0" type="address" />
+    <field name="HCP VP9 PAK Probability Counter Stream-Out Address - Attributes" dword="19" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP VP9 PAK Probability Deltas Stream-In Base Address" dword="20" bits="63:0" type="address" />
+    <field name="HCP VP9 PAK Probability Deltas Stream-In Address - Attributes" dword="22" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP VP9 PAK Tile Record Stream-Out Base Address" dword="23" bits="63:0" type="address" />
+    <field name="HCP VP9 PAK Tile Record Stream-Out Address - Attributes" dword="25" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP VP9 PAK CU Level Statistic Stream-Out Base Address" dword="26" bits="63:0" type="address" />
+    <field name="HCP VP9 PAK CU Level Statistic Stream-Out Address - Attributes" dword="28" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
   </instruction>
   <instruction name="HCP_PAK_INSERT_OBJECT" bias="2" engine="video">
     <field name="DWord Length" dword="0" bits="11:0" type="uint" default="0" />
@@ -1179,68 +1179,68 @@
     <field name="Media Command Opcode" dword="0" bits="26:23" type="uint" default="7" />
     <field name="Pipeline" dword="0" bits="28:27" type="uint" default="2" />
     <field name="Command Type" dword="0" bits="31:29" type="uint" default="3" />
-    <field name="Decoded Picture - Address" dword="1" bits="63:0" type="address" />
-    <field name="Decoded Picture - Memory Address Attributes" dword="3" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Deblocking Filter Line Buffer - Address" dword="4" bits="63:0" type="address" />
-    <field name="Deblocking Filter Line Buffer - Memory Address Attributes" dword="6" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Deblocking Filter Tile Line Buffer - Address" dword="7" bits="63:0" type="address" />
-    <field name="Deblocking Filter Tile Line Buffer - Memory Address Attributes" dword="9" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Deblocking Filter Tile Column Buffer - Address" dword="10" bits="63:0" type="address" />
-    <field name="Deblocking Filter Tile Column Buffer - Memory Address Attributes" dword="12" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Metadata Line Buffer - Address" dword="13" bits="63:0" type="address" />
-    <field name="Metadata Line Buffer - Memory Address Attributes" dword="15" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Metadata Tile Line Buffer - Address" dword="16" bits="63:0" type="address" />
-    <field name="Metadata Tile Line Buffer - Memory Address Attributes" dword="18" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Metadata Tile Column Buffer - Address" dword="19" bits="63:0" type="address" />
-    <field name="Metadata Tile Column Buffer - Memory Address Attributes" dword="21" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="SAO Line Buffer - Address" dword="22" bits="63:0" type="address" />
-    <field name="SAO Line Buffer - Memory Address Attributes" dword="24" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="SAO Tile Line Buffer - Address" dword="25" bits="63:0" type="address" />
-    <field name="SAO Tile Line Buffer - Memory Address Attributes" dword="27" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="SAO Tile Column Buffer - Address" dword="28" bits="63:0" type="address" />
-    <field name="SAO Tile Column Buffer - Memory Address Attributes" dword="30" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Current MV Temporal Buffer - Address" dword="31" bits="63:0" type="address" />
-    <field name="Current MV Temporal Buffer - Memory Address Attributes" dword="33" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Decoded Picture Address" dword="1" bits="63:0" type="address" />
+    <field name="Decoded Picture Address - Attributes" dword="3" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Deblocking Filter Line Buffer Address" dword="4" bits="63:0" type="address" />
+    <field name="Deblocking Filter Line Buffer Address - Attributes" dword="6" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Deblocking Filter Tile Line Buffer Address" dword="7" bits="63:0" type="address" />
+    <field name="Deblocking Filter Tile Line Buffer Address - Attributes" dword="9" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Deblocking Filter Tile Column Buffer Address" dword="10" bits="63:0" type="address" />
+    <field name="Deblocking Filter Tile Column Buffer Address - Attributes" dword="12" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Metadata Line Buffer Address" dword="13" bits="63:0" type="address" />
+    <field name="Metadata Line Buffer Address - Attributes" dword="15" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Metadata Tile Line Buffer Address" dword="16" bits="63:0" type="address" />
+    <field name="Metadata Tile Line Buffer Address - Attributes" dword="18" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Metadata Tile Column Buffer Address" dword="19" bits="63:0" type="address" />
+    <field name="Metadata Tile Column Buffer Address - Attributes" dword="21" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="SAO Line Buffer Address" dword="22" bits="63:0" type="address" />
+    <field name="SAO Line Buffer Address - Attributes" dword="24" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="SAO Tile Line Buffer Address" dword="25" bits="63:0" type="address" />
+    <field name="SAO Tile Line Buffer Address - Attributes" dword="27" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="SAO Tile Column Buffer Address" dword="28" bits="63:0" type="address" />
+    <field name="SAO Tile Column Buffer Address - Attributes" dword="30" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Current MV Temporal Buffer Address" dword="31" bits="63:0" type="address" />
+    <field name="Current MV Temporal Buffer Address - Attributes" dword="33" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
     <group count="8" dword="37" size="64">
-      <field name="Reference Picture - Address" dword="0" bits="63:0" type="address" />
+      <field name="Reference Picture Address" dword="0" bits="63:0" type="address" />
     </group>
-    <field name="Reference Picture - Memory Address Attributes" dword="53" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Original Uncompressed Picture Source - Address" dword="54" bits="63:0" type="address" />
-    <field name="Original Uncompressed Picture Source - Memory Address Attributes" dword="56" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Stream-Out Data Destination - Address" dword="57" bits="63:0" type="address" />
-    <field name="Stream-Out Data Destination - Memory Address Attributes" dword="59" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Decoded Picture Status Buffer - Address" dword="60" bits="63:0" type="address" />
-    <field name="Decoded Picture Status Buffer - Memory Address Attributes" dword="62" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="LCU ILDB Stream-Out Buffer - Address" dword="63" bits="63:0" type="address" />
-    <field name="LCU ILDB Stream-Out Buffer - Memory Address Attributes" dword="65" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Reference Picture Address - Attributes" dword="53" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Original Uncompressed Picture Source Address" dword="54" bits="63:0" type="address" />
+    <field name="Original Uncompressed Picture Source Address - Attributes" dword="56" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Stream-Out Data Destination Address" dword="57" bits="63:0" type="address" />
+    <field name="Stream-Out Data Destination Address - Attributes" dword="59" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Decoded Picture Status Buffer Address" dword="60" bits="63:0" type="address" />
+    <field name="Decoded Picture Status Buffer Address - Attributes" dword="62" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="LCU ILDB Stream-Out Buffer Address" dword="63" bits="63:0" type="address" />
+    <field name="LCU ILDB Stream-Out Buffer Address - Attributes" dword="65" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
     <group count="8" dword="66" size="64">
-      <field name="Collocated MV Temporal Buffer - Address" dword="0" bits="63:0" type="address" />
+      <field name="Collocated MV Temporal Buffer Address" dword="0" bits="63:0" type="address" />
     </group>
-    <field name="Collocated MV Temporal Buffer - Memory Address Attributes" dword="82" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="VP9 Probability Buffer - Address" dword="83" bits="63:0" type="address" />
-    <field name="VP9 Probability Buffer - Memory Address Attributes" dword="85" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="VP9 Segment ID Buffer - Address" dword="86" bits="63:0" type="address" />
-    <field name="VP9 Segment ID Buffer - Memory Address Attributes" dword="88" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="VP9 HVD Line Row Store Buffer - Address" dword="89" bits="63:0" type="address" />
-    <field name="VP9 HVD Line Row Store Buffer - Memory Address Attributes" dword="91" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="VP9 HVD Tile Row Store Buffer - Address" dword="92" bits="63:0" type="address" />
-    <field name="VP9 HVD Tile Row Store Buffer - Memory Address Attributes" dword="94" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="SAO Stream-Out Data Destination Buffer - Base Address" dword="95" bits="63:0" type="address" />
-    <field name="SAO Stream-Out Data Destination Buffer - Memory Address Attributes" dword="97" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Frame Statistics Stream-Out Data Destination Buffer - Base Address" dword="98" bits="63:0" type="address" />
-    <field name="Frame Statistics Stream-Out Data Destination Buffer - Memory Address Attributes" dword="100" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="SSE Source Pixel Row Store Buffer - Base Address" dword="101" bits="63:0" type="address" />
-    <field name="SSE Source Pixel Row Store Buffer - Memory Address Attributes Read/Write" dword="103" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="HCP Scalability Slice State Buffer - Base Address" dword="104" bits="63:0" type="address" />
-    <field name="HCP Scalability Slice State Buffer - Memory Address Attributes" dword="106" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="HCP Scalability CABAC Decoded Syntax Elements Buffer - Base Address" dword="107" bits="63:0" type="address" />
-    <field name="HCP Scalability CABAC Decoded Syntax Elements Buffer - Memory Address Attributes" dword="109" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="MV Upper Right Column Store Buffer - Base Address" dword="110" bits="63:0" type="address" />
-    <field name="MV Upper Right Column Store Buffer - Memory Address Attributes" dword="112" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Intra Prediction Upper Right Column Store Buffer - Base Address" dword="113" bits="63:0" type="address" />
-    <field name="Intra Prediction Upper Right Column Store Buffer - Memory Address Attributes" dword="115" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
-    <field name="Intra Prediction Left Recon Column Store Buffer - Base Address" dword="116" bits="63:0" type="address" />
-    <field name="Intra Prediction Left Recon Column Store Buffer - Memory Address Attributes" dword="118" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Collocated MV Temporal Buffer Address - Attributes" dword="82" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="VP9 Probability Buffer Address" dword="83" bits="63:0" type="address" />
+    <field name="VP9 Probability Buffer Address - Attributes" dword="85" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="VP9 Segment ID Buffer Address" dword="86" bits="63:0" type="address" />
+    <field name="VP9 Segment ID Buffer Address - Attributes" dword="88" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="VP9 HVD Line Row Store Buffer Address" dword="89" bits="63:0" type="address" />
+    <field name="VP9 HVD Line Row Store Buffer Address - Attributes" dword="91" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="VP9 HVD Tile Row Store Buffer Address" dword="92" bits="63:0" type="address" />
+    <field name="VP9 HVD Tile Row Store Buffer Address - Attributes" dword="94" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="SAO Stream-Out Data Destination Buffer Base Address" dword="95" bits="63:0" type="address" />
+    <field name="SAO Stream-Out Data Destination Buffer Address - Attributes" dword="97" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Frame Statistics Stream-Out Data Destination Buffer Base Address" dword="98" bits="63:0" type="address" />
+    <field name="Frame Statistics Stream-Out Data Destination Buffer Address - Attributes" dword="100" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="SSE Source Pixel Row Store Buffer Base Address" dword="101" bits="63:0" type="address" />
+    <field name="SSE Source Pixel Row Store Buffer Address - Attributes" dword="103" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP Scalability Slice State Buffer Base Address" dword="104" bits="63:0" type="address" />
+    <field name="HCP Scalability Slice State Buffer Address - Attributes" dword="106" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="HCP Scalability CABAC Decoded Syntax Elements Buffer Base Address" dword="107" bits="63:0" type="address" />
+    <field name="HCP Scalability CABAC Decoded Syntax Elements Buffer Address - Attributes" dword="109" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="MV Upper Right Column Store Buffer Base Address" dword="110" bits="63:0" type="address" />
+    <field name="MV Upper Right Column Store Buffer Address - Attributes" dword="112" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Intra Prediction Upper Right Column Store Buffer Base Address" dword="113" bits="63:0" type="address" />
+    <field name="Intra Prediction Upper Right Column Store Buffer Address - Attributes" dword="115" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
+    <field name="Intra Prediction Left Recon Column Store Buffer Base Address" dword="116" bits="63:0" type="address" />
+    <field name="Intra Prediction Left Recon Column Store Buffer Address - Attributes" dword="118" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
     <field name="HCP Scalability CABAC Decoded Syntax Elements Buffer Max Address" dword="119" bits="63:0" type="address" />
   </instruction>
   <instruction name="HCP_PIPE_MODE_SELECT" bias="2" length="6" engine="video">
@@ -1498,7 +1498,7 @@
     <field name="SAO Row Store Offset" dword="10" bits="31:6" type="uint" />
     <field name="Tile Size Stream-Out Offset" dword="11" bits="31:6" type="uint" />
     <field name="VP9 Probability Counter Stream-Out Offset" dword="12" bits="31:6" type="uint" />
-    <field name="HCP Scalability Synchronize Buffer - Base Address" dword="13" bits="63:0" type="address" />
+    <field name="HCP Scalability Synchronize Buffer Base Address" dword="13" bits="63:0" type="address" />
     <field name="HCP Scalability Synchronize Buffer - Attributes" dword="15" bits="31:0" type="MEMORYADDRESSATTRIBUTES" />
   </instruction>
   <instruction name="HCP_TILE_STATE" bias="2" length="17" engine="video">
@@ -1708,28 +1708,6 @@
     <group count="8" dword="34" size="32">
       <field name="Chroma Offsets Ext" dword="0" bits="31:0" type="HCP_WEIGHTOFFSET_CHROMA_EXT_ENTRY" />
     </group>
-  </instruction>
-  <instruction name="HUC_STREAM_OBJECT" bias="2" length="5" engine="video">
-    <field name="DWord Length" dword="0" bits="11:0" type="uint" />
-    <field name="SubOpcode" dword="0" bits="22:16" type="uint" default="32" />
-    <field name="Media Command Opcode" dword="0" bits="26:23" type="uint" default="11" />
-    <field name="Pipeline" dword="0" bits="28:27" type="uint" default="2" />
-    <field name="Command Type" dword="0" bits="31:29" type="uint" default="3" />
-    <field name="Indirect Stream-In Data Length" dword="1" bits="31:0" type="uint" />
-    <field name="Indirect Stream-In - Address" dword="2" bits="28:0" type="address" />
-    <field name="HuC Processing" dword="2" bits="31:31" type="bool" />
-    <field name="Indirect Stream-Out - Address" dword="3" bits="28:0" type="address" />
-    <field name="Start Code Byte [0]" dword="4" bits="7:0" type="uint" />
-    <field name="Start Code Byte [1]" dword="4" bits="15:8" type="uint" />
-    <field name="Start Code Byte [2]" dword="4" bits="23:16" type="uint" />
-    <field name="Start Code Search Engine" dword="4" bits="24:24" type="bool" />
-    <field name="Emulation Prevention Byte Removal" dword="4" bits="25:25" type="bool" />
-    <field name="Stream-Out" dword="4" bits="26:26" type="bool" />
-    <field name="DRM Length Mode" dword="4" bits="28:27" type="uint">
-      <value name="Start Code Mode" value="0" />
-      <value name="Length Mode" value="1" />
-    </field>
-    <field name="HUC Bitstream Enable" dword="4" bits="29:29" type="bool" />
   </instruction>
   <instruction name="MEDIA_OBJECT" bias="2" engine="render">
     <field name="DWord Length" dword="0" bits="14:0" type="uint" default="4" />

@@ -82,9 +82,6 @@ static const struct drm_driver_descriptor *driver_descriptors[] = {
    &vc4_driver_descriptor,
    &panfrost_driver_descriptor,
    &panthor_driver_descriptor,
-#if defined(HAVE_PAN_KMOD_KBASE)
-   &kbase_driver_descriptor,
-#endif
    &asahi_driver_descriptor,
    &etnaviv_driver_descriptor,
    &rocket_driver_descriptor,
@@ -336,83 +333,6 @@ pipe_loader_drm_zink_probe(struct pipe_loader_device **devs, int ndev)
    return pipe_loader_drm_probe_internal(devs, ndev, true);
 }
 #endif
-
-#if defined(HAVE_PAN_KMOD_KBASE)
-#include "panfrost/lib/kmod/pan_kmod.h"
-#define KBASE_DEV_NAME_FORMAT "/dev/mali%d"
-
-static int
-open_kbase_node(int minor)
-{
-   char path[PATH_MAX];
-   snprintf(path, sizeof(path), KBASE_DEV_NAME_FORMAT, minor);
-   return loader_open_device(path);
-}
-
-static bool
-pipe_loader_kbase_probe_fd_nodup(struct pipe_loader_device **dev, int fd)
-{
-   struct pipe_loader_drm_device *ddev = CALLOC_STRUCT(pipe_loader_drm_device);
-
-   if (!ddev)
-      return false;
-
-   /* kbase devices are platform (SoC-integrated) accelerators accessed via
-    * character device nodes (/dev/mali*) rather than DRM render nodes; use
-    * PIPE_LOADER_DEVICE_PLATFORM, the same type the accel probe path uses for
-    * similar non-PCI, non-DRM devices. */
-   ddev->base.type = PIPE_LOADER_DEVICE_PLATFORM;
-   ddev->base.ops = &pipe_loader_drm_ops;
-   ddev->fd = fd;
-
-   /* kbase is not a DRM driver so drmGetVersion() is not applicable;
-    * hardcode the driver name. */
-   ddev->base.driver_name = strdup("kbase");
-   if (!ddev->base.driver_name)
-      goto fail;
-
-   ddev->dd = get_driver_descriptor(ddev->base.driver_name);
-   if (!ddev->dd)
-      goto fail;
-
-   *dev = &ddev->base;
-   return true;
-
-fail:
-   FREE(ddev->base.driver_name);
-   FREE(ddev);
-   return false;
-}
-
-int
-pipe_loader_kbase_probe(struct pipe_loader_device **devs, int ndev)
-{
-   int node_index, device_count, fd;
-
-   for (node_index = 0, device_count = 0; node_index < PAN_KBASE_MAX_NODES; node_index++) {
-      struct pipe_loader_device *dev;
-
-      fd = open_kbase_node(node_index);
-      if (fd < 0)
-         continue;
-
-      if (!pipe_loader_kbase_probe_fd_nodup(&dev, fd)) {
-         close(fd);
-         continue;
-      }
-
-      if (device_count < ndev) {
-         devs[device_count] = dev;
-      } else {
-         close(fd);
-         dev->ops->release(&dev);
-      }
-      device_count++;
-   }
-
-   return device_count;
-}
-#endif /* HAVE_PAN_KMOD_KBASE */
 
 static void
 pipe_loader_drm_release(struct pipe_loader_device **dev)

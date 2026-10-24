@@ -39,7 +39,7 @@ get_pipeline_gfx(struct radv_device *device, struct radv_image *image, VkPipelin
       return VK_SUCCESS;
    }
 
-   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices();
+   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices(false);
    nir_shader *fs_module = radv_meta_nir_build_fs_noop();
 
    const VkPipelineSampleLocationsStateCreateInfoEXT sample_locs_create_info = {
@@ -167,7 +167,7 @@ radv_process_depth_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_i
                            .pNext = &iview_usage_info,
                            .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                            .image = radv_image_to_handle(image),
-                           .viewType = radv_meta_get_view_type(image),
+                           .viewType = radv_meta_get_view_type(image, true),
                            .format = image->vk.format,
                            .subresourceRange =
                               {
@@ -454,6 +454,10 @@ radv_expand_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image 
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_barrier_data barrier = {0};
 
+   if (cmd_buffer->qf != RADV_QUEUE_GENERAL && cmd_buffer->qf != RADV_QUEUE_COMPUTE &&
+       !radv_cmd_buffer_is_transfer_gang(cmd_buffer))
+      return;
+
    barrier.layout_transitions.depth_stencil_expand = 1;
    radv_describe_layout_transition(cmd_buffer, &barrier);
 
@@ -462,8 +466,6 @@ radv_expand_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image 
 
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB | RADV_CMD_FLAG_FLUSH_AND_INV_DB_META;
    } else {
-      assert(cmd_buffer->qf == RADV_QUEUE_COMPUTE ||
-             (cmd_buffer->qf == RADV_QUEUE_TRANSFER && cmd_buffer->gang.cs->hw_ip == AMD_IP_COMPUTE));
       radv_expand_depth_stencil_compute(cmd_buffer, image, subresourceRange);
 
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE |

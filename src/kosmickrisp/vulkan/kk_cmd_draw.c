@@ -114,12 +114,14 @@ kk_clear_common_attachment_description(
       descriptor, MTL_LOAD_ACTION_DONT_CARE);
    mtl_render_pass_attachment_descriptor_set_store_action(
       descriptor, MTL_STORE_ACTION_UNKNOWN);
+   mtl_render_pass_attachment_descriptor_set_resolve_texture(descriptor, NULL);
 }
 
 static void
 kk_fill_common_attachment_description(
    mtl_render_pass_attachment_descriptor *descriptor,
-   const struct kk_attachment *info, bool force_attachment_load)
+   const struct kk_attachment *info, bool force_attachment_load,
+   bool attach_resolve_texture)
 {
    const struct kk_image_view *iview = info->iview;
    assert(iview->plane_count ==
@@ -137,12 +139,13 @@ kk_fill_common_attachment_description(
 
    /* STORE_OP_NONE behaves like DONT_CARE if there are writes
     * (CLEAR or DONT_CARE are writes).
-   * If there are no writes, we need to preserve the contents. */
-   force_attachment_load |= (info->load_op == VK_ATTACHMENT_LOAD_OP_LOAD
-      || info->load_op == VK_ATTACHMENT_LOAD_OP_NONE)
-      && info->store_op == VK_ATTACHMENT_STORE_OP_NONE;
+    * If there are no writes, we need to preserve the contents. */
+   force_attachment_load |= (info->load_op == VK_ATTACHMENT_LOAD_OP_LOAD ||
+                             info->load_op == VK_ATTACHMENT_LOAD_OP_NONE) &&
+                            info->store_op == VK_ATTACHMENT_STORE_OP_NONE;
 
-   enum mtl_load_action load_action = force_attachment_load
+   enum mtl_load_action load_action =
+      force_attachment_load
          ? MTL_LOAD_ACTION_LOAD
          : vk_attachment_load_op_to_mtl_load_action(info->load_op);
 
@@ -150,6 +153,18 @@ kk_fill_common_attachment_description(
                                                          load_action);
    mtl_render_pass_attachment_descriptor_set_store_action(
       descriptor, MTL_STORE_ACTION_UNKNOWN);
+
+   if (attach_resolve_texture) {
+      mtl_render_pass_attachment_descriptor_set_resolve_texture(
+         descriptor, info->resolve_iview->planes[0].mtl_handle_render);
+
+      if (!info->resolve_iview->planes[0].render_is_view) {
+         mtl_render_pass_attachment_descriptor_set_resolve_level(
+            descriptor, info->resolve_iview->vk.base_mip_level);
+         mtl_render_pass_attachment_descriptor_set_resolve_slice(
+            descriptor, info->resolve_iview->vk.base_array_layer);
+      }
+   }
 }
 
 static struct mtl_clear_color
@@ -190,7 +205,8 @@ static void
 kk_set_color_attachments(mtl_render_pass_descriptor *pass_descriptor,
                          struct kk_rendering_state *render,
                          const struct vk_dynamic_graphics_state *dyn,
-                         bool force_attachment_load)
+                         bool force_attachment_load,
+                         bool rendering_to_whole_framebuffer)
 {
    for (uint32_t i = 0; i < ARRAY_SIZE(render->color_att); i++) {
       mtl_render_pass_attachment_descriptor *attachment_descriptor =
@@ -216,8 +232,13 @@ kk_set_color_attachments(mtl_render_pass_descriptor *pass_descriptor,
          container_of(iview->vk.image, struct kk_image, vk);
       render->samples = MAX2(render->samples, image->vk.samples);
 
+      bool renderpass_resolve = kk_attachment_do_renderpass_resolve(
+         &render->color_att[i], rendering_to_whole_framebuffer,
+         VK_IMAGE_ASPECT_COLOR_BIT);
+
       kk_fill_common_attachment_description(attachment_descriptor, color_att,
-                                            force_attachment_load);
+                                            force_attachment_load,
+                                            renderpass_resolve);
 
       struct mtl_clear_color clear_color =
          vk_clear_color_value_to_mtl_clear_color(color_att->clear_value.color,
@@ -309,6 +330,13 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          pass_descriptor, framebuffer_extent.width);
       mtl_render_pass_descriptor_set_render_target_height(
          pass_descriptor, framebuffer_extent.height);
+      /* Applications may set maximal extents for attachment-less rendering, for
+       * example DXVK. This can cause device loss from exceeding memory limits.
+       * We can get around this by ignoring the layer count, without any known
+       * impact on the resulting fragment invocations and side effects. */
+      mtl_render_pass_descriptor_set_render_target_array_length(pass_descriptor,
+                                                                0u);
+
       mtl_render_pass_descriptor_set_default_raster_sample_count(
          pass_descriptor, 1u);
    } else {
@@ -316,6 +344,10 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          pass_descriptor, render->area.extent.width + render->area.offset.x);
       mtl_render_pass_descriptor_set_render_target_height(
          pass_descriptor, render->area.extent.height + render->area.offset.y);
+
+      /* Render targets are always arrays */
+      mtl_render_pass_descriptor_set_render_target_array_length(
+         pass_descriptor, layer_count ? layer_count : 1u);
    }
 
    /* Check if we are rendering to the whole framebuffer. Required to understand
@@ -328,19 +360,19 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       (render->view_mask == 0u ||
        render->view_mask == BITFIELD64_MASK(render->layer_count));
 
+   render->rendering_to_whole_framebuffer = is_whole_framebuffer;
+
    /* renderTargetWidth/Height doesn't seem to guarantee
     * that the attachments won't get touched outside the area
     * so just checking for offset = 0 doesn't cut it. */
    bool force_attachment_load =
-      !is_whole_framebuffer ||
-      (render->flags & VK_RENDERING_RESUMING_BIT);
+      !is_whole_framebuffer || (render->flags & VK_RENDERING_RESUMING_BIT);
 
    render->force_attachment_store =
-      !is_whole_framebuffer ||
-      (render->flags & VK_RENDERING_SUSPENDING_BIT);
+      !is_whole_framebuffer || (render->flags & VK_RENDERING_SUSPENDING_BIT);
 
-   kk_set_color_attachments(pass_descriptor, render, dyn,
-                            force_attachment_load);
+   kk_set_color_attachments(pass_descriptor, render, dyn, force_attachment_load,
+                            is_whole_framebuffer);
 
    if (render->depth_att.iview) {
       const struct kk_image_view *iview = render->depth_att.iview;
@@ -348,10 +380,14 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          container_of(iview->vk.image, struct kk_image, vk);
       render->samples = image->vk.samples;
 
+      bool renderpass_resolve = kk_attachment_do_renderpass_resolve(
+         &render->depth_att, is_whole_framebuffer, VK_IMAGE_ASPECT_DEPTH_BIT);
+
       mtl_render_pass_attachment_descriptor *attachment_descriptor =
          mtl_render_pass_descriptor_get_depth_attachment(pass_descriptor);
       kk_fill_common_attachment_description(
-         attachment_descriptor, &render->depth_att, force_attachment_load);
+         attachment_descriptor, &render->depth_att, force_attachment_load,
+         renderpass_resolve);
 
       /* clearValue.depthStencil.depth could have invalid values such as NaN
        * which will trigger a Metal validation error. Ensure we only use this
@@ -361,6 +397,11 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          mtl_render_pass_attachment_descriptor_set_clear_depth(
             attachment_descriptor,
             pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth);
+
+      if (renderpass_resolve)
+         mtl_render_pass_attachment_descriptor_set_depth_resolve_filter(
+            attachment_descriptor, vk_resolve_mode_to_mtl_depth_resolve_filter(
+                                      render->depth_att.resolve_mode));
    }
    if (render->stencil_att.iview) {
       const struct kk_image_view *iview = render->stencil_att.iview;
@@ -368,18 +409,25 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          container_of(iview->vk.image, struct kk_image, vk);
       render->samples = image->vk.samples;
 
+      bool renderpass_resolve = kk_attachment_do_renderpass_resolve(
+         &render->stencil_att, is_whole_framebuffer,
+         VK_IMAGE_ASPECT_STENCIL_BIT);
+
       mtl_render_pass_attachment_descriptor *attachment_descriptor =
          mtl_render_pass_descriptor_get_stencil_attachment(pass_descriptor);
       kk_fill_common_attachment_description(
-         attachment_descriptor, &render->stencil_att, force_attachment_load);
+         attachment_descriptor, &render->stencil_att, force_attachment_load,
+         renderpass_resolve);
       mtl_render_pass_attachment_descriptor_set_clear_stencil(
          attachment_descriptor,
          pRenderingInfo->pStencilAttachment->clearValue.depthStencil.stencil);
-   }
 
-   /* Render targets are always arrays */
-   mtl_render_pass_descriptor_set_render_target_array_length(
-      pass_descriptor, layer_count ? layer_count : 1u);
+      if (renderpass_resolve)
+         mtl_render_pass_attachment_descriptor_set_stencil_resolve_filter(
+            attachment_descriptor,
+            vk_resolve_mode_to_mtl_stencil_resolve_filter(
+               render->stencil_att.resolve_mode));
+   }
 
    /* Set global visibility buffer */
    mtl_render_pass_descriptor_set_visibility_buffer(
@@ -484,31 +532,45 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
    struct kk_rendering_state *render = &cmd->state.gfx.render;
-   bool need_resolve = false;
+   bool need_meta_resolve = false;
 
    /* Translate render state back to VK for meta */
    VkRenderingAttachmentInfo vk_color_att[KK_MAX_RTS];
    VkRenderingAttachmentFlagsInfoKHR vk_color_att_flags[KK_MAX_RTS];
    for (uint32_t i = 0; i < render->color_att_count; i++) {
-      if (render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE)
-         need_resolve = true;
+      bool attachment_meta_resolve =
+         render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE &&
+         !kk_attachment_do_renderpass_resolve(
+            &render->color_att[i], render->rendering_to_whole_framebuffer,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+      need_meta_resolve |= attachment_meta_resolve;
 
       vk_color_att_flags[i] = (VkRenderingAttachmentFlagsInfoKHR){
          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
          .flags = render->color_att[i].flags,
       };
-
       vk_color_att[i] = (VkRenderingAttachmentInfo){
          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
          .pNext = &vk_color_att_flags[i],
          .imageView = kk_image_view_to_handle(render->color_att[i].iview),
          .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-         .resolveMode = render->color_att[i].resolve_mode,
+         .resolveMode = attachment_meta_resolve
+                           ? render->color_att[i].resolve_mode
+                           : VK_RESOLVE_MODE_NONE,
          .resolveImageView =
-            kk_image_view_to_handle(render->color_att[i].resolve_iview),
+            attachment_meta_resolve
+               ? kk_image_view_to_handle(render->color_att[i].resolve_iview)
+               : VK_NULL_HANDLE,
          .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
       };
    }
+
+   bool depth_meta_resolve =
+      render->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE &&
+      !kk_attachment_do_renderpass_resolve(
+         &render->depth_att, render->rendering_to_whole_framebuffer,
+         VK_IMAGE_ASPECT_DEPTH_BIT);
+   need_meta_resolve |= depth_meta_resolve;
 
    const VkRenderingAttachmentFlagsInfoKHR vk_depth_att_flags = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
@@ -519,13 +581,21 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
       .pNext = &vk_depth_att_flags,
       .imageView = kk_image_view_to_handle(render->depth_att.iview),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .resolveMode = render->depth_att.resolve_mode,
+      .resolveMode = depth_meta_resolve ? render->depth_att.resolve_mode
+                                        : VK_RESOLVE_MODE_NONE,
       .resolveImageView =
-         kk_image_view_to_handle(render->depth_att.resolve_iview),
+         depth_meta_resolve
+            ? kk_image_view_to_handle(render->depth_att.resolve_iview)
+            : VK_NULL_HANDLE,
       .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
    };
-   if (render->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE)
-      need_resolve = true;
+
+   bool stencil_meta_resolve =
+      render->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE &&
+      !kk_attachment_do_renderpass_resolve(
+         &render->stencil_att, render->rendering_to_whole_framebuffer,
+         VK_IMAGE_ASPECT_STENCIL_BIT);
+   need_meta_resolve |= stencil_meta_resolve;
 
    const VkRenderingAttachmentFlagsInfoKHR vk_stencil_att_flags = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
@@ -536,13 +606,14 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
       .pNext = &vk_stencil_att_flags,
       .imageView = kk_image_view_to_handle(render->stencil_att.iview),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .resolveMode = render->stencil_att.resolve_mode,
+      .resolveMode = stencil_meta_resolve ? render->stencil_att.resolve_mode
+                                          : VK_RESOLVE_MODE_NONE,
       .resolveImageView =
-         kk_image_view_to_handle(render->stencil_att.resolve_iview),
+         stencil_meta_resolve
+            ? kk_image_view_to_handle(render->stencil_att.resolve_iview)
+            : VK_NULL_HANDLE,
       .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
    };
-   if (render->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE)
-      need_resolve = true;
 
    const VkRenderingInfo vk_render = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -564,11 +635,11 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
 
    if (render->flags &
        (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_CUSTOM_RESOLVE_BIT_EXT))
-      need_resolve = false;
+      need_meta_resolve = false;
 
    memset(render, 0, sizeof(*render));
 
-   if (need_resolve) {
+   if (need_meta_resolve) {
       kk_meta_resolve_rendering(cmd, &vk_render);
    }
 }
@@ -721,8 +792,17 @@ kk_flush_vp_state(struct kk_cmd_buffer *cmd)
       viewports[i].width = vp->width;
       viewports[i].height = -vp->height;
 
-      viewports[i].znear = vp->minDepth;
-      viewports[i].zfar = vp->maxDepth;
+      if (dyn->rs.depth_clamp_enable ||
+          vk_rasterization_state_depth_clip_enable(&dyn->rs)) {
+         viewports[i].znear = vp->minDepth;
+         viewports[i].zfar = vp->maxDepth;
+      } else {
+         /* When clamp and clip are disabled, we set the viewport Z range to
+          * [0, 1] to disable hardware clamping. The viewport transform will be
+          * applied in shader */
+         viewports[i].znear = 0.f;
+         viewports[i].zfar = 1.f;
+      }
    }
 
    mtl_set_viewports(encoder, viewports, count);
@@ -874,15 +954,16 @@ kk_flush_render_pass(struct kk_cmd_buffer *cmd)
          /* Apply the store ops before the new color map is stored. */
          kk_apply_attachment_store_ops(cmd, true);
 
-         kk_set_color_attachments(cmd->state.gfx.render_pass_descriptor, render,
-                                  dyn, true);
+         kk_set_color_attachments(
+            cmd->state.gfx.render_pass_descriptor, render, dyn, true,
+            cmd->state.gfx.render.rendering_to_whole_framebuffer);
          needs_restart = true;
          color_attachment_map_changed = true;
       }
    }
    /* If render pass state changes and the pass is currently active, end the
     * current encoder and prepare to restart it */
-   bool active_render = cmd->gfx.encoder != NULL;
+   bool active_render = cmd->metal.render != NULL;
    if (needs_restart && active_render) {
       if (!color_attachment_map_changed) {
          /* Sample locations changed and color attachment map didn't. */
@@ -977,9 +1058,16 @@ kk_heap(struct kk_cmd_buffer *cmd)
    if (!cmd->uses_heap) {
       uint64_t addr = dev->heap->gpu;
 
-      /* Zeroing the allocated index frees everything */
+      /* Zeroing the allocated index frees everything. Force compute encoder
+       * since this path is only taken by tessellation and unroll which already
+       * force a compute encoder break */
+      mtl_compute_encoder *encoder = cs_get_compute(cmd);
       kk_cmd_write(cmd, (struct libkk_imm_write){
                            addr + offsetof(struct poly_heap, bottom), 0});
+
+      /* Ensure heap is set to 0 before we allocate anything. */
+      mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
+                                       MTL_STAGE_DISPATCH);
 
       cmd->uses_heap = true;
    }
@@ -1006,10 +1094,11 @@ struct kk_draw_command {
    bool indirect;
    bool indexed;
    bool restart;
+   bool flatshade_first;
+   uint8_t pad_[3];
    uint32_t predicate_count;
    enum kk_predicate_op predicate_op[2];
    uint32_t draw_count;
-   uint32_t pad_;
    uint64_t predicate_addr[2];
 
    union {
@@ -1169,6 +1258,9 @@ kk_upload_tess_params(struct kk_cmd_buffer *cmd, struct poly_tess_params *out,
 static void
 kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
 {
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+
    struct kk_graphics_state *gfx = &cmd->state.gfx;
    struct kk_descriptor_state *desc = &gfx->descriptors;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
@@ -1208,7 +1300,8 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
    /* We enable raster discard by setting scissor to size (0, 0) */
    if (!(dyn->rs.rasterizer_discard_enable || gfx->is_cull_front_and_back) &&
        (IS_DIRTY(VP_VIEWPORT_COUNT) || IS_DIRTY(VP_VIEWPORTS) ||
-        IS_DIRTY(VP_SCISSOR_COUNT) || IS_DIRTY(VP_SCISSORS)))
+        IS_DIRTY(VP_SCISSOR_COUNT) || IS_DIRTY(VP_SCISSORS) ||
+        IS_DIRTY(RS_DEPTH_CLAMP_ENABLE) || IS_DIRTY(RS_DEPTH_CLIP_ENABLE)))
       kk_flush_vp_state(cmd);
 
    if (IS_DIRTY(VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE)) {
@@ -1239,11 +1332,61 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
          mtl_set_depth_bias(enc, 0.0f, 0.0f, 0.0f);
    }
 
-   if (IS_DIRTY(RS_DEPTH_CLAMP_ENABLE)) {
-      enum mtl_depth_clip_mode mode = dyn->rs.depth_clamp_enable
-                                         ? MTL_DEPTH_CLIP_MODE_CLAMP
-                                         : MTL_DEPTH_CLIP_MODE_CLIP;
+   if (IS_DIRTY(RS_DEPTH_CLAMP_ENABLE) || IS_DIRTY(RS_DEPTH_CLIP_ENABLE) ||
+       IS_DIRTY(VP_VIEWPORT_COUNT) || IS_DIRTY(VP_VIEWPORTS)) {
+      /* Mapping of Vulkan clamp/clip combinations to Metal:
+       * - Clamp Off, Clip Off:
+       *     Use Metal's clamp mode with the viewport depth range set to [0, 1],
+       *     effectively disabling both clip and clamp. Emulate the viewport Z
+       *     transform in the vertex shader.
+       * - Clamp Off, Clip On:
+       *     Exact match to Metal's clip mode.
+       * - Clamp On, Clip Off:
+       *     Exact match to Metal's clamp mode.
+       * - Clamp On, Clip On:
+       *     Use Metal's clip mode, and emulate clamp in the fragment shader.
+       */
+      bool clamp = dyn->rs.depth_clamp_enable;
+      bool clip = vk_rasterization_state_depth_clip_enable(&dyn->rs);
+
+      enum mtl_depth_clip_mode mode =
+         clip ? MTL_DEPTH_CLIP_MODE_CLIP : MTL_DEPTH_CLIP_MODE_CLAMP;
       mtl_set_depth_clip_mode(enc, mode);
+
+      desc->root.draw.emulate_depth_clamp = clamp && clip;
+      desc->root.draw.emulate_viewport_z = !clamp && !clip;
+      if (desc->root.draw.emulate_depth_clamp ||
+          desc->root.draw.emulate_viewport_z) {
+         /* Ensure viewport depth ranges are up to date now, since we are
+          * dirtying root anyway. */
+         for (uint32_t i = 0; i < dyn->vp.viewport_count; i++) {
+            const VkViewport *vp = &dyn->vp.viewports[i];
+
+            /* These are mutually exclusive. Clamp expects the actual minimum
+             * and maximum values, viewport transform supports inverted depth */
+            if (desc->root.draw.emulate_depth_clamp) {
+               desc->root.draw.viewport_z_range[i * 2] =
+                  MIN2(vp->minDepth, vp->maxDepth);
+               desc->root.draw.viewport_z_range[i * 2 + 1] =
+                  MAX2(vp->minDepth, vp->maxDepth);
+            } else {
+               desc->root.draw.viewport_z_range[i * 2] = vp->minDepth;
+               desc->root.draw.viewport_z_range[i * 2 + 1] = vp->maxDepth;
+            }
+         }
+      }
+      desc->root_dirty = true;
+   }
+
+   if ((IS_DIRTY(DS_DEPTH_BOUNDS_TEST_ENABLE) ||
+        IS_DIRTY(DS_DEPTH_BOUNDS_TEST_BOUNDS)) &&
+       pdev->vk.supported_features.depthBounds) {
+      /* Metal does not expose a separate flag for enabling the depth bounds
+       * test. Instead, it treats [0, 1] as disabled. */
+      bool bounds_enable = dyn->ds.depth.bounds_test.enable;
+      float bounds_min = bounds_enable ? dyn->ds.depth.bounds_test.min : 0.0f;
+      float bounds_max = bounds_enable ? dyn->ds.depth.bounds_test.max : 1.0f;
+      mtl_set_depth_test_bounds(enc, bounds_min, bounds_max);
    }
 
    if (IS_DIRTY(DS_STENCIL_REFERENCE))
@@ -1433,7 +1576,7 @@ kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
                        : 0u,
       .in_el_size_B = data->index_buffer_el_size_B,
       .out_el_size_B = 4u,
-      .flatshade_first = true,
+      .flatshade_first = data->flatshade_first,
       .mode = data->prim,
    };
 
@@ -1449,6 +1592,7 @@ kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    data->indirect = true;
    data->indexed = true;
    data->restart = false;
+   data->flatshade_first = true;
    data->indirect_command.addr = out_draws.gpu;
    data->indirect_command.stride = sizeof(VkDrawIndexedIndirectCommand);
 
@@ -1562,7 +1706,7 @@ kk_dispatch_draw(struct kk_cmd_buffer *cmd, struct kk_draw_data data)
 }
 
 static bool
-requires_index_promotion(const struct kk_draw_command *data)
+requires_unroll_index_promotion(const struct kk_draw_command *data)
 {
    if (!data->indexed)
       return false;
@@ -1597,10 +1741,13 @@ requires_unroll_robustness(struct kk_cmd_buffer *cmd,
       return false;
 
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct kk_physical_device *pdev = kk_device_physical(dev);
 
    /* KK_WORKAROUND_12, KK_WORKAROUND_13 */
-   bool workaround_12 = !(dev->disabled_workarounds & BITFIELD64_BIT(12));
-   bool workaround_13 = !(dev->disabled_workarounds & BITFIELD64_BIT(13));
+   bool workaround_12 =
+      !(pdev->settings.disabled_workarounds & BITFIELD64_BIT(12));
+   bool workaround_13 =
+      !(pdev->settings.disabled_workarounds & BITFIELD64_BIT(13));
 
    /* Do nothing if both workarounds are disabled */
    if (!workaround_12 && !workaround_13)
@@ -1669,6 +1816,38 @@ requires_unroll_restart(struct kk_cmd_buffer *cmd,
     * restart index is set by user */
    uint32_t default_idx = BITFIELD_RANGE(0, data->index_buffer_el_size_B * 8);
    return data->restart_index != default_idx;
+}
+
+static bool
+requires_unroll_flatshade(struct kk_cmd_buffer *cmd,
+                          struct kk_draw_command *data)
+{
+   struct kk_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
+
+   /* If the last vertex is provoking and the fragment shader uses flat inputs,
+    * we need to unroll to correct the vertex order */
+   return !data->flatshade_first && fs && fs->info.fs.uses_flat_varyings;
+}
+
+static bool
+requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+{
+   /* No need to unroll for tessellation. Robustness is handled by tessellator,
+    * restart is not supported for patch lists, and flat-shading does not have a
+    * well-defined vertex used when tessellating. */
+   bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
+   if (tess)
+      return false;
+
+   /* Metal does not support triangle fans */
+   if (data->prim == MESA_PRIM_TRIANGLE_FAN)
+      return true;
+
+   /* Check for remaining unroll conditions */
+   return requires_unroll_index_promotion(data) ||
+          requires_unroll_robustness(cmd, data) ||
+          requires_unroll_restart(cmd, data) ||
+          requires_unroll_flatshade(cmd, data);
 }
 
 static uint64_t
@@ -1797,7 +1976,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
 
    /* First launch the VS and TCS */
 
-   mtl_compute_encoder *enc = cs_get_compute(cmd, true);
+   mtl_compute_encoder *enc = cs_get_compute(cmd);
    {
       mtl_compute_pipeline_state *pipeline = vs->pipeline.gfx.pre_render[0];
       struct mtl_size local_size = {64, 1, 1};
@@ -1878,11 +2057,14 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
 static void
 kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 {
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+
    kk_flush_gfx_state(cmd);
 
-   data->restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
-   data->restart_index =
-      cmd->vk.dynamic_graphics_state.ia.primitive_restart_index;
+   data->restart = dyn->ia.primitive_restart_enable;
+   data->restart_index = dyn->ia.primitive_restart_index;
+   data->flatshade_first =
+      dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
 
    /* Convert to indirect and process predicates. Skip draw if we fail. */
    if (data->predicate_count > 0 && !kk_predicate_draws(cmd, data))
@@ -1890,13 +2072,8 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 
    bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
 
-   /* Unroll geometry. Skip draw if we fail. No need to unroll if tessellation
-    * is present since it also handles unrolling. */
-   bool requires_unroll = !tess && (data->prim == MESA_PRIM_TRIANGLE_FAN ||
-                                    requires_index_promotion(data) ||
-                                    requires_unroll_robustness(cmd, data) ||
-                                    requires_unroll_restart(cmd, data));
-   if (requires_unroll && !kk_unroll_geometry(cmd, data))
+   /* Unroll geometry. Skip draw if we fail. */
+   if (requires_unroll(cmd, data) && !kk_unroll_geometry(cmd, data))
       return;
 
    for (uint32_t i = 0; i < data->draw_count; i++) {
@@ -1907,6 +2084,12 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 
       if (tess)
          draw_data = kk_launch_tess(cmd, draw_data);
+
+      /* TODO_KOSMICKRISP Remove this once unroll, tess and any compute does not
+       * split render pass */
+      if (cmd->state.gfx.need_to_start_render_pass)
+         kk_flush_gfx_state(cmd);
+
       kk_dispatch_draw(cmd, draw_data);
    }
 }

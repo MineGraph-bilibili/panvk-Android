@@ -82,7 +82,7 @@ if [ -n "${HWCI_KERNEL_MODULES:-}" ]; then
 	LAVA_EXTRA_OVERLAYS+=(
 		- append-overlay
 		  --name=kernel-modules
-		  --url="${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}/modules.tar"
+		  --url="${KERNEL_IMAGE_BASE}/${ARCH}/modules.tar"
 		  --path="/"
 		  --format=tar
 	)
@@ -162,7 +162,7 @@ lava-job-submitter \
 	--dump-yaml \
 	--pipeline-info "$CI_JOB_NAME: $CI_PIPELINE_URL on $CI_COMMIT_REF_NAME ${CI_NODE_INDEX}/${CI_NODE_TOTAL}" \
 	--rootfs-url "${ROOTFS_URL}" \
-	--kernel-url-prefix "${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}" \
+	--kernel-url-prefix "${KERNEL_IMAGE_BASE}/${ARCH}" \
 	--dtb-filename "${DTB}" \
 	--env-file dut-env-vars.sh \
 	--jwt-file "${S3_JWT_FILE}" \

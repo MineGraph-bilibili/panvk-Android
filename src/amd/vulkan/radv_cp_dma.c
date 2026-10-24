@@ -207,7 +207,7 @@ radv_cp_dma_prepare(struct radv_cmd_buffer *cmd_buffer, uint64_t byte_count, uin
     * Also wait for the previous CP DMA operations.
     */
    if (cmd_buffer->state.flush_bits) {
-      radv_emit_cache_flush(cmd_buffer);
+      radv_emit_cache_flush(cmd_buffer, false);
       *flags |= CP_DMA_RAW_WAIT;
    }
 

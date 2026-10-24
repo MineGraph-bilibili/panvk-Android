@@ -88,6 +88,7 @@ class reference_frames_tracker_av1 : public reference_frames_tracker
    // Declare other methods
    reference_frames_tracker_av1( void *logId,
                                  struct pipe_video_codec *codec,
+                                 eAVEncAV1VProfile av1Profile,
                                  uint32_t textureWidth,
                                  uint32_t textureHeight,
                                  uint32_t gopLength,

@@ -65,10 +65,6 @@ pipe_loader_probe(struct pipe_loader_device **devs, int ndev, bool with_zink)
       n += pipe_loader_drm_zink_probe(&devs[n], MAX2(0, ndev - n));
 #endif
 
-#if defined(HAVE_PAN_KMOD_KBASE)
-   n += pipe_loader_kbase_probe(&devs[n], MAX2(0, ndev - n));
-#endif
-
    return n;
 }
 

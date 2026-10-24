@@ -64,42 +64,6 @@ vlVaCreateSurfaces(VADriverContextP ctx, int width, int height, int format,
                               NULL, 0);
 }
 
-static void
-vlVaRemoveDpbSurface(vlVaSurface *surf, VASurfaceID id)
-{
-   assert(surf->ctx->templat.entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE);
-
-   switch (u_reduce_video_profile(surf->ctx->templat.profile)) {
-   case PIPE_VIDEO_FORMAT_MPEG4_AVC:
-      for (unsigned i = 0; i < surf->ctx->desc.h264enc.dpb_size; i++) {
-         if (surf->ctx->desc.h264enc.dpb[i].id == id) {
-            memset(&surf->ctx->desc.h264enc.dpb[i], 0, sizeof(surf->ctx->desc.h264enc.dpb[i]));
-            break;
-         }
-      }
-      break;
-   case PIPE_VIDEO_FORMAT_HEVC:
-      for (unsigned i = 0; i < surf->ctx->desc.h265enc.dpb_size; i++) {
-         if (surf->ctx->desc.h265enc.dpb[i].id == id) {
-            memset(&surf->ctx->desc.h265enc.dpb[i], 0, sizeof(surf->ctx->desc.h265enc.dpb[i]));
-            break;
-         }
-      }
-      break;
-   case PIPE_VIDEO_FORMAT_AV1:
-      for (unsigned i = 0; i < surf->ctx->desc.av1enc.dpb_size; i++) {
-         if (surf->ctx->desc.av1enc.dpb[i].id == id) {
-            memset(&surf->ctx->desc.av1enc.dpb[i], 0, sizeof(surf->ctx->desc.av1enc.dpb[i]));
-            break;
-         }
-      }
-      break;
-   default:
-      assert(false);
-      break;
-   }
-}
-
 void
 vlVaDestroySurface(vlVaDriver *drv, vlVaSurface *surf)
 {
@@ -107,16 +71,16 @@ vlVaDestroySurface(vlVaDriver *drv, vlVaSurface *surf)
       surf->buffer->destroy(surf->buffer);
    if (surf->pipe_fence)
       drv->pipe->screen->fence_reference(drv->pipe->screen, &surf->pipe_fence, NULL);
-   if (surf->ctx) {
-      assert(_mesa_set_search(surf->ctx->surfaces, surf));
-      _mesa_set_remove_key(surf->ctx->surfaces, surf);
-      if (surf->fence && surf->ctx->decoder && surf->ctx->decoder->destroy_fence) {
-         surf->ctx->decoder->destroy_fence(surf->ctx->decoder, surf->fence);
-         surf->fence = NULL;
-      }
+   if (surf->fence) {
+      assert(surf->codec && surf->codec->destroy_fence);
+      if (surf->codec && surf->codec->destroy_fence)
+         surf->codec->destroy_fence(surf->codec, surf->fence);
    }
-   if (surf->fence && drv->proc && drv->proc->destroy_fence)
-      drv->proc->destroy_fence(drv->proc, surf->fence);
+   pipe_video_codec_reference(&surf->codec, NULL);
+   if (surf->dpb_id)
+      *surf->dpb_id = 0;
+   if (surf->dpb_buffer)
+      *surf->dpb_buffer = NULL;
    if (surf->coded_buf)
       surf->coded_buf->coded_surf = NULL;
    util_dynarray_fini(&surf->subpics);
@@ -140,8 +104,6 @@ vlVaDestroySurfaces(VADriverContextP ctx, VASurfaceID *surface_list, int num_sur
          mtx_unlock(&drv->mutex);
          return VA_STATUS_ERROR_INVALID_SURFACE;
       }
-      if (surf->ctx && surf->is_dpb)
-         vlVaRemoveDpbSurface(surf, surface_list[i]);
       vlVaDestroySurface(drv, surf);
       handle_table_remove(drv->htab, surface_list[i]);
    }
@@ -154,8 +116,8 @@ static VAStatus
 _vlVaSyncSurface(VADriverContextP ctx, VASurfaceID render_target, uint64_t timeout_ns)
 {
    vlVaDriver *drv;
-   vlVaContext *context;
    vlVaSurface *surf;
+   struct pipe_video_codec *codec;
    struct pipe_fence_handle *fence;
 
    if (!ctx)
@@ -173,10 +135,10 @@ _vlVaSyncSurface(VADriverContextP ctx, VASurfaceID render_target, uint64_t timeo
    }
 
    if (surf->coded_buf) {
-      context = surf->coded_buf->ctx;
+      codec = surf->coded_buf->codec;
       fence = surf->coded_buf->fence;
    } else {
-      context = surf->ctx;
+      codec = surf->codec;
       fence = surf->fence;
    }
 
@@ -195,15 +157,21 @@ _vlVaSyncSurface(VADriverContextP ctx, VASurfaceID render_target, uint64_t timeo
       return VA_STATUS_SUCCESS;
    }
 
-   if (!context || !context->decoder) {
+   if (!codec) {
       mtx_unlock(&drv->mutex);
       return VA_STATUS_ERROR_INVALID_CONTEXT;
    }
 
-   mtx_lock(&context->mutex);
+   struct pipe_video_codec *tmp_codec = NULL;
+   pipe_video_codec_reference(&tmp_codec, codec);
+
+   /* Unlock mutex while waiting */
    mtx_unlock(&drv->mutex);
-   int ret = context->decoder->fence_wait(context->decoder, fence, timeout_ns);
-   mtx_unlock(&context->mutex);
+
+   int ret = tmp_codec->fence_wait(tmp_codec, fence, timeout_ns);
+   mtx_lock(&drv->mutex);
+   pipe_video_codec_reference(&tmp_codec, NULL);
+   mtx_unlock(&drv->mutex);
    return ret ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_TIMEDOUT;
 }
 
@@ -834,8 +802,10 @@ vlVaSwitchToProtectedContext(vlVaDriver *drv)
          .profile = PIPE_VIDEO_PROFILE_UNKNOWN,
          .entrypoint = PIPE_VIDEO_ENTRYPOINT_PROCESSING,
       };
-      drv->proc->destroy(drv->proc);
+      pipe_video_codec_reference(&drv->proc, NULL);
       drv->proc = vl_create_proc(drv->pipe, &templat);
+      if (drv->proc)
+         pipe_reference_init(&drv->proc->reference, 1);
    }
 }
 
@@ -1254,8 +1224,6 @@ vlVaExportSurfaceHandle(VADriverContextP ctx,
    desc->height = surf->templat.height;
    desc->num_objects = 0;
 
-   bool supports_contiguous_planes = screen->resource_get_param && surf->buffer->contiguous_planes;
-
    for (p = 0; p < ARRAY_SIZE(desc->objects); p++) {
       struct winsys_handle whandle;
       struct pipe_resource *resource;
@@ -1272,20 +1240,24 @@ vlVaExportSurfaceHandle(VADriverContextP ctx,
          goto fail;
       }
 
-      /* If the driver stores all planes contiguously in memory, only one
-       * handle needs to be exported. resource_get_param is used to obtain
-       * pitch and offset for each layer. */
-      if (!desc->num_objects || !supports_contiguous_planes) {
-         memset(&whandle, 0, sizeof(whandle));
-         whandle.type = WINSYS_HANDLE_TYPE_FD;
+      memset(&whandle, 0, sizeof(whandle));
+      whandle.type = WINSYS_HANDLE_TYPE_FD;
 
-         if (!screen->resource_get_handle(screen, drv->pipe, resource,
-                                          &whandle, usage)) {
-            ret = VA_STATUS_ERROR_INVALID_SURFACE;
-            goto fail;
-         }
+      if (!screen->resource_get_handle(screen, drv->pipe, resource,
+                                       &whandle, usage)) {
+         ret = VA_STATUS_ERROR_INVALID_SURFACE;
+         goto fail;
+      }
 
+      /* If this plane shares storage with previous one, we can reuse
+       * the existing object (fd) instead of adding new one.
+       */
+      bool same_object = desc->num_objects &&
+          os_same_file_description(desc->objects[desc->num_objects - 1].fd,
+                                   whandle.handle) == 0;
+      if (!same_object) {
          desc->objects[desc->num_objects].fd = (int) whandle.handle;
+
          /* As per VADRMPRIMESurfaceDescriptor documentation, size must be the
          * "Total size of this object (may include regions which are not part
          * of the surface)."" */
@@ -1293,52 +1265,20 @@ vlVaExportSurfaceHandle(VADriverContextP ctx,
          desc->objects[desc->num_objects].drm_format_modifier = whandle.modifier;
 
          desc->num_objects++;
+      } else {
+         close(whandle.handle);
       }
 
       if (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) {
          desc->layers[0].object_index[p] = desc->num_objects - 1;
-
-         if (supports_contiguous_planes) {
-            uint64_t value;
-            if (!screen->resource_get_param(screen, drv->pipe, resource, 0, 0, 0,
-                                            PIPE_RESOURCE_PARAM_STRIDE, 0, &value)) {
-               ret = VA_STATUS_ERROR_INVALID_SURFACE;
-               goto fail;
-            }
-            desc->layers[0].pitch[p] = value;
-            if (!screen->resource_get_param(screen, drv->pipe, resource, 0, 0, 0,
-                                            PIPE_RESOURCE_PARAM_OFFSET, 0, &value)) {
-               ret = VA_STATUS_ERROR_INVALID_SURFACE;
-               goto fail;
-            }
-            desc->layers[0].offset[p] = value;
-         } else {
-            desc->layers[0].pitch[p] = whandle.stride;
-            desc->layers[0].offset[p] = whandle.offset;
-         }
+         desc->layers[0].pitch[p] = whandle.stride;
+         desc->layers[0].offset[p] = whandle.offset;
       } else {
-         desc->layers[p].drm_format      = drm_format;
-         desc->layers[p].num_planes      = 1;
+         desc->layers[p].drm_format = drm_format;
+         desc->layers[p].num_planes = 1;
          desc->layers[p].object_index[0] = desc->num_objects - 1;
-
-         if (supports_contiguous_planes) {
-            uint64_t value;
-            if (!screen->resource_get_param(screen, drv->pipe, resource, 0, 0, 0,
-                                            PIPE_RESOURCE_PARAM_STRIDE, 0, &value)) {
-               ret = VA_STATUS_ERROR_INVALID_SURFACE;
-               goto fail;
-            }
-            desc->layers[p].pitch[0] = value;
-            if (!screen->resource_get_param(screen, drv->pipe, resource, 0, 0, 0,
-                                            PIPE_RESOURCE_PARAM_OFFSET, 0, &value)) {
-               ret = VA_STATUS_ERROR_INVALID_SURFACE;
-               goto fail;
-            }
-            desc->layers[p].offset[0] = value;
-         } else {
-            desc->layers[p].pitch[0] = whandle.stride;
-            desc->layers[p].offset[0] = whandle.offset;
-         }
+         desc->layers[p].pitch[0] = whandle.stride;
+         desc->layers[p].offset[0] = whandle.offset;
       }
    }
 

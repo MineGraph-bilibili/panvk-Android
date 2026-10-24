@@ -16,11 +16,14 @@ enum mtl_sampler_address_mode;
 enum mtl_sampler_border_color;
 enum mtl_sampler_min_mag_filter;
 enum mtl_sampler_mip_filter;
+enum mtl_sampler_reduction_mode;
 enum mtl_compare_function;
 enum mtl_winding;
 enum mtl_cull_mode;
 enum mtl_index_type;
 enum mtl_command_queue_error;
+enum mtl_depth_resolve_filter;
+enum mtl_stencil_resolve_filter;
 
 struct VkOffset3D;
 struct VkExtent3D;
@@ -32,9 +35,11 @@ enum VkSamplerAddressMode;
 enum VkBorderColor;
 enum VkFilter;
 enum VkSamplerMipmapMode;
+enum VkSamplerReductionMode;
 enum VkCompareOp;
 enum VkFrontFace;
 enum VkCullModeFlagBits;
+enum VkResolveModeFlagBits;
 
 /* STRUCTS */
 struct mtl_origin vk_offset_3d_to_mtl_origin(const struct VkOffset3D *offset);
@@ -68,12 +73,24 @@ vk_filter_to_mtl_sampler_min_mag_filter(enum VkFilter filter);
 enum mtl_sampler_mip_filter
 vk_sampler_mipmap_mode_to_mtl_sampler_mip_filter(enum VkSamplerMipmapMode mode);
 
+enum mtl_sampler_reduction_mode
+vk_sampler_reduction_mode_to_mtl_sampler_reduction_mode(
+   enum VkSamplerReductionMode mode);
+
 enum mtl_compare_function
 vk_compare_op_to_mtl_compare_function(enum VkCompareOp op);
 
 enum mtl_winding vk_front_face_to_mtl_winding(enum VkFrontFace face);
 
 enum mtl_cull_mode vk_front_face_to_mtl_cull_mode(enum VkCullModeFlagBits mode);
+
+enum mtl_depth_resolve_filter
+vk_resolve_mode_to_mtl_depth_resolve_filter(
+   enum VkResolveModeFlagBits resolve_mode);
+
+enum mtl_stencil_resolve_filter
+vk_resolve_mode_to_mtl_stencil_resolve_filter(
+   enum VkResolveModeFlagBits resolve_mode);
 
 enum mtl_index_type index_size_in_bytes_to_mtl_index_type(unsigned bytes);
 

@@ -25,6 +25,7 @@
 #include "util/format/u_formats.h"
 #include "util/hash_table.h"
 #include "util/simple_mtx.h"
+#include "util/u_dynarray.h"
 #include "util/u_blitter.h"
 #include "util/u_printf.h"
 
@@ -252,6 +253,16 @@ struct panfrost_context {
    struct panfrost_perfetto_state perfetto;
 #endif
    uint32_t submit_count; /* monotonic submit ID for perfetto */
+
+   /* Used to track in-flight BO accesses done by this context (job
+    * accessing those BOs have been submitted, but we don't know if
+    * they completed yet).
+    * The array is indexed by BO handles and is never shrunk.
+    * Each uint32_t entry encodes the pending access type (R/W) and the
+    * BO seqno at the time of this access. The seqno allows us to
+    * detect stale entries when a BO or its handle is recycled.
+    */
+   struct util_dynarray bo_access;
 };
 
 /* Corresponds to the CSO */
@@ -610,9 +621,57 @@ void panfrost_set_batch_masks_blend(struct panfrost_batch *batch);
 void panfrost_set_batch_masks_zs(struct panfrost_batch *batch);
 
 void panfrost_track_image_access(struct panfrost_batch *batch,
-                                 mesa_shader_stage stage,
                                  struct pipe_image_view *image);
 
 void panfrost_context_reinit(struct panfrost_context *ctx);
+
+static inline void
+panfrost_context_report_bo_access(struct panfrost_context *ctx,
+                                  struct panfrost_bo *bo, uint32_t access)
+{
+   /* Skip if per-context tracking is not requested or if the BO is shared. */
+   if (!(access & PAN_BO_ACCESS_PER_CTX_TRACKING) || (bo->flags & PAN_BO_SHARED))
+      return;
+
+   ASSERTED void *new_bo_access;
+   uint32_t handle = panfrost_bo_handle(bo);
+
+   new_bo_access = util_dynarray_resize_zero(&ctx->bo_access, uint32_t, handle + 1);
+   if (!new_bo_access)
+      return;
+
+   uint32_t *access_ptr = util_dynarray_element(&ctx->bo_access, uint32_t, handle);
+   uint32_t seqno = *access_ptr >> 2;
+   uint32_t pending = *access_ptr & BITFIELD_MASK(2);
+
+   static_assert(PAN_BO_ACCESS_RW == BITFIELD_MASK(2),
+                 "PAN_BO_ACCESS_RW expected to cover the lower 2-bits");
+
+   access &= PAN_BO_ACCESS_RW;
+
+   /* We don't have an easy way to know when the BO leaves the context,
+    * nor do we have a way to get back to contexts that might have been
+    * using the BO when the resource is destroyed. This means we're left
+    * with potential stale data in the bo_access array, which we check
+    * validity of based on a per-BO seqno that gets incremented every
+    * time a BO is allocated (handle re-allocated, or BO taken from the
+    * BO cache, which forces a wait-on-everything). If that happens,
+    * the pending accesses are reset, and the seqno gets updated to match
+    * the BO seqno.
+    */
+   if (seqno != bo->seqno)
+      seqno = bo->seqno;
+   else
+      access |= pending;
+
+   /* We lose the 2 MSB of the seqno here, but 30 bits should be more
+    * than enough to prevent spurious wrap around messing up with the
+    * stale entry detection. Worst case scenario, we really have 2^30
+    * rotations on this handle, and we wrongly consider the entry valid
+    * and wait when we could have skipped the wait => that's not the end
+    * of the world.
+    */
+   *access_ptr = (seqno << 2) | access;
+}
 
 #endif

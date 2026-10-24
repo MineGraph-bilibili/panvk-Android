@@ -1,7 +1,8 @@
 <!ELEMENT driconf      (device+)>
 <!ELEMENT device       (application | engine)*>
 <!ATTLIST device       driver CDATA #IMPLIED
-                       device CDATA #IMPLIED>
+                       device_name CDATA #IMPLIED
+                       device_version_regexp CDATA #IMPLIED>
 <!ELEMENT application  (option | shader)+>
 <!ATTLIST application  name CDATA #REQUIRED
                        executable CDATA #IMPLIED

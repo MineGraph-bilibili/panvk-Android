@@ -264,7 +264,7 @@ vn_feedback_pool_alloc(struct vn_feedback_pool *pool,
    slot->type = type;
    slot->offset = offset;
    slot->buf_handle = fb_buf->buf_handle;
-   slot->data = fb_buf->data + offset;
+   slot->data = (char *)fb_buf->data + offset;
 
    return slot;
 }
@@ -998,7 +998,9 @@ vn_feedback_cmd_pools_init(struct vn_device *dev)
    if (VN_PERF(NO_SEMAPHORE_FEEDBACK) && VN_PERF(NO_QUERY_FEEDBACK))
       return VK_SUCCESS;
 
-   assert(dev->queue_family_count);
+   /* allowed in maintenance9 */
+   if (!dev->queue_family_count)
+      return VK_SUCCESS;
 
    fb_cmd_pools =
       vk_zalloc(alloc, sizeof(*fb_cmd_pools) * dev->queue_family_count,

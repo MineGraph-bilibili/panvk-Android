@@ -142,6 +142,11 @@ struct pvr_device {
 
    struct vk_sync *presignaled_sync;
 
+   struct {
+      struct pvr_bo *zero_bo;
+      struct pvr_bo *null_bo;
+   } null_state;
+
    struct pvr_border_color_table *border_color_table;
 
    simple_mtx_t rs_mtx;

@@ -4,6 +4,7 @@
  */
 
 #include "ethosu_device.h"
+#include "ethosu_encode.h"
 #include "ethosu_ml.h"
 #include "ethosu_public.h"
 
@@ -34,6 +35,7 @@ ethosu_destroy_screen(struct pipe_screen *pscreen)
 {
    struct ethosu_screen *screen = ethosu_screen(pscreen);
 
+   ethosu_weight_cache_destroy(&screen->ml_device);
    ralloc_free(screen);
 }
 
@@ -239,6 +241,7 @@ set_device_arch(struct ethosu_ml_device *device, bool is_u65)
       device->ofm_ublock.height = 2;
       device->ofm_ublock.depth = 8;
       device->max_concurrent_blocks = 3;
+      device->ofm_scale_bits = 32;
    } else {
       device->ifm_ublock.width = 4;
       device->ifm_ublock.height = 4;
@@ -247,12 +250,14 @@ set_device_arch(struct ethosu_ml_device *device, bool is_u65)
       device->ofm_ublock.height = 1;
       device->ofm_ublock.depth = 8;
       device->max_concurrent_blocks = 7;
+      device->ofm_scale_bits = 31;
    }
 }
 
 static void
 ethosu_ml_device_destroy(struct pipe_ml_device *pdev)
 {
+   ethosu_weight_cache_destroy(ethosu_ml_device(pdev));
    ralloc_free(pdev);
 }
 

@@ -173,6 +173,9 @@ TexInstr::do_print(std::ostream& os) const
    os << (m_tex_flags.test(y_unnormalized) ? "U" : "N");
    os << (m_tex_flags.test(z_unnormalized) ? "U" : "N");
    os << (m_tex_flags.test(w_unnormalized) ? "U" : "N");
+
+   if (m_tex_flags.test(alt_const))
+      os << " AC";
 }
 
 const char *
@@ -582,9 +585,7 @@ TexInstr::emit_buf_txf(nir_tex_instr *tex, Inputs& src, Shader& shader)
    if (src.sampler_offset)
       tex_offset = shader.emit_load_to_register(src.sampler_offset);
 
-   RegisterVec4 buf_dest = shader.chip_class() >= ISA_CC_EVERGREEN ?
-                         vf.dest_vec4(tex->def, pin_group) :
-                         vf.temp_vec4(pin_group);
+   RegisterVec4 buf_dest = vf.dest_vec4(tex->def, pin_group);
 
    auto ir = new LoadFromBuffer(buf_dest,
                                 {0, 1, 2, 3},
@@ -599,30 +600,6 @@ TexInstr::emit_buf_txf(nir_tex_instr *tex, Inputs& src, Shader& shader)
 
 
    shader.emit_instruction(ir);
-
-   if (shader.chip_class() < ISA_CC_EVERGREEN) {
-      auto tmp_w = vf.temp_register();
-      int buf_sel = R600_SHADER_BUFFER_INFO_SEL + 2 * tex->texture_index;
-      for (int i = 0; i < 4; ++i) {
-         auto dst  = vf.dest(tex->def, i, pin_free);
-
-         auto d = i < 3 ? dst : tmp_w;
-         shader.emit_instruction(
-            new AluInstr(op2_and_int,
-                         d,
-                         buf_dest[i],
-                         vf.uniform(buf_sel, i, R600_BUFFER_INFO_CONST_BUFFER),
-                               AluInstr::write));
-
-         if (i == 3)
-            shader.emit_instruction(
-               new AluInstr(op2_or_int,
-                            dst,
-                            tmp_w,
-                            vf.uniform(buf_sel + 1, 0, R600_BUFFER_INFO_CONST_BUFFER),
-                            AluInstr::write));
-      }
-   }
 
    return true;
 }
@@ -1259,5 +1236,49 @@ LowerTexToBackend::get_src_coords(nir_tex_instr *tex,
 
    return unnormalized_mask;
 }
+
+class LowerTxfOnPreEG : public NirLowerInstruction {
+
+private:
+   bool filter(const nir_instr *instr) const override;
+   nir_def *lower(nir_instr *instr) override;
+};
+
+bool
+LowerTxfOnPreEG::filter(const nir_instr *instr) const
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+
+   auto tex = nir_instr_as_tex(instr);
+   return tex->sampler_dim == GLSL_SAMPLER_DIM_BUF &&
+          tex->op == nir_texop_txf;
+}
+
+nir_def *LowerTxfOnPreEG::lower(nir_instr *instr)
+{
+   auto tex = nir_instr_as_tex(instr);
+
+   auto buf_id = nir_imm_int(b, R600_BUFFER_INFO_CONST_BUFFER);
+   auto data_offset = 2 * tex->texture_index + R600_BUFFER_INFO_OFFSET / 16;
+
+   auto mask = nir_load_ubo_vec4(b, 4, 32, buf_id, nir_imm_int(b, data_offset));
+   auto mask2 = nir_load_ubo_vec4(b, 4, 32, buf_id, nir_imm_int(b, data_offset + 1));
+
+   auto part1 = nir_iand(b, &tex->def, mask);
+   auto part2 = nir_ior(b, nir_channel(b, part1, 3), nir_channel(b, mask2, 0));
+
+   return nir_vec4(b, nir_channel(b, part1, 0),
+                   nir_channel(b, part1, 1),
+                   nir_channel(b, part1, 2),
+                   part2);
+}
+
+bool
+r600_nir_lower_buf_txf_pre_eg(nir_shader *shader)
+{
+   return LowerTxfOnPreEG().run(shader);
+}
+
 
 } // namespace r600

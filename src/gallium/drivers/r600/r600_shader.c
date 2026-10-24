@@ -17,12 +17,6 @@
 #include "sfn/sfn_nir.h"
 
 #include "pipe/p_shader_tokens.h"
-#include "tgsi/tgsi_parse.h"
-#include "tgsi/tgsi_scan.h"
-#include "tgsi/tgsi_dump.h"
-#include "tgsi/tgsi_from_mesa.h"
-#include "nir/tgsi_to_nir.h"
-#include "nir/nir_to_tgsi_info.h"
 #include "compiler/nir/nir.h"
 #include "util/macros.h"
 #include "util/u_bitcast.h"
@@ -138,16 +132,14 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 	int r;
 	const nir_shader_compiler_options *nir_options =
 		ctx->screen->nir_options[shader->shader.processor_type];
-	if (!sel->nir && !(sel->ir_type == PIPE_SHADER_IR_TGSI)) {
+	if (!sel->nir) {
 		assert(sel->nir_blob);
 		struct blob_reader blob_reader;
 		blob_reader_init(&blob_reader, sel->nir_blob, sel->nir_blob_size);
 		sel->nir = nir_deserialize(NULL, nir_options, &blob_reader);
 	}
 
-	int processor = sel->ir_type == PIPE_SHADER_IR_TGSI ?
-		tgsi_get_processor_type(sel->tokens):
-		sel->nir->info.stage;
+	int processor = sel->nir->info.stage;
 	
 	bool dump = r600_can_dump_shader(&rctx->screen->b, processor);
 
@@ -157,21 +149,7 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 	
 	{
 		glsl_type_singleton_init_or_ref();
-		if (sel->ir_type == PIPE_SHADER_IR_TGSI) {
-			ralloc_free(sel->nir);
-			if (sel->nir_blob) {
-				free(sel->nir_blob);
-				sel->nir_blob = NULL;
-			}
-			sel->nir = tgsi_to_nir(sel->tokens, ctx->screen, true);
-			/* Lower int64 ops because we have some r600 built-in shaders that use it */
-			if (nir_options->lower_int64_options) {
-				NIR_PASS(_, sel->nir, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
-				NIR_PASS(_, sel->nir, nir_lower_int64);
-			}
-			NIR_PASS(_, sel->nir, nir_lower_flrp, ~0, false);
-		}
-		nir_tgsi_scan_shader(sel->nir, &sel->info, true);
+		assert(sel->nir);
 
 		r = r600_shader_from_nir(rctx, shader, &key);
 
@@ -182,11 +160,6 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 	}
 	
 	if (dump) {
-		if (sel->ir_type == PIPE_SHADER_IR_TGSI) {
-			fprintf(stderr, "--TGSI--------------------------------------------------------\n");
-			tgsi_dump(sel->tokens, 0);
-		}
-		
 		if (sel->so.num_outputs) {
 			r600_dump_streamout(&sel->so);
 		}
@@ -207,7 +180,6 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 		fprintf(stderr, "______________________________________________________________\n");
 
                 print_shader_info(stderr, nshader++, &shader->shader);
-		print_pipe_info(stderr, &sel->info);
 	}
 
 	if (shader->gs_copy_shader) {
@@ -286,7 +258,7 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 				   shader->shader.bc.nstack);
 	}
 
-	if (!sel->nir_blob && sel->nir && sel->ir_type != PIPE_SHADER_IR_TGSI) {
+	if (!sel->nir_blob && sel->nir) {
 		struct blob blob;
 		blob_init(&blob);
 		nir_serialize(&blob, sel->nir, false);
@@ -297,7 +269,6 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 	}
 	ralloc_free(sel->nir);
 	sel->nir = NULL;
-
 	return 0;
 
 error:
@@ -562,76 +533,32 @@ void *r600_create_vertex_fetch_shader(struct pipe_context *ctx,
 
 }
 
-int eg_get_interpolator_index(unsigned interpolate, unsigned location)
+int eg_get_interpolator_index(enum glsl_interp_mode interpolate,
+			      enum r600_interp_location location)
 {
-	if (interpolate == TGSI_INTERPOLATE_COLOR ||
-		interpolate == TGSI_INTERPOLATE_LINEAR ||
-		interpolate == TGSI_INTERPOLATE_PERSPECTIVE)
-	{
-		int is_linear = interpolate == TGSI_INTERPOLATE_LINEAR;
+	if (interpolate == INTERP_MODE_NONE ||
+		interpolate == INTERP_MODE_SMOOTH ||
+		interpolate == INTERP_MODE_NOPERSPECTIVE) {
+		int is_linear = interpolate == INTERP_MODE_NOPERSPECTIVE;
 		int loc;
 
-		switch(location) {
-		case TGSI_INTERPOLATE_LOC_CENTER:
+		switch (location) {
+		case R600_INTERP_LOC_CENTER:
 			loc = 1;
 			break;
-		case TGSI_INTERPOLATE_LOC_CENTROID:
+		case R600_INTERP_LOC_CENTROID:
 			loc = 2;
 			break;
-		case TGSI_INTERPOLATE_LOC_SAMPLE:
+		case R600_INTERP_LOC_SAMPLE:
 		default:
-			loc = 0; break;
+			loc = 0;
+			break;
 		}
 
 		return is_linear * 3 + loc;
 	}
 
 	return -1;
-}
-
-int r600_get_lds_unique_index(unsigned semantic_name, unsigned index)
-{
-	switch (semantic_name) {
-	case TGSI_SEMANTIC_POSITION:
-		return 0;
-       case TGSI_SEMANTIC_PSIZE:
-		return 1;
-       case TGSI_SEMANTIC_CLIPDIST:
-		assert(index <= 1);
-		return 2 + index;
-       case TGSI_SEMANTIC_TEXCOORD:
-		return 4 + index;
-       case TGSI_SEMANTIC_COLOR:
-		return 12 + index;
-       case TGSI_SEMANTIC_BCOLOR:
-		return 14 + index;
-       case TGSI_SEMANTIC_CLIPVERTEX:
-		return 16;
-       case TGSI_SEMANTIC_GENERIC:
-		if (index <= 63-17)
-			return 17 + index;
-		else
-			/* same explanation as in the default statement,
-			 * the only user hitting this is st/nine.
-			 */
-			return 0;
-
-	/* patch indices are completely separate and thus start from 0 */
-	case TGSI_SEMANTIC_TESSOUTER:
-		return 0;
-	case TGSI_SEMANTIC_TESSINNER:
-		return 1;
-	case TGSI_SEMANTIC_PATCH:
-		return 2 + index;
-
-	default:
-		/* Don't fail here. The result of this function is only used
-		 * for LS, TCS, TES, and GS, where legacy GL semantics can't
-		 * occur, but this function is called for all vertex shaders
-		 * before it's known whether LS will be compiled or not.
-		 */
-		return 0;
-	}
 }
 
 static int emit_streamout(struct r600_shader_ctx *ctx, struct pipe_stream_output_info *so,

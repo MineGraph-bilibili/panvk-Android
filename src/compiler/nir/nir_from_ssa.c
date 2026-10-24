@@ -490,9 +490,6 @@ nir_rewrite_uses_to_load_reg(nir_builder *b, nir_def *old,
 static bool
 def_replace_with_reg(nir_def *def, nir_function_impl *impl)
 {
-   /* These are handled elsewhere */
-   assert(!nir_def_is_undef(def) && !nir_def_is_const(def));
-
    nir_builder b = nir_builder_create(impl);
 
    nir_def *reg = decl_reg_for_ssa_def(&b, def);
@@ -1154,10 +1151,9 @@ instr_is_load_new_reg(nir_instr *instr, unsigned old_num_ssa)
 
 /** Lower all of the SSA defs in a block to registers
  *
- * This performs the very simple operation of blindly replacing all of the SSA
- * defs in the given block with registers.  If not used carefully, this may
- * result in phi nodes with register sources which is technically invalid.
- * Fortunately, the register-based into-SSA pass handles them anyway.
+ * This performs the very simple operation of blindly replacing many of the
+ * SSA defs in the given block with registers. It replaces SSA defs used
+ * outside the block, undef, and constants.
  */
 bool
 nir_lower_ssa_defs_to_regs_block(nir_block *block)
@@ -1176,29 +1172,22 @@ nir_lower_ssa_defs_to_regs_block(nir_block *block)
    const unsigned num_ssa = impl->ssa_alloc;
 
    nir_foreach_instr_safe(instr, block) {
-      if (instr->type == nir_instr_type_undef) {
-         /* Undefs are just a read of something never written. */
-         nir_undef_instr *undef = nir_instr_as_undef(instr);
-         nir_def *reg = decl_reg_for_ssa_def(&b, &undef->def);
-         nir_rewrite_uses_to_load_reg(&b, &undef->def, reg);
-      } else if (instr->type == nir_instr_type_load_const) {
-         nir_load_const_instr *load = nir_instr_as_load_const(instr);
-         nir_def *reg = decl_reg_for_ssa_def(&b, &load->def);
-         nir_rewrite_uses_to_load_reg(&b, &load->def, reg);
-
-         b.cursor = nir_after_instr(instr);
-         nir_store_reg(&b, &load->def, reg);
-      } else if (instr_is_load_new_reg(instr, num_ssa)) {
+      if (instr_is_load_new_reg(instr, num_ssa)) {
          /* Calls to nir_rewrite_uses_to_load_reg() may place new load_reg
           * intrinsics in this block with new SSA destinations.  To avoid
           * infinite recursion, we don't want to lower any newly placed
-          * load_reg instructions to yet anoter load/store_reg.
+          * load_reg instructions to yet another load/store_reg.
           */
       } else if (nir_foreach_def(instr, ssa_def_is_local_to_block, NULL)) {
          /* If the SSA def produced by this instruction is only in the block
           * in which it is defined and is not used by ifs or phis, then we
           * don't have a reason to convert it to a register.
           */
+      } else if (instr->type == nir_instr_type_undef) {
+         /* Undefs are just a read of something never written. */
+         nir_undef_instr *undef = nir_instr_as_undef(instr);
+         nir_def *reg = decl_reg_for_ssa_def(&b, &undef->def);
+         nir_rewrite_uses_to_load_reg(&b, &undef->def, reg);
       } else {
          nir_foreach_def(instr, def_replace_with_reg_state, &state);
       }

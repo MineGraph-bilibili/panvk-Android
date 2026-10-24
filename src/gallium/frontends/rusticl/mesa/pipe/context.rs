@@ -628,6 +628,26 @@ impl PipeContext {
         unsafe { self.pipe.as_ref().get_query_result.unwrap()(self.pipe.as_ptr(), pq, wait, pqr) }
     }
 
+    pub(crate) unsafe fn get_query_result_resource(
+        &self,
+        pq: *mut pipe_query,
+        val_type: pipe_query_value_type,
+        res: &PipeResourceOwned,
+        offset: u32,
+    ) {
+        unsafe {
+            self.pipe.as_ref().get_query_result_resource.unwrap()(
+                self.pipe.as_ptr(),
+                pq,
+                pipe_query_flags::PIPE_QUERY_WAIT,
+                val_type,
+                0,
+                res.pipe(),
+                offset,
+            )
+        }
+    }
+
     /// # Safety
     ///
     /// usual rules on raw mut pointers apply, specifically no concurrent access
