@@ -1,0 +1,53 @@
+{
+  "mesaRepo": "https://gitlab.freedesktop.org/mesa/mesa.git",
+  "mesaCommit": "5a07217f034b3e50d8c7c7794f97a2df1742613b",
+  "mesaVersion": "26.3.0-devel",
+  "mesaBranch": "main",
+  "pinnedOn": "2026-09-18",
+  "patchSeriesId": "sha256:374b7b830111a848515d3e0ec41a60b902bc57938deb420ecea7de8a03f58ecd",
+  "referenceRepos": {
+    "g720-csf": {
+      "url": "https://github.com/wonderkast02/panvk-g720-kbase-csf",
+      "commit": "d9cbb91e5df720f0a62c4b5010d96c327aec315f",
+      "role": "primary CSF / modern Valhall+5th Gen reference (pan_kmod arch, CSF lifecycle, AHB, sync, G720 tessellation)"
+    },
+    "g52-jm": {
+      "url": "https://github.com/LukeValen/panvk-mali-g52",
+      "commit": "dd2d0ee7f2dcd518d9ab6291afc0b1518c128b21",
+      "role": "primary JM/Bifrost reference (compute+offscreen+X11, output-semaphore fix, Android WSI/AHB groundwork)"
+    },
+    "g57-jm-v9": {
+      "url": "https://github.com/Noysz/panvk-g99-jm",
+      "commit": "0a4f0e248df7ed990d219f30d78d796b4983b6f7",
+      "role": "primary JM/Valhall-v9 reference (compute+vertex/fragment+MRT+indirect, WSI pending)"
+    },
+    "bcnLayer": {
+      "repo": "https://github.com/leegao/bcn_layer",
+      "commit": "50993a2d51772567de9c36de4d523652773f0899",
+      "license": "MIT",
+      "role": "optional BC1-BC7 compatibility reference/component",
+      "transitiveSources": {
+        "libGPUCounters": "9fe9f4b3e9ee7d9ddb0274991ecf7ae9679be542"
+      }
+    },
+    "history": {
+      "panvk-kbase-26.2": {
+        "url": "https://github.com/nangitagamer777-art/PanVK-kbase",
+        "note": "Mesa 26.2.0-rc2 era tree; implementation history only, not the source base"
+      },
+      "panvk-kmod": {
+        "url": "https://github.com/nangitagamer777-art/Panvk_Kmod",
+        "note": "secondary reference"
+      },
+      "funnymdzz": {
+        "url": "https://github.com/leegao/mesa-funnymdzz",
+        "note": "secondary reference"
+      }
+    }
+  },
+  "notes": [
+    "No release may be built from an unrecorded moving branch.",
+    "patchSeriesId is sha256 of mesaCommit + profile JSON + patches/** (scripts/compute-patch-series-id.py).",
+    "Secondary history repos are intentionally unpinned; they are not build inputs."
+  ]
+}

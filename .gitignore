@@ -5,5 +5,8 @@
 *.pyo
 *.out
 /build
+/dist/*
+!/dist/extension-gap.json
+/work/
 .venv/
 *.mda.tar

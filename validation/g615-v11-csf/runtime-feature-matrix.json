@@ -1,0 +1,1846 @@
+{
+  "source": "on-device panvk-feature-dump",
+  "deviceName": "Mali-G615 MC6",
+  "vendorID": "0x13b5",
+  "deviceID": "0xb8a31030",
+  "driverID": "20",
+  "driverName": "panvk",
+  "driverInfo": "Mesa 26.3.0-devel (git-5a07217f03)",
+  "driverVersion": "0x6802063",
+  "apiVersion": "1.4.363",
+  "instanceExtensionCount": 13,
+  "deviceExtensionCount": 181,
+  "totalExtensionCount": 194,
+  "instanceExtensions": [
+    "VK_KHR_android_surface",
+    "VK_KHR_device_group_creation",
+    "VK_KHR_external_fence_capabilities",
+    "VK_KHR_external_memory_capabilities",
+    "VK_KHR_external_semaphore_capabilities",
+    "VK_KHR_get_physical_device_properties2",
+    "VK_KHR_get_surface_capabilities2",
+    "VK_KHR_surface",
+    "VK_KHR_surface_maintenance1",
+    "VK_EXT_debug_report",
+    "VK_EXT_debug_utils",
+    "VK_EXT_headless_surface",
+    "VK_EXT_surface_maintenance1"
+  ],
+  "deviceExtensions": [
+    "VK_KHR_8bit_storage",
+    "VK_KHR_16bit_storage",
+    "VK_KHR_bind_memory2",
+    "VK_KHR_buffer_device_address",
+    "VK_KHR_calibrated_timestamps",
+    "VK_KHR_compute_shader_derivatives",
+    "VK_KHR_cooperative_matrix",
+    "VK_KHR_copy_commands2",
+    "VK_KHR_copy_memory_indirect",
+    "VK_KHR_create_renderpass2",
+    "VK_KHR_dedicated_allocation",
+    "VK_KHR_depth_stencil_resolve",
+    "VK_KHR_descriptor_update_template",
+    "VK_KHR_device_group",
+    "VK_KHR_draw_indirect_count",
+    "VK_KHR_driver_properties",
+    "VK_KHR_dynamic_rendering",
+    "VK_KHR_dynamic_rendering_local_read",
+    "VK_KHR_external_fence",
+    "VK_KHR_external_fence_fd",
+    "VK_KHR_external_memory",
+    "VK_KHR_external_memory_fd",
+    "VK_KHR_external_semaphore",
+    "VK_KHR_external_semaphore_fd",
+    "VK_KHR_format_feature_flags2",
+    "VK_KHR_get_memory_requirements2",
+    "VK_KHR_global_priority",
+    "VK_KHR_image_format_list",
+    "VK_KHR_imageless_framebuffer",
+    "VK_KHR_index_type_uint8",
+    "VK_KHR_internally_synchronized_queues",
+    "VK_KHR_line_rasterization",
+    "VK_KHR_load_store_op_none",
+    "VK_KHR_maintenance1",
+    "VK_KHR_maintenance2",
+    "VK_KHR_maintenance3",
+    "VK_KHR_maintenance4",
+    "VK_KHR_maintenance5",
+    "VK_KHR_maintenance6",
+    "VK_KHR_maintenance7",
+    "VK_KHR_maintenance8",
+    "VK_KHR_maintenance9",
+    "VK_KHR_map_memory2",
+    "VK_KHR_multiview",
+    "VK_KHR_pipeline_executable_properties",
+    "VK_KHR_pipeline_library",
+    "VK_KHR_present_id",
+    "VK_KHR_present_id2",
+    "VK_KHR_present_wait",
+    "VK_KHR_present_wait2",
+    "VK_KHR_push_descriptor",
+    "VK_KHR_relaxed_block_layout",
+    "VK_KHR_sampler_mirror_clamp_to_edge",
+    "VK_KHR_sampler_ycbcr_conversion",
+    "VK_KHR_separate_depth_stencil_layouts",
+    "VK_KHR_shader_atomic_int64",
+    "VK_KHR_shader_clock",
+    "VK_KHR_shader_constant_data",
+    "VK_KHR_shader_draw_parameters",
+    "VK_KHR_shader_expect_assume",
+    "VK_KHR_shader_float16_int8",
+    "VK_KHR_shader_float_controls",
+    "VK_KHR_shader_float_controls2",
+    "VK_KHR_shader_fma",
+    "VK_KHR_shader_integer_dot_product",
+    "VK_KHR_shader_maximal_reconvergence",
+    "VK_KHR_shader_non_semantic_info",
+    "VK_KHR_shader_quad_control",
+    "VK_KHR_shader_relaxed_extended_instruction",
+    "VK_KHR_shader_subgroup_extended_types",
+    "VK_KHR_shader_subgroup_rotate",
+    "VK_KHR_shader_subgroup_uniform_control_flow",
+    "VK_KHR_shader_terminate_invocation",
+    "VK_KHR_shader_untyped_pointers",
+    "VK_KHR_spirv_1_4",
+    "VK_KHR_storage_buffer_storage_class",
+    "VK_KHR_swapchain",
+    "VK_KHR_swapchain_maintenance1",
+    "VK_KHR_swapchain_mutable_format",
+    "VK_KHR_synchronization2",
+    "VK_KHR_timeline_semaphore",
+    "VK_KHR_unified_image_layouts",
+    "VK_KHR_uniform_buffer_standard_layout",
+    "VK_KHR_variable_pointers",
+    "VK_KHR_vertex_attribute_divisor",
+    "VK_KHR_vulkan_memory_model",
+    "VK_KHR_workgroup_memory_explicit_layout",
+    "VK_KHR_zero_initialize_workgroup_memory",
+    "VK_EXT_4444_formats",
+    "VK_EXT_astc_decode_mode",
+    "VK_EXT_attachment_feedback_loop_dynamic_state",
+    "VK_EXT_attachment_feedback_loop_layout",
+    "VK_EXT_border_color_swizzle",
+    "VK_EXT_buffer_device_address",
+    "VK_EXT_calibrated_timestamps",
+    "VK_EXT_color_write_enable",
+    "VK_EXT_conditional_rendering",
+    "VK_EXT_conservative_rasterization",
+    "VK_EXT_custom_border_color",
+    "VK_EXT_debug_marker",
+    "VK_EXT_depth_bias_control",
+    "VK_EXT_depth_clamp_control",
+    "VK_EXT_depth_clamp_zero_one",
+    "VK_EXT_depth_clip_control",
+    "VK_EXT_depth_clip_enable",
+    "VK_EXT_descriptor_indexing",
+    "VK_EXT_device_address_binding_report",
+    "VK_EXT_device_memory_report",
+    "VK_EXT_dynamic_rendering_unused_attachments",
+    "VK_EXT_extended_dynamic_state",
+    "VK_EXT_extended_dynamic_state2",
+    "VK_EXT_extended_dynamic_state3",
+    "VK_EXT_external_memory_acquire_unmodified",
+    "VK_EXT_external_memory_dma_buf",
+    "VK_EXT_global_priority",
+    "VK_EXT_global_priority_query",
+    "VK_EXT_graphics_pipeline_library",
+    "VK_EXT_hdr_metadata",
+    "VK_EXT_host_image_copy",
+    "VK_EXT_host_query_reset",
+    "VK_EXT_image_2d_view_of_3d",
+    "VK_EXT_image_drm_format_modifier",
+    "VK_EXT_image_robustness",
+    "VK_EXT_image_sliced_view_of_3d",
+    "VK_EXT_image_view_min_lod",
+    "VK_EXT_index_type_uint8",
+    "VK_EXT_inline_uniform_block",
+    "VK_EXT_legacy_dithering",
+    "VK_EXT_line_rasterization",
+    "VK_EXT_load_store_op_none",
+    "VK_EXT_map_memory_placed",
+    "VK_EXT_memory_budget",
+    "VK_EXT_multisampled_render_to_single_sampled",
+    "VK_EXT_mutable_descriptor_type",
+    "VK_EXT_nested_command_buffer",
+    "VK_EXT_non_seamless_cube_map",
+    "VK_EXT_physical_device_drm",
+    "VK_EXT_pipeline_creation_cache_control",
+    "VK_EXT_pipeline_creation_feedback",
+    "VK_EXT_pipeline_robustness",
+    "VK_EXT_present_timing",
+    "VK_EXT_primitive_topology_list_restart",
+    "VK_EXT_private_data",
+    "VK_EXT_provoking_vertex",
+    "VK_EXT_queue_family_foreign",
+    "VK_EXT_rasterization_order_attachment_access",
+    "VK_EXT_rgba10x6_formats",
+    "VK_EXT_robustness2",
+    "VK_EXT_sampler_filter_minmax",
+    "VK_EXT_scalar_block_layout",
+    "VK_EXT_separate_stencil_usage",
+    "VK_EXT_shader_atomic_float",
+    "VK_EXT_shader_demote_to_helper_invocation",
+    "VK_EXT_shader_image_atomic_int64",
+    "VK_EXT_shader_module_identifier",
+    "VK_EXT_shader_replicated_composites",
+    "VK_EXT_shader_stencil_export",
+    "VK_EXT_shader_subgroup_ballot",
+    "VK_EXT_shader_subgroup_vote",
+    "VK_EXT_shader_tile_image",
+    "VK_EXT_shader_uniform_buffer_unsized_array",
+    "VK_EXT_subgroup_size_control",
+    "VK_EXT_swapchain_maintenance1",
+    "VK_EXT_texel_buffer_alignment",
+    "VK_EXT_texture_compression_astc_hdr",
+    "VK_EXT_tooling_info",
+    "VK_EXT_vertex_attribute_divisor",
+    "VK_EXT_vertex_input_dynamic_state",
+    "VK_EXT_ycbcr_2plane_444_formats",
+    "VK_EXT_ycbcr_image_arrays",
+    "VK_EXT_zero_initialize_device_memory",
+    "VK_ANDROID_external_memory_android_hardware_buffer",
+    "VK_ANDROID_native_buffer",
+    "VK_ARM_rasterization_order_attachment_access",
+    "VK_ARM_scheduling_controls",
+    "VK_ARM_shader_core_builtins",
+    "VK_ARM_shader_core_properties",
+    "VK_GOOGLE_decorate_string",
+    "VK_GOOGLE_hlsl_functionality1",
+    "VK_GOOGLE_user_type",
+    "VK_VALVE_mutable_descriptor_type"
+  ],
+  "features": {
+    "robustBufferAccess": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "geometryShader": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "tessellationShader": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "multiViewport": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "shaderClipDistance": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "shaderCullDistance": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "shaderFloat64": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "depthBounds": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "wideLines": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "largePoints": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "samplerAnisotropy": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "textureCompressionBC": {
+      "upstreamImplemented": true,
+      "runtimeExposed": false,
+      "runtimeTested": false,
+      "sourceImplemented": true,
+      "nativeHardware": false,
+      "nativeDriverExposed": false,
+      "nativeVulkanFeatureBit": false,
+      "compatImplementation": "experimental-vulkan-layer",
+      "compatAvailable": true,
+      "compatTested": false,
+      "compatLoadTested": true,
+      "compatComposesWithPanvk": false
+    },
+    "textureCompressionETC2": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "textureCompressionASTC_LDR": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "descriptorIndexing": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "timelineSemaphore": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "dynamicRendering": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "synchronization2": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "bufferDeviceAddress": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "VK_KHR_push_descriptor": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "VK_KHR_swapchain": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "VK_KHR_android_surface": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "externalMemory": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "externalSemaphore": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "computeShader": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "vertexShader": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "fragmentShader": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "bufferAllocation": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "ahbImport": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "colorAttachmentRendering": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "binarySemaphore": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "fence": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "swapchainPresentation": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true
+    },
+    "fullDrawIndexUint32": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "imageCubeArray": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "independentBlend": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "sampleRateShading": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "dualSrcBlend": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "logicOp": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "multiDrawIndirect": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "drawIndirectFirstInstance": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "depthClamp": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "depthBiasClamp": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "fillModeNonSolid": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "alphaToOne": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "occlusionQueryPrecise": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "pipelineStatisticsQuery": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "vertexPipelineStoresAndAtomics": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "fragmentStoresAndAtomics": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderTessellationAndGeometryPointSize": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "shaderImageGatherExtended": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderStorageImageExtendedFormats": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderStorageImageMultisample": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "shaderStorageImageReadWithoutFormat": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderStorageImageWriteWithoutFormat": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderUniformBufferArrayDynamicIndexing": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderSampledImageArrayDynamicIndexing": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderStorageBufferArrayDynamicIndexing": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderStorageImageArrayDynamicIndexing": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderInt64": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderInt16": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "shaderResourceResidency": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "shaderResourceMinLod": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseBinding": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidencyBuffer": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidencyImage2D": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidencyImage3D": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidency2Samples": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidency4Samples": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidency8Samples": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidency16Samples": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "sparseResidencyAliased": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "variableMultisampleRate": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "inheritedQueries": {
+      "upstreamImplemented": false,
+      "runtimeExposed": false,
+      "runtimeTested": false
+    },
+    "scalarBlockLayout": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "hostQueryReset": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "vulkanMemoryModel": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "imagelessFramebuffer": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "separateDepthStencilLayouts": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "inlineUniformBlock": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    },
+    "maintenance4": {
+      "upstreamImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false
+    }
+  },
+  "schema": {
+    "upstreamImplemented": "Mesa PanVK source advertises/implements the path",
+    "runtimeExposed": "queried from the exact ICD on this device",
+    "runtimeTested": "a real workload on this tree exercised the path",
+    "sourceImplemented": "exact pinned Mesa source implements the extension or compatibility component",
+    "nativeHardware": "target hardware natively implements the feature",
+    "nativeDriverExposed": "base PanVK ICD exposes the native feature",
+    "nativeVulkanFeatureBit": "base PanVK ICD reports the Vulkan feature bit",
+    "compatImplementation": "separately identified compatibility implementation",
+    "compatAvailable": "compatibility component built and loader-discovered in its tested model",
+    "compatTested": "compatibility implementation passed device correctness workloads",
+    "compatLoadTested": "Android loader discovered and loaded the component",
+    "compatComposesWithPanvk": "tested loader path selected the staged PanVK ICD",
+    "platform": "runtime build platform"
+  },
+  "profile": "g615-v11-csf",
+  "device": "Poco X6 Pro",
+  "soc": "MediaTek Dimensity 8300-Ultra",
+  "gpu": "Mali-G615 MC6",
+  "gpuId": "0xb8a31030",
+  "panArch": 11,
+  "frontend": "CSF",
+  "kbaseUapi": "1.21",
+  "mesaCommit": "5a07217f034b3e50d8c7c7794f97a2df1742613b",
+  "mesaVersion": "26.3.0-devel",
+  "binarySha256": "576e37de9a3b60dda9a972a6f91c3a50e09238bd31a9888e04215c7b554c803a",
+  "capturedAt": "2026-09-19T11:36:08.709657+00:00",
+  "extensions": {
+    "VK_KHR_android_surface": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_device_group_creation": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_fence_capabilities": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_memory_capabilities": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_semaphore_capabilities": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_get_physical_device_properties2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_get_surface_capabilities2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_surface": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_surface_maintenance1": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_EXT_debug_report": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_debug_utils": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_headless_surface": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_surface_maintenance1": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_8bit_storage": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_16bit_storage": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_bind_memory2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_buffer_device_address": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_calibrated_timestamps": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_compute_shader_derivatives": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_cooperative_matrix": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_copy_commands2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_copy_memory_indirect": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_create_renderpass2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_dedicated_allocation": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_depth_stencil_resolve": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_descriptor_update_template": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_device_group": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_draw_indirect_count": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_driver_properties": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_dynamic_rendering": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_dynamic_rendering_local_read": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_fence": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_fence_fd": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_memory": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_memory_fd": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_semaphore": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_external_semaphore_fd": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_format_feature_flags2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_get_memory_requirements2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_global_priority": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_image_format_list": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_imageless_framebuffer": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_index_type_uint8": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_internally_synchronized_queues": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_line_rasterization": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_load_store_op_none": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance1": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance3": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance4": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance5": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance6": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance7": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance8": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_maintenance9": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_map_memory2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_multiview": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_pipeline_executable_properties": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_pipeline_library": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_present_id": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_present_id2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_present_wait": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_present_wait2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_push_descriptor": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_relaxed_block_layout": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_sampler_mirror_clamp_to_edge": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_sampler_ycbcr_conversion": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_separate_depth_stencil_layouts": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_atomic_int64": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_clock": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_constant_data": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_shader_draw_parameters": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_expect_assume": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_float16_int8": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_float_controls": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_float_controls2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_fma": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_shader_integer_dot_product": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_maximal_reconvergence": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_non_semantic_info": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_quad_control": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_relaxed_extended_instruction": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_shader_subgroup_extended_types": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_subgroup_rotate": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_subgroup_uniform_control_flow": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_terminate_invocation": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_shader_untyped_pointers": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_spirv_1_4": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_storage_buffer_storage_class": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_swapchain": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_swapchain_maintenance1": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_swapchain_mutable_format": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_synchronization2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_timeline_semaphore": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_unified_image_layouts": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_KHR_uniform_buffer_standard_layout": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_variable_pointers": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_vertex_attribute_divisor": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_vulkan_memory_model": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_workgroup_memory_explicit_layout": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_KHR_zero_initialize_workgroup_memory": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_4444_formats": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_astc_decode_mode": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_attachment_feedback_loop_dynamic_state": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_attachment_feedback_loop_layout": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_border_color_swizzle": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_buffer_device_address": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_calibrated_timestamps": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_color_write_enable": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_conditional_rendering": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_conservative_rasterization": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_custom_border_color": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_debug_marker": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_depth_bias_control": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_depth_clamp_control": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_depth_clamp_zero_one": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_depth_clip_control": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_depth_clip_enable": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_descriptor_indexing": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_device_address_binding_report": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_device_memory_report": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_dynamic_rendering_unused_attachments": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_extended_dynamic_state": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_extended_dynamic_state2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_extended_dynamic_state3": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_external_memory_acquire_unmodified": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_external_memory_dma_buf": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_global_priority": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_global_priority_query": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_graphics_pipeline_library": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_hdr_metadata": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_host_image_copy": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_host_query_reset": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_image_2d_view_of_3d": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_image_drm_format_modifier": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_image_robustness": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_image_sliced_view_of_3d": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_image_view_min_lod": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_index_type_uint8": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_inline_uniform_block": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_legacy_dithering": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_line_rasterization": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_load_store_op_none": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_map_memory_placed": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_memory_budget": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_multisampled_render_to_single_sampled": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_mutable_descriptor_type": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_nested_command_buffer": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_non_seamless_cube_map": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_physical_device_drm": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_pipeline_creation_cache_control": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_pipeline_creation_feedback": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_pipeline_robustness": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_present_timing": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_primitive_topology_list_restart": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_private_data": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_provoking_vertex": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_queue_family_foreign": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_rasterization_order_attachment_access": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_rgba10x6_formats": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_robustness2": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_sampler_filter_minmax": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_scalar_block_layout": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_separate_stencil_usage": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_atomic_float": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_demote_to_helper_invocation": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_image_atomic_int64": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_module_identifier": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_replicated_composites": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_stencil_export": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_subgroup_ballot": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_subgroup_vote": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_tile_image": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_shader_uniform_buffer_unsized_array": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_subgroup_size_control": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_swapchain_maintenance1": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_texel_buffer_alignment": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_texture_compression_astc_hdr": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_tooling_info": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_vertex_attribute_divisor": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_vertex_input_dynamic_state": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_ycbcr_2plane_444_formats": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_ycbcr_image_arrays": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_EXT_zero_initialize_device_memory": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_ANDROID_external_memory_android_hardware_buffer": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_ANDROID_native_buffer": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_ARM_rasterization_order_attachment_access": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_ARM_scheduling_controls": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_ARM_shader_core_builtins": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_ARM_shader_core_properties": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_GOOGLE_decorate_string": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_GOOGLE_hlsl_functionality1": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    },
+    "VK_GOOGLE_user_type": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": true,
+      "platform": "android"
+    },
+    "VK_VALVE_mutable_descriptor_type": {
+      "sourceImplemented": true,
+      "runtimeExposed": true,
+      "runtimeTested": false,
+      "platform": "android"
+    }
+  },
+  "platformInapplicableExtensions": [
+    "VK_EXT_acquire_drm_display",
+    "VK_EXT_acquire_xlib_display",
+    "VK_EXT_direct_mode_display",
+    "VK_EXT_display_control",
+    "VK_EXT_display_surface_counter",
+    "VK_KHR_display",
+    "VK_KHR_get_display_properties2",
+    "VK_KHR_wayland_surface",
+    "VK_KHR_xcb_surface",
+    "VK_KHR_xlib_surface"
+  ],
+  "releaseStatus": {
+    "version": "v0.1.0-beta.3",
+    "candidate": true,
+    "prerelease": true,
+    "published": false
+  },
+  "evidence": {
+    "featureWorkloads": "validation/g615-v11-csf/beta3-phase5-features-2026-09-19.json",
+    "extensionWorkloads": "validation/g615-v11-csf/beta3-phase7-extension-workloads-2026-09-19.json",
+    "regressionSummary": "validation/g615-v11-csf/beta3-phase8-summary.json",
+    "extensionGap": "validation/g615-v11-csf/beta3-phase8-extension-gap.json",
+    "bcn": "validation/g615-v11-csf/beta3-phase6-bcn.json"
+  }
+}

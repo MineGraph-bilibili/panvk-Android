@@ -1,0 +1,4 @@
+#!/bin/sh
+# capture-runtime-features — on-device ICD probe (not Mesa Matrix)
+# Usage: ./scripts/capture-runtime-features [--profile g615-v11-csf]
+exec python3 "$(dirname "$0")/capture-runtime-features.py" "$@"
