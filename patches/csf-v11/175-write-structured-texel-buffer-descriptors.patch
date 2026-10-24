@@ -1,0 +1,52 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH csf-v11 175] panvk: write structured texel-buffer descriptors in vkGetDescriptorEXT
+Generated-by: LLM
+
+vkGetDescriptorEXT wrote uniform/storage texel-buffer descriptors as a
+plain BUFFER (address and size only), while a VkBufferView of the same
+buffer gets a STRUCTURE buffer with the element stride and the format
+conversion. Shaders fetching through a descriptor-buffer texel buffer
+(D3D12 typed buffers under VKD3D-Proton) therefore read without format
+or stride. Build the descriptor with pan_buffer_texture_emit(), as
+CreateBufferView does. biblioklept
+
+Tested GPU: Mali-G615 MC2 (OPPO CPH2763, MT6878)
+Tested Kbase UAPI: 1.21
+Dependencies: csf-v11/174
+
+diff --git a/src/panfrost/vulkan/panvk_vX_descriptor_set_layout.c b/src/panfrost/vulkan/panvk_vX_descriptor_set_layout.c
+index c9c0398..d713d6a 100644
+--- a/src/panfrost/vulkan/panvk_vX_descriptor_set_layout.c
++++ b/src/panfrost/vulkan/panvk_vX_descriptor_set_layout.c
+@@ -24,6 +24,8 @@
+ #include "util/bitset.h"
+ 
+ #include "genxml/gen_macros.h"
++#include "pan_buffer.h"
++#include "pan_desc.h"
+ 
+ #include "panvk_descriptor_set_layout.h"
+ #include "panvk_device.h"
+@@ -511,12 +513,17 @@ panvk_per_arch(GetDescriptorEXT)(
+       if (pDescriptorInfo->data.pUniformTexelBuffer) {
+          const VkDescriptorAddressInfoEXT *addr_info = pDescriptorInfo->data.pUniformTexelBuffer;
+ #if PAN_ARCH >= 9
++         /* Same structured buffer (stride + format conversion) a
++          * VkBufferView gets, not a plain buffer. */
++         const enum pipe_format pfmt = vk_format_to_pipe_format(addr_info->format);
++         const unsigned blk = MAX2(util_format_get_blocksize(pfmt), 1);
++         const struct pan_buffer_view bview = {
++            .format = pfmt,
++            .width_el = addr_info->range == VK_WHOLE_SIZE ? 0 : addr_info->range / blk,
++            .base = addr_info->address,
++         };
+          struct mali_buffer_packed desc;
+-         pan_pack(&desc, BUFFER, cfg) {
+-            cfg.address = addr_info->address;
+-            cfg.size = (addr_info->range == VK_WHOLE_SIZE || addr_info->range > UINT32_MAX) ?
+-                       UINT32_MAX : addr_info->range;
+-         }
++         GENX(pan_buffer_texture_emit)(&bview, &desc);
+          memcpy(pDescriptor, &desc, MIN2(dataSize, sizeof(desc)));
+ #else
+          memcpy(pDescriptor, &addr_info->address, sizeof(addr_info->address));
