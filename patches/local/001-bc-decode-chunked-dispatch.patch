@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: panvk-kbase-android <local>
+Date: Sat, 24 Oct 2026 23:10:00 +0800
+Subject: [PATCH local 001] bc: chunk the BC decode compute dispatch
+
+Long single compute dispatches can outlive the cross-CSG SYNC_WAIT of the
+other subqueues and get the CSG killed by the firmware (group fatal,
+status 0x72/0x41). Split bc_decode_region() into PANVK_BC_CHUNK texels
+per job (default 256, 0 restores the unchunked behavior) and keep
+PANVK_BC_TRACE for first-N diagnostics.
+
+Tested Kbase UAPI: CSF 1.21.
+Dependencies: csf-v11 BC decode emulation.
+
+---
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_meta.c b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+--- a/src/panfrost/vulkan/panvk_vX_cmd_meta.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "util/log.h"
++#include "util/u_debug.h"
+ 
+ #include "panvk_buffer.h"
+ #include "panvk_cmd_alloc.h"
+@@ -864,6 +865,25 @@
+    };
+ }
+ 
++/* Max texels per BC decode dispatch along each axis, rounded down to whole
++ * 4x4 blocks. 0 disables chunking (one dispatch per region, the behavior
++ * before this option existed) and exists for A/B testing. Long single
++ * dispatches can outlive a cross-CSG SYNC_WAIT of the other subqueues and
++ * get the CSG killed by the firmware (CSF group fatal, status 0x72/0x41);
++ * keeping every job short avoids that trigger. */
++static uint32_t
++bc_chunk_texels(void)
++{
++   const int64_t chunk = debug_get_num_option("PANVK_BC_CHUNK", 256);
++
++   if (chunk <= 0)
++      return 0; /* no chunking */
++
++   return MAX2((uint32_t)chunk & ~3u, 4u);
++}
++
++static uint32_t bc_trace_count;
++
+ /* Transcode the BC blocks of one copy region into bc_decoded. They come
+  * from src (block at the region origin, row and layer/slice strides) or,
+  * when src is NULL, from the raw plane (planes[0]). */
+@@ -958,12 +978,60 @@
+    };
+ 
+    disp->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+-   disp->CmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+-                          sizeof(push), &push);
+ 
+-   uint32_t bx = DIV_ROUND_UP(w, 4);
+-   uint32_t by = DIV_ROUND_UP(h, 4);
+-   disp->CmdDispatch(cmd, DIV_ROUND_UP(bx, 8), DIV_ROUND_UP(by, 8), d);
++   const uint32_t chunk = bc_chunk_texels();
++   const uint32_t chunk_w = chunk ? chunk : w;
++   const uint32_t chunk_h = chunk ? chunk : h;
++
++   const int64_t trace = debug_get_num_option("PANVK_BC_TRACE", 0);
++   if (trace > 0 && p_atomic_inc_return(&bc_trace_count) <= (uint32_t)trace) {
++      const uint32_t cw = MIN2(chunk_w, w);
++      const uint32_t ch = MIN2(chunk_h, h);
++
++      mesa_logi("bctrace: fmt=0x%x mip=%u extent=%ux%ux%u chunk=%u grid=%ux%u",
++                img->vk.format, level, w, h, d, chunk,
++                DIV_ROUND_UP(DIV_ROUND_UP(cw, 4), 8),
++                DIV_ROUND_UP(DIV_ROUND_UP(ch, 4), 8));
++   }
++
++   for (uint32_t cy = 0; cy < h; cy += chunk_h) {
++      const uint32_t ch = MIN2(chunk_h, h - cy);
++      const uint32_t cblk_y = cy / 4;
++      const uint64_t csrc_y = src + (uint64_t)cblk_y * push.src_row_B;
++
++      for (uint32_t cx = 0; cx < w; cx += chunk_w) {
++         const uint32_t cw = MIN2(chunk_w, w - cx);
++         const uint32_t cblk_x = cx / 4;
++         struct panvk_bc_decode_push p = push;
++
++         const uint64_t csrc = csrc_y + (uint64_t)cblk_x * blk_B;
++
++         p.src[0] = (uint32_t)csrc;
++         p.src[1] = (uint32_t)(csrc >> 32);
++         p.width = cw;
++         p.height = ch;
++
++         if (dst_tiled) {
++            /* Tiled targets are addressed in absolute element coordinates. */
++            p.dst_x0 = dst_x0 + (dec_blocks ? cblk_x : cx);
++            p.dst_y0 = dst_y0 + (dec_blocks ? cblk_y : cy);
++         } else {
++            /* dst_row_B is a block row for compressed targets and a texel row
++             * for the R8/RG8 fallback. */
++            const uint64_t cdst =
++               dst + (uint64_t)(dec_blocks ? cblk_y : cy) * push.dst_row_B +
++               (uint64_t)(dec_blocks ? cblk_x * dec_B : cx * dec_B);
++
++            p.dst[0] = (uint32_t)cdst;
++            p.dst[1] = (uint32_t)(cdst >> 32);
++         }
++
++         disp->CmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
++                                sizeof(p), &p);
++         disp->CmdDispatch(cmd, DIV_ROUND_UP(DIV_ROUND_UP(cw, 4), 8),
++                           DIV_ROUND_UP(DIV_ROUND_UP(ch, 4), 8), d);
++      }
++   }
+ }
+ 
+ static void

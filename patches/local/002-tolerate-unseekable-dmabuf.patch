@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: panvk-kbase-android <local>
+Date: Sat, 24 Oct 2026 22:10:00 +0800
+Subject: [PATCH 222] tolerate-unseekable-dmabuf
+
+Ported unchanged from the pre-sync local tree.
+
+---
+diff --git a/src/panfrost/lib/kmod/pan_kmod.c b/src/panfrost/lib/kmod/pan_kmod.c
+--- a/src/panfrost/lib/kmod/pan_kmod.c
++++ b/src/panfrost/lib/kmod/pan_kmod.c
+@@ -200,9 +200,13 @@
+ 
+    if (dev->ops->bo_import_fd) {
+       size_t size = lseek(fd, 0, SEEK_END);
+-      if (size == 0 || size == (size_t)-1) {
+-         mesa_loge("invalid dmabuf size");
+-         goto err_unlock;
++      if (size == (size_t)-1 || size == 0) {
++         /* Vendor gralloc dma-bufs (e.g. MTK AFBC window buffers) do not
++          * implement llseek, so the size cannot be probed from userspace.
++          * Backends derive the true size from the kernel import response
++          * (kbase: KBASE_IOCTL_MEM_IMPORT out.va_pages), so hand down 0
++          * instead of rejecting the import outright. */
++         size = 0;
+       }
+ 
+       bo = dev->ops->bo_import_fd(dev, fd, size);

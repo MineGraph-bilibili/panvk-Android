@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: panvk-kbase-android <local>
+Date: Sat, 24 Oct 2026 23:20:00 +0800
+Subject: [PATCH local 004] kbase: keep the host page-size helper
+
+The kbase uAPI takes page counts, and several ioctls (MEM_EXEC_INIT,
+JIT_INIT limits, host-pointer imports) divide byte sizes by the host page
+size.  Restore the shared helper the v9/v10 series relied on.
+
+Tested Kbase UAPI: CSF 1.21.
+Dependencies: none.
+
+---
+diff --git a/src/panfrost/lib/kmod/kbase_kmod.c b/src/panfrost/lib/kmod/kbase_kmod.c
+--- a/src/panfrost/lib/kmod/kbase_kmod.c
++++ b/src/panfrost/lib/kmod/kbase_kmod.c
+@@ -286,6 +286,20 @@
+    return kbase_dev->dma_heap_fd >= 0;
+ }
+ 
++/* Host page size.  The kbase uAPI expresses va_pages/phys_pages/commit_pages
++ * in kernel pages, so every byte-to-page conversion must agree on it. */
++static uint64_t
++kbase_kmod_page_size(void)
++{
++   static uint64_t page_size;
++
++   if (!page_size) {
++      long ps = sysconf(_SC_PAGESIZE);
++      page_size = ps > 0 ? (uint64_t)ps : 4096;
++   }
++   return page_size;
++}
++
+ /* -------------------------------------------------------------------------
+  * GPU properties blob parsing helpers
+  * ---------------------------------------------------------------------- */

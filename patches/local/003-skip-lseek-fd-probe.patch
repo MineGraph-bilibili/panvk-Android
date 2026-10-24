@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: panvk-kbase-android <local>
+Date: Sat, 24 Oct 2026 22:10:00 +0800
+Subject: [PATCH 223] skip-lseek-fd-probe
+
+Ported unchanged from the pre-sync local tree.
+
+---
+diff --git a/src/panfrost/vulkan/panvk_device_memory.c b/src/panfrost/vulkan/panvk_device_memory.c
+--- a/src/panfrost/vulkan/panvk_device_memory.c
++++ b/src/panfrost/vulkan/panvk_device_memory.c
+@@ -494,7 +494,14 @@
+     * the same assumptions the fd-import path uses instead.
+     */
+    if (phys_dev->kbase_node_path[0]) {
+-      if (fd < 0 || lseek(fd, 0, SEEK_END) < 0)
++      /* fd < 0 is the only real error: MTK (and other vendor) AFBC gralloc
++       * dma-bufs do not implement llseek, so probing with lseek() falsely
++       * rejects valid ANativeWindow buffers and kills the whole WSI
++       * swapchain (black screen with working audio). The memoryTypeBits
++       * below are static assumptions anyway; the real import validates
++       * the fd on its own.
++       */
++      if (fd < 0)
+          return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+ 
+       /* Matches kbase_kmod_bo_import_fd(..., kmod_flags=0, external): */
