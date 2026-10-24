@@ -1,0 +1,97 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH perf 002] panvk: skip DESC_STATE invalidation on redundant set binds
+
+CmdBindDescriptorSets2KHR() marked DESC_STATE dirty on every bind, even when
+the caller re-bound the sets and dynamic offsets that were already bound.
+Engines that rebind the same set per draw then rebuilt the shader descriptor
+tables on every draw.
+
+Add cmd_desc_state_bind_is_noop(): compares the set pointers and, for sets
+with dynamic buffers, the dynamic offsets that cmd_desc_state_bind_sets()
+would write. Only when something actually changes does the bind run and the
+state get invalidated. Descriptor contents are not part of the compared
+state: they live in the set's device memory and panvk only embeds the set
+address in the tables, so a content update does not require a rebuild.
+
+push descriptor binds are untouched: their contents are compared nowhere and
+always invalidate.
+
+Purpose: cut per-draw descriptor table rebuilds for redundant binds.
+Tested GPU: build only, not yet run on device.
+Tested Kbase UAPI: CSF 1.21.
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: none.
+Validation test: TBD, on-device render smoke test.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c b/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
+index 6beab5f..da6ec01 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
+@@ -53,6 +53,35 @@ cmd_desc_state_bind_sets(struct panvk_descriptor_state *desc_state,
+    assert(dynoffset_idx == info->dynamicOffsetCount);
+ }
+ 
++/* True when the sets being bound are already bound with the same dynamic
++ * offsets. Descriptor set contents are not part of this state, so a repeated
++ * bind cannot disturb the shader tables and does not need a DESC_STATE
++ * invalidation. */
++static bool
++cmd_desc_state_bind_is_noop(const struct panvk_descriptor_state *desc_state,
++                            const VkBindDescriptorSetsInfoKHR *info)
++{
++   unsigned dynoffset_idx = 0;
++
++   for (unsigned i = 0; i < info->descriptorSetCount; ++i) {
++      unsigned set_idx = i + info->firstSet;
++      VK_FROM_HANDLE(panvk_descriptor_set, set, info->pDescriptorSets[i]);
++
++      if (desc_state->sets[set_idx] != set)
++         return false;
++
++      if (set) {
++         for (unsigned b = 0; b < set->layout->dyn_buf_count; b++) {
++            if (desc_state->dyn_buf_offsets[set_idx][b] !=
++                info->pDynamicOffsets[dynoffset_idx++])
++               return false;
++         }
++      }
++   }
++
++   return true;
++}
++
+ static struct panvk_descriptor_set *
+ cmd_get_push_desc_set(struct vk_command_buffer *vk_cmdbuf,
+                       struct panvk_descriptor_state *desc_state,
+@@ -351,17 +380,23 @@ panvk_per_arch(CmdBindDescriptorSets2KHR)(
+ 
+    /* TODO: Invalidate only if the shader tables are disturbed */
+    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
+-      cmd_desc_state_bind_sets(&cmdbuf->state.gfx.desc_state,
+-                               pBindDescriptorSetsInfo);
++      if (!cmd_desc_state_bind_is_noop(&cmdbuf->state.gfx.desc_state,
++                                       pBindDescriptorSetsInfo)) {
++         cmd_desc_state_bind_sets(&cmdbuf->state.gfx.desc_state,
++                                  pBindDescriptorSetsInfo);
+ 
+-      gfx_state_set_dirty(cmdbuf, DESC_STATE);
++         gfx_state_set_dirty(cmdbuf, DESC_STATE);
++      }
+    }
+ 
+    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+-      cmd_desc_state_bind_sets(&cmdbuf->state.compute.desc_state,
+-                               pBindDescriptorSetsInfo);
++      if (!cmd_desc_state_bind_is_noop(&cmdbuf->state.compute.desc_state,
++                                       pBindDescriptorSetsInfo)) {
++         cmd_desc_state_bind_sets(&cmdbuf->state.compute.desc_state,
++                                  pBindDescriptorSetsInfo);
+ 
+-      compute_state_set_dirty(cmdbuf, DESC_STATE);
++         compute_state_set_dirty(cmdbuf, DESC_STATE);
++      }
+    }
+ }
+ 

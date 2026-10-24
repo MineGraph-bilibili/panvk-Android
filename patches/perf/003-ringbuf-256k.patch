@@ -1,0 +1,45 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH perf 003] panvk/csf: raise the kbase CS ring buffer to 256KB
+
+The kbase CSF queue used a 64KB ring, the panthor default. On this driver
+the whole command stream of a submission is written into that ring before
+the kick, so a tiled render pass of ~1.5 frames fills it and
+kbase_subqueue_reserve_ring() blocks on the GPU seqno in the middle of
+building the next submission, stalling the CPU thread.
+
+256KB keeps the CPU well ahead of the GPU. The size is kept deliberately
+modest: the kernel rejects a queue size it does not support at
+CS_QUEUE_REGISTER time (which would fail queue creation), and the accepted
+maximum is not exposed to userspace. If a kernel refuses 256KB, revert this
+patch rather than growing the ring further.
+
+Purpose: remove mid-submit CPU stalls when the GPU falls behind.
+Tested GPU: build only, not yet run on device.
+Tested Kbase UAPI: CSF 1.21.
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: perf/001 (same file).
+Validation test: TBD, on-device render + queue bind check in logcat
+("Failed to bind a kbase CS queue" must not appear).
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+index 5c9938f..0732b9d 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -54,7 +54,14 @@
+  * for completion; ordinary queue submission remains asynchronous.
+  */
+ 
+-#define KBASE_RINGBUF_SIZE     (64 * 1024)
++/* 64KB (the panthor default) is only ~1.5 frames of command stream on a
++ * tiled render pass: kbase_subqueue_reserve_ring() then has to block on the
++ * GPU seqno in the middle of building a submission. 256KB leaves enough
++ * slack to keep the CPU ahead. Kept deliberately modest: the kernel rejects
++ * a queue size it does not support at CS_QUEUE_REGISTER time, which would
++ * fail queue creation, and the accepted maximum is not exposed to
++ * userspace. */
++#define KBASE_RINGBUF_SIZE     (256 * 1024)
+ /* Worst-case size of one ring entry, in bytes. Diagnostic breadcrumbs add a
+  * few extra LS stores, so keep this conservatively above the normal panthor
+  * kernel ring slot size. */

@@ -1,0 +1,54 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH perf 007] panvk/csf: skip finish_cs for empty command streams
+
+panvk_EndCommandBuffer() called finish_cs() for every subqueue whose CS
+builder was valid, including builders that never received a single
+instruction.  finish_cs() is not free:
+
+  - two kbase progress markers (a load, a sync add and a store flush each
+    when PANVK_DEBUG=kb_diag, and the same amount of emitted CS otherwise),
+  - cs_wait_slots() over every CS slot the device has,
+  - the CS error save/check,
+  - a cache clean of the CS memory,
+  - panvk_instr_end_work() and cs_end().
+
+An empty stream is never submitted: gpu_queue_submit_init_storage() and
+the execute-commands path both test cs_is_empty() and skip the stream,
+so there is no wait and no cache clean to perform in it.  Writing those
+instructions into a chunk that is then discarded is pure CPU and CS-size
+overhead.  On the L4D DX9 workload (461 EndCommandBuffer/s, four
+subqueues per buffer) most subqueues are empty in a graphics-only frame,
+so the guard removes the majority of the finish_cs() calls.
+
+The validity check stays first: an invalid builder still has to report
+VK_ERROR_OUT_OF_DEVICE_MEMORY, and an empty builder is always valid.
+
+Purpose: drop the per-subqueue finish_cs() cost for streams that carry no
+  work and are excluded from submission anyway.
+Tested GPU: vivo V2302A, Mali-G715 (MT6985) — ran L4D DX9 through Winlator
+  in the prof6/prof8 profiling sessions (about 6 minutes of steady
+  rendering) with no crash, corruption or hang.
+Tested Kbase UAPI: CSF 1.18 (device kernel 5.15.197).
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: none; applies after perf/001-006.
+Validation test: L4D DX9 render smoke test; end_cmdbuf profiler meter.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c
+@@ -351,7 +351,12 @@
+       if (!cs_is_valid(b)) {
+          vk_command_buffer_set_error(&cmdbuf->vk,
+                                      VK_ERROR_OUT_OF_DEVICE_MEMORY);
+-      } else {
++      } else if (!cs_is_empty(b)) {
++         /* An empty stream is never submitted (see
++          * gpu_queue_submit_init_storage()), so there is nothing to wait for
++          * or flush in it.  Skipping finish_cs() avoids emitting a wait,
++          * an error check and a cache clean into a command stream that is
++          * discarded. */
+          finish_cs(cmdbuf, i);
+       }
+    }

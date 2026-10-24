@@ -1,0 +1,219 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH perf 006] panvk/csf: destroy retired tiler heaps on the heap worker
+
+KBASE_IOCTL_CS_TILER_HEAP_TERM takes ~3.2 ms per call on the submitting
+thread and was nearly the entire tiler-heap renewal cost (~20.7 ms/s of
+queue_submit time in on-device profiling).  The ioctl only frees the heap
+chunks; nothing in the submit path waits for it to finish.  The seqno
+check in kbase_try_destroy_retired_heap() is what proves the firmware no
+longer references the retired heap, and that check runs before the
+descriptor slot is recycled.
+
+Hand the already-proven-safe heap contexts to the existing panvk_heap
+worker through a small SPSC ring, and only fall back to an inline TERM if
+the worker is unavailable or the ring is full (neither happens in
+practice: at most PANVK_KBASE_HEAP_SLOTS - 1 = 3 contexts are retired).
+
+- kbase_destroy_heaps_job() pops and destroys contexts, then re-checks the
+  ring after clearing job_pending so a push that raced the flag cannot be
+  lost.
+- kbase_destroy_heaps_kick() deduplicates queued jobs with an atomic
+  exchange; the destroy job shares the single panvk_heap thread with heap
+  pre-creation (util_queue max_jobs = 2, one kick of each kind at a time).
+- kbase_spare_heap_finish() drains the ring after util_queue_destroy(),
+  because u_queue drops queued jobs without running them.
+- The destroy no longer runs in kbase_try_destroy_retired_heap(), so its
+  local struct panvk_device is gone.
+
+The kernel still owns the heap chunks and frees them exactly as before,
+just on the worker thread.  Deferring the TERM can only delay chunk/VA
+reuse, never let the GPU see a freed heap early.
+
+Purpose: take the ~3.2 ms TERM ioctl off the CPU submit thread.
+Tested GPU: build only, not yet run on device.
+Tested Kbase UAPI: CSF 1.21.
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: csf/007 (creates this file); no overlap with perf/001.
+Validation test: TBD, on-device render smoke test.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/csf/panvk_queue.h b/src/panfrost/vulkan/csf/panvk_queue.h
+--- a/src/panfrost/vulkan/csf/panvk_queue.h
++++ b/src/panfrost/vulkan/csf/panvk_queue.h
+@@ -153,6 +153,7 @@
+     * retirement.  Several can be in flight so renewal never has to wait for
+     * the GPU to catch up; each holds one descriptor slot. */
+ #define PANVK_KBASE_HEAP_SLOTS 4
++#define PANVK_KBASE_DESTROY_RING 16
+    struct {
+       uint64_t ctx;
+       uint64_t vt_jobs;
+@@ -170,6 +171,20 @@
+       uint64_t ctx;
+       uint64_t first_chunk;
+    } kbase_spare_heap;
++   /* Retired heap contexts waiting to be destroyed by the panvk_heap worker.
++    * KBASE_IOCTL_CS_TILER_HEAP_TERM cost ~3.2 ms on the submitting thread,
++    * which was the entire heap renewal cost.  The seqno check alone gates
++    * slot reuse, so the TERM can run after the slot has been recycled.
++    * Single producer (the submit thread) and single consumer (the worker):
++    * head is only written by the producer, tail only by the consumer. */
++   struct {
++      struct util_queue_fence fence;
++      uint64_t ctxs[PANVK_KBASE_DESTROY_RING];
++      uint32_t head;
++      uint32_t tail;
++      /* Set while a destroy job is queued or running, to deduplicate kicks. */
++      bool job_pending;
++   } kbase_destroy;
+ #endif
+ 
+    struct {
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -2118,6 +2118,78 @@
+    return ctx;
+ }
+ 
++/* Worker side of the retired-heap destroy ring.  The TERM ioctl only frees the
++ * heap chunks; it does not need to complete before the descriptor slot is
++ * recycled, because the seqno check in kbase_try_destroy_retired_heap()
++ * already proves the firmware no longer references the context. */
++static void
++kbase_destroy_heaps_job(void *job, void *gdata, int thread_index)
++{
++   struct panvk_gpu_queue *queue = job;
++   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
++
++   for (;;) {
++      uint32_t tail =
++         __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_RELAXED);
++      uint32_t head =
++         __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE);
++
++      while (tail != head) {
++         kbase_kmod_csf_tiler_heap_destroy(
++            dev->kmod.dev,
++            queue->kbase_destroy.ctxs[tail % PANVK_KBASE_DESTROY_RING]);
++         tail++;
++         __atomic_store_n(&queue->kbase_destroy.tail, tail, __ATOMIC_RELEASE);
++         head = __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE);
++      }
++
++      /* Clear the kick flag before the final check: a producer that pushed
++       * while the flag was still set skipped the kick, so entries added in
++       * that window must be picked up here. */
++      __atomic_store_n(&queue->kbase_destroy.job_pending, false,
++                       __ATOMIC_SEQ_CST);
++      __atomic_thread_fence(__ATOMIC_SEQ_CST);
++      if (__atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE) == tail)
++         break;
++   }
++}
++
++static void
++kbase_destroy_heaps_kick(struct panvk_gpu_queue *queue)
++{
++   if (!queue->kbase_spare_heap.enabled)
++      return;
++   if (__atomic_exchange_n(&queue->kbase_destroy.job_pending, true,
++                           __ATOMIC_SEQ_CST))
++      return;
++
++   util_queue_add_job(&queue->kbase_spare_heap.thread, queue,
++                      &queue->kbase_destroy.fence, kbase_destroy_heaps_job,
++                      NULL, 0);
++}
++
++/* Hands a retired heap context to the worker thread, or destroys it inline if
++ * no worker exists or the ring is full (neither happens in practice). */
++static void
++kbase_queue_heap_destroy(struct panvk_gpu_queue *queue, uint64_t ctx)
++{
++   uint32_t head =
++      __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_RELAXED);
++   uint32_t tail =
++      __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_ACQUIRE);
++
++   if (!queue->kbase_spare_heap.enabled ||
++       head - tail >= PANVK_KBASE_DESTROY_RING) {
++      struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
++      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
++      return;
++   }
++
++   queue->kbase_destroy.ctxs[head % PANVK_KBASE_DESTROY_RING] = ctx;
++   __atomic_store_n(&queue->kbase_destroy.head, head + 1, __ATOMIC_RELEASE);
++   kbase_destroy_heaps_kick(queue);
++}
++
+ static void
+ kbase_spare_heap_init(struct panvk_gpu_queue *queue)
+ {
+@@ -2125,6 +2197,10 @@
+    queue->kbase_spare_heap.enabled =
+       util_queue_init(&queue->kbase_spare_heap.thread, "panvk_heap", 2, 1, 0,
+                       NULL);
++   util_queue_fence_init(&queue->kbase_destroy.fence);
++   queue->kbase_destroy.head = 0;
++   queue->kbase_destroy.tail = 0;
++   queue->kbase_destroy.job_pending = false;
+    kbase_spare_heap_kick(queue);
+ }
+ 
+@@ -2135,10 +2211,26 @@
+    uint64_t first_chunk;
+    uint64_t ctx = kbase_spare_heap_take(queue, &first_chunk);
+ 
++   /* util_queue_destroy() drops queued jobs without running them, so drain
++    * whatever the worker has not consumed yet. */
+    if (queue->kbase_spare_heap.enabled)
+       util_queue_destroy(&queue->kbase_spare_heap.thread);
++
++   uint32_t tail =
++      __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_ACQUIRE);
++   const uint32_t head =
++      __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_ACQUIRE);
++   for (; tail != head; tail++)
++      kbase_kmod_csf_tiler_heap_destroy(
++         dev->kmod.dev,
++         queue->kbase_destroy.ctxs[tail % PANVK_KBASE_DESTROY_RING]);
++   queue->kbase_destroy.head = 0;
++   queue->kbase_destroy.tail = 0;
++   queue->kbase_destroy.job_pending = false;
++
+    queue->kbase_spare_heap.enabled = false;
+    util_queue_fence_destroy(&queue->kbase_spare_heap.fence);
++   util_queue_fence_destroy(&queue->kbase_destroy.fence);
+    if (ctx)
+       kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
+ }
+@@ -2309,12 +2401,13 @@
+  * then walks whatever now lives at the old chunk VAs as a chunk list and
+  * faults on a garbage pointer (observed as an exception 0xc0 CSG fatal at a
+  * wild sideband address during heavy allocation churn).  Returns false when
+- * every retired slot is still in use. */
++ * every retired slot is still in use.
++ *
++ * The TERM ioctls themselves are handed to the panvk_heap worker: only the
++ * seqno check has to happen before the descriptor slot is recycled. */
+ static bool
+ kbase_try_destroy_retired_heap(struct panvk_gpu_queue *queue)
+ {
+-   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+-
+    if (!queue->kbase_retired_heap_count)
+       return true;
+ 
+@@ -2335,8 +2428,7 @@
+    while (done < queue->kbase_retired_heap_count &&
+           vt_seqno > queue->kbase_retired_heaps[done].vt_jobs &&
+           frag_seqno > queue->kbase_retired_heaps[done].frag_jobs) {
+-      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev,
+-                                        queue->kbase_retired_heaps[done].ctx);
++      kbase_queue_heap_destroy(queue, queue->kbase_retired_heaps[done].ctx);
+       done++;
+    }
+ 

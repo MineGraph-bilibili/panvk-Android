@@ -1,0 +1,53 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH perf 004] kbase: gate the per-import log lines behind a debug option
+
+Every dma-buf import printed two informational lines to logcat, and imports
+happen on each swapchain (re)creation. On Android each __android_log_print()
+crosses into the logging daemon, so two lines per import can cost more than
+the MEM_IMPORT ioctl they describe.
+
+Keep the details behind PANVK_KBASE_DEBUG_IMPORT (off by default); the
+one-shot "which import layout the kernel speaks" messages stay as they are
+(they already fire only on the first successful import).
+
+Purpose: remove logging overhead from the WSI import path.
+Tested GPU: build only, not yet run on device.
+Tested Kbase UAPI: CSF 1.21.
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: none.
+Validation test: TBD, on-device logcat check with PANVK_KBASE_DEBUG_IMPORT=1.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/lib/kmod/kbase_kmod.c b/src/panfrost/lib/kmod/kbase_kmod.c
+index ddc6187..1b77190 100644
+--- a/src/panfrost/lib/kmod/kbase_kmod.c
++++ b/src/panfrost/lib/kmod/kbase_kmod.c
+@@ -2170,12 +2170,21 @@ kbase_kmod_import_dmabuf(struct pan_kmod_dev *dev,
+       kbase_bo->nc_listed = true;
+       simple_mtx_unlock(&kbase_dev->nc_lock);
+    }
+-   mesa_logi("kbase_kmod_bo_alloc_dmabuf: succeeded for %d, bo_size=%lu, handle=%u", kbase_bo->dmabuf_fd, bo_size, handle);
+-   mesa_logi("kbase: import flags=0x%llx -> va=0x%llx pages=%llu outflags=0x%llx",
+-             (unsigned long long)import_flags,
+-             (unsigned long long)req.out.gpu_va,
+-             (unsigned long long)req.out.va_pages,
+-             (unsigned long long)req.out.flags);
++   /* Imports run on every swapchain (re)creation, and two
++    * __android_log_print() calls per import can cost more than the ioctl
++    * itself. Keep the details behind an opt-in. */
++   static int debug_import = -1;
++   if (unlikely(debug_import < 0))
++      debug_import =
++         debug_get_bool_option("PANVK_KBASE_DEBUG_IMPORT", false) ? 1 : 0;
++   if (debug_import) {
++      mesa_logi("kbase_kmod_bo_alloc_dmabuf: succeeded for %d, bo_size=%lu, handle=%u", kbase_bo->dmabuf_fd, bo_size, handle);
++      mesa_logi("kbase: import flags=0x%llx -> va=0x%llx pages=%llu outflags=0x%llx",
++                (unsigned long long)import_flags,
++                (unsigned long long)req.out.gpu_va,
++                (unsigned long long)req.out.va_pages,
++                (unsigned long long)req.out.flags);
++   }
+    return &kbase_bo->base;
+ 
+ err_unmap_gpu:

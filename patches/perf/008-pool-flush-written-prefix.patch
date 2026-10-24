@@ -1,0 +1,130 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH perf 008] panvk: flush only the written prefix of pool BOs
+
+panvk_pool_flush_maps() ran at the end of every command buffer and
+performed cache maintenance over the whole backing BO of every pool,
+even when only the first few kilobytes of a multi-megabyte slab had ever
+been written.  Profiling L4D DX9 measured the desc_pool/cs_pool flush at
+~5.8 us per EndCommandBuffer (461 calls/s, 2.66 ms/s), which was a third
+of the whole end_cmdbuf cost and almost all of it was cache cleaning
+untouched memory.
+
+Writes into a pool BO only happen inside blocks handed out by
+panvk_pool_alloc_mem(), so the highest allocation end is an upper bound
+of the written range.  Record it per BO in struct panvk_priv_bo::flush_end
+as allocations are carved out, and let panvk_pool_flush_maps() clean
+[0, flush_end) instead of [0, bo_size).
+
+  - panvk_pool_flush_bo() rounds the end up to nonCoherentAtomSize (cache
+    maintenance must be atom-aligned) and clamps it to the BO size, so the
+    range always covers every byte the CPU wrote and stays a legal flush.
+  - panvk_pool_reset() clears flush_end on every BO it recycles: a
+    recycled BO restarts at offset 0, and the stale high-water mark would
+    only widen the flush.
+  - Only pool-owned BOs are tracked; shared (refcounted) BOs keep their
+    existing flush path and are never flushed through the pool lists.
+  - An allocation that is never written only widens the flush to its own
+    size, never past it; a zero-sized allocation cannot be created.
+
+The BO contents, the allocation order and the GPU-visible data are
+unchanged; the only difference is that the cache clean covers the
+populated prefix plus atom padding instead of the full slab.
+
+Purpose: cut end_cmdbuf cache maintenance from a full-slab clean to the
+  written prefix (~5.8 us/call baseline on L4D DX9).
+Tested GPU: vivo V2302A, Mali-G715 (MT6985) — ran L4D DX9 through
+  Winlator in the prof6/prof8 profiling sessions (about 6 minutes of
+  steady rendering) with no crash, corruption or hang.
+Tested Kbase UAPI: CSF 1.18 (device kernel 5.15.197).
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: none; applies after perf/001-007.  jm-v9/002 adds the
+  neighbouring panvk_pool_get_bos() helper, no overlap.
+Validation test: L4D DX9 render smoke test; end_cmdbuf::pool_flush
+  profiler meter.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/panvk_priv_bo.h b/src/panfrost/vulkan/panvk_priv_bo.h
+--- a/src/panfrost/vulkan/panvk_priv_bo.h
++++ b/src/panfrost/vulkan/panvk_priv_bo.h
+@@ -23,6 +23,10 @@
+       uint64_t dev;
+       void *host;
+    } addr;
++   /* High-water mark of CPU-written bytes in this BO since it was last
++    * recycled.  Used to flush only the populated prefix instead of the whole
++    * BO on command buffer end. */
++   size_t flush_end;
+ };
+ 
+ VkResult panvk_priv_bo_create(struct panvk_device *dev, uint64_t size,
+diff --git a/src/panfrost/vulkan/panvk_mempool.c b/src/panfrost/vulkan/panvk_mempool.c
+--- a/src/panfrost/vulkan/panvk_mempool.c
++++ b/src/panfrost/vulkan/panvk_mempool.c
+@@ -153,6 +153,15 @@
+          panvk_priv_bo_ref(bo);
+    }
+ 
++   /* Track how far allocations have reached so panvk_pool_flush_maps() can
++    * flush only the written prefix.  Only pool-owned BOs are flushed through
++    * the pool lists. */
++   if (bo != NULL && pool->props.owns_bos) {
++      size_t end = offset + info.size;
++      if (end > bo->flush_end)
++         bo->flush_end = end;
++   }
++
+    uint32_t flags = 0;
+ 
+    if (pool->props.owns_bos)
+@@ -216,6 +225,13 @@
+ void
+ panvk_pool_reset(struct panvk_pool *pool)
+ {
++   /* Recycled BOs start from offset 0 again. */
++   list_for_each_entry(struct panvk_priv_bo, bo, &pool->bos, node)
++      bo->flush_end = 0;
++
++   list_for_each_entry(struct panvk_priv_bo, bo, &pool->big_bos, node)
++      bo->flush_end = 0;
++
+    if (pool->bo_pool) {
+       list_splicetail(&pool->bos, &pool->bo_pool->free_bos);
+       list_inithead(&pool->bos);
+@@ -273,6 +289,23 @@
+       bos[idx++] = bo->bo;
+ }
+ 
++static void
++panvk_pool_flush_bo(struct panvk_pool *pool, struct panvk_priv_bo *bo)
++{
++   size_t bo_size = pan_kmod_bo_size(bo->bo);
++   size_t end = MIN2(bo->flush_end, bo_size);
++
++   if (!end)
++      return;
++
++   /* Cache maintenance must be aligned to nonCoherentAtomSize. */
++   size_t atom = MAX2((size_t)64,
++                      (size_t)pool->dev->vk.physical->properties.nonCoherentAtomSize);
++   end = MIN2(ALIGN_POT(end, atom), bo_size);
++
++   panvk_priv_bo_flush(bo, 0, end);
++}
++
+ void
+ panvk_pool_flush_maps(struct panvk_pool *pool)
+ {
+@@ -281,10 +314,10 @@
+       return;
+ 
+    list_for_each_entry(struct panvk_priv_bo, bo, &pool->bos, node)
+-      panvk_priv_bo_flush(bo, 0, bo->bo->size);
++      panvk_pool_flush_bo(pool, bo);
+ 
+    list_for_each_entry(struct panvk_priv_bo, bo, &pool->big_bos, node)
+-      panvk_priv_bo_flush(bo, 0, bo->bo->size);
++      panvk_pool_flush_bo(pool, bo);
+ }
+ 
+ void

@@ -1,0 +1,100 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH perf 001] panvk/csf: emit the cache clean once per subqueue per batch
+
+kbase_subqueue_emit_job() emitted a 0x233 CS flush (clean+invalidate
+L2/LSC, invalidate other caches) in front of every job. In a batch of N
+jobs on the same subqueue, jobs 2..N re-clean caches that cannot hold
+new CPU writes: pan_kmod_flush_bo_map_syncs() already published every CPU
+write of the batch before the ioctl, and ring entries on one subqueue are
+executed in order, so the first job's clean covers all of them.
+
+- Add a flush_caches argument and emit the flush only when it is set.
+- Track a flushed mask per submit: the first job of each subqueue in the
+  batch flushes, later jobs on the same subqueue do not.
+- A subqueue that never appears in the batch is unaffected.
+- The queue-init stream keeps its unconditional flush.
+
+Purpose: drop redundant CS cache-flush instructions from multi-job submits.
+Tested GPU: build only, not yet run on device.
+Tested Kbase UAPI: CSF 1.21.
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: none (perf series is appended last).
+Validation test: TBD, on-device render smoke test.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+index 37d1fc5..5c9938f 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -478,7 +478,7 @@ static VkResult
+ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
+                         uint64_t stream_addr, uint32_t stream_size,
+                         uint32_t flush_id, uint64_t gpu_id,
+-                        const uint64_t *wait_seqnos)
++                        const uint64_t *wait_seqnos, bool flush_caches)
+ {
+    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+    const struct drm_panthor_csif_info *csif_info = panvk_get_csif_props(dev);
+@@ -624,13 +624,18 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
+    if (stream_size) {
+       /* Make CPU-written command-stream/descriptor memory visible to the
+        * GPU before calling into it (0x233 flush, same as the panthor
+-       * kernel: clean+invalidate L2/LSC, invalidate other caches). */
+-      cs_move32_to(&b, val32, flush_id);
+-      cs_flush_caches(&b, MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
+-                      MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
+-                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, val32,
+-                      cs_defer(0, SB_ID(IMM_FLUSH)));
+-      cs_wait_slot(&b, SB_ID(IMM_FLUSH));
++       * kernel: clean+invalidate L2/LSC, invalidate other caches).
++       * Within one submit batch every CPU write is published before the
++       * ioctl and ring entries on a subqueue run in order, so the first
++       * job's flush covers the later ones: emit it once per subqueue. */
++      if (flush_caches) {
++         cs_move32_to(&b, val32, flush_id);
++         cs_flush_caches(&b, MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
++                         MALI_CS_FLUSH_MODE_CLEAN_AND_INVALIDATE,
++                         MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, val32,
++                         cs_defer(0, SB_ID(IMM_FLUSH)));
++         cs_wait_slot(&b, SB_ID(IMM_FLUSH));
++      }
+ 
+       cs_move64_to(&b, addr64, stream_addr);
+       cs_move32_to(&b, val32, stream_size);
+@@ -1411,7 +1416,7 @@ kbase_submit_init_subqueues(struct panvk_gpu_queue *queue)
+          kbase_subqueue_emit_job(queue, subqueue, subq->kbase.init_stream_addr,
+                                  subq->kbase.init_stream_size,
+                                  subq->kbase.init_flush_id,
+-                                 phys_dev->kmod.dev->props.gpu_id, NULL);
++                                 phys_dev->kmod.dev->props.gpu_id, NULL, true);
+       if (res != VK_SUCCESS)
+          return panvk_errorf(dev->vk.physical, VK_ERROR_INITIALIZATION_FAILED,
+                              "Failed to initialize subqueue");
+@@ -2950,6 +2955,11 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
+    pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
+ 
+    uint32_t touched = 0;
++   /* Every CPU write of this batch is published by the ring clean and
++    * pan_kmod_flush_bo_map_syncs() above, and ring entries of one subqueue
++    * execute in order, so only the first job per subqueue needs the
++    * clean+invalidate. */
++   uint32_t flushed = 0;
+    for (uint32_t i = 0; i < submit->qsubmit_count; i++) {
+       const struct drm_panthor_queue_submit *qsubmit = &submit->qsubmits[i];
+ 
+@@ -2961,10 +2971,13 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
+                                        qsubmit->stream_size,
+                                        qsubmit->latest_flush,
+                                        submit->phys_dev->kmod.dev->props.gpu_id,
+-                                       queue->kbase_gpu_waits[qsubmit->queue_index]);
++                                       queue->kbase_gpu_waits[qsubmit->queue_index],
++                                       !(flushed & BITFIELD_BIT(qsubmit->queue_index)));
+       if (result != VK_SUCCESS)
+          return vk_queue_set_lost(&queue->vk, "kbase: ring emission failed");
+ 
++      flushed |= BITFIELD_BIT(qsubmit->queue_index);
++
+       memset(queue->kbase_gpu_waits[qsubmit->queue_index], 0,
+              sizeof(queue->kbase_gpu_waits[0]));
+ 
