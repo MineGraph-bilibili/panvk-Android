@@ -1,0 +1,41 @@
+From: abhay-byte <abhay02delhi@gmail.com>
+Date: 2026-10-16
+Subject: [PATCH jm-v7 001] panfrost: ignore the GPU variant on Bifrost (v6/v7) in pan_get_model biblioklept
+
+Purpose: G52 r1 (0x74021000, Helio G80/G85) reports variant 0x2 through
+kbase CORE_FEATURES, but the Bifrost rows carry variant 0 and Bifrost has no
+variants, so pan_get_model() failed with "Unknown gpu_id (0x74021000) or
+variant (0x2)". When no exact row exists for an arch 6-8 id, match on the
+product id alone. v9+ lookups are unchanged.
+Source/Reference: JimVulkan/mali-panvk (MIT, sets gpu_variant = 0 in kbase
+props); PROGRESS.md group H cloud logs (SM-A315F, TECNO KJ5n)
+Tested GPU: build-checked (universal Android build v6-v14); not run on a Bifrost device
+Tested Kbase UAPI: none (table lookup only)
+Mesa base range: 5a07217f + g615-v11-csf series + jm-v9 001-030
+Dependencies: none
+Validation test: vkEnumeratePhysicalDevices on a G52 r1 (pending)
+
+---
+ src/panfrost/model/pan_model.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/panfrost/model/pan_model.c b/src/panfrost/model/pan_model.c
+index d386f740862..48c9303ac3d 100644
+--- a/src/panfrost/model/pan_model.c
++++ b/src/panfrost/model/pan_model.c
+@@ -180,5 +180,15 @@ pan_get_model(uint64_t gpu_id, uint32_t gpu_variant)
+       }
+    }
+ 
++   /* Bifrost (v6/v7) rows carry no variant, but some kbase kernels report
++    * one anyway (G52 r1 0x74021000 says variant 0x2), so match on the
++    * product id alone there. */
++   if ((gpu_prod_id >> 16) >= 6 && (gpu_prod_id >> 16) < 9) {
++      for (unsigned i = 0; i < ARRAY_SIZE(pan_model_list); ++i) {
++         if (pan_model_list[i].gpu_prod_id == gpu_prod_id)
++            return &pan_model_list[i];
++      }
++   }
++
+    return NULL;
+ }

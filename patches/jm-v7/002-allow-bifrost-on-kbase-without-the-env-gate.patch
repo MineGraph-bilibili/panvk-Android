@@ -1,0 +1,39 @@
+From: abhay-byte <abhay02delhi@gmail.com>
+Date: 2026-10-16
+Subject: [PATCH jm-v7 002] panvk: allow Bifrost v6/v7 on kbase without PAN_I_WANT_A_BROKEN_VULKAN_DRIVER biblioklept
+
+Purpose: drop the PAN_I_WANT_A_BROKEN_VULKAN_DRIVER gate for v6/v7 in
+panvk_physical_device_init_kbase() only (the DRM path keeps it) and log a
+warning that Bifrost support is experimental instead. Lets testers create a
+device and get a PanProbe baseline. v9+ cases are unchanged.
+Source/Reference: JimVulkan/mali-panvk (MIT, warns and continues on v6/v7)
+Tested GPU: build-checked (universal Android build v6-v14); not run on a Bifrost device
+Tested Kbase UAPI: none
+Mesa base range: 5a07217f + g615-v11-csf series + jm-v9 001-030
+Dependencies: jm-v7 001
+Validation test: vkCreateDevice on a G52 MC2 / G76 (pending)
+
+---
+ src/panfrost/vulkan/panvk_physical_device.c | 9 ++-------
+ 1 file changed, 2 insertions(+), 7 deletions(-)
+
+diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/panvk_physical_device.c
+index 6369027c27d..6a79a7308e9 100644
+--- a/src/panfrost/vulkan/panvk_physical_device.c
++++ b/src/panfrost/vulkan/panvk_physical_device.c
+@@ -1389,13 +1389,8 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
+    switch (arch) {
+    case 6:
+    case 7:
+-      if (!os_get_option("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
+-         result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+-                               "WARNING: panvk is not well-tested on v%d, "
+-                               "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 "
+-                               "if you know what you're doing.", arch);
+-         goto fail_kbase;
+-      }
++      /* Bifrost over kbase JM (jm-v7 series): experimental, no gate. */
++      mesa_logw("panvk: v%u (Bifrost) support is experimental", arch);
+       break;
+ 
+    case 9: /* Valhall JM over kbase job atoms (jm-v9 series) */
