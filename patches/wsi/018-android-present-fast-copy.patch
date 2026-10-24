@@ -1,0 +1,152 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH wsi 018] panvk: trim the Android WSI present path
+
+Present called DeviceWaitIdle() on every frame, asked the mapper for the AHB
+geometry with AHardwareBuffer_describe() on every frame, and copied the frame
+row by row even when the window buffer and the AHB had the same stride.
+
+- Drop DeviceWaitIdle() when wsi->sw: wsi_common_queue_present() waits on
+  swapchain->fences[image_index] before calling queue_present(). That fence is
+  signaled by the per-image submit once the app's rendering submit completed,
+  so the GPU is done with the AHB. The dma-buf path and any
+  sw_fence_wait_in_present_thread user keep the full device flush.
+- Cache width/height/stride at swapchain creation; no mapper query per present.
+- Use one memcpy() for the frame when the strides match and the full width is
+  visible, keep the row loop otherwise.
+- Pass the damaged region to ANativeWindow_lock() as inOutDirtyBounds so the
+  compositor only recomposites what the app reported. The frame is still
+  copied in full: a partial copy is unsafe because ANativeWindow gives the
+  producer no buffer-age query.
+
+Purpose: cut per-frame overhead on the linear-copy present path.
+Tested GPU: build only (aarch64-linux-android29-clang), not yet run on device.
+Tested Kbase UAPI: CSF 1.21.
+Mesa base range: 26.3.0-devel (pinned 5a07217f).
+Dependencies: wsi/016, wsi/017.
+Validation test: TBD, on-device present smoke test.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/panvk_wsi.c b/src/panfrost/vulkan/panvk_wsi.c
+index e485002..c7fa05a 100644
+--- a/src/panfrost/vulkan/panvk_wsi.c
++++ b/src/panfrost/vulkan/panvk_wsi.c
+@@ -61,6 +61,9 @@ panvk_can_present_on_device(VkPhysicalDevice pdevice, int fd)
+ struct panvk_android_swapchain_image {
+    struct wsi_image base;
+    AHardwareBuffer *ahb;
++   uint32_t width;
++   uint32_t height;
++   uint32_t stride; /* in pixels */
+ };
+
+ struct panvk_android_swapchain {
+@@ -258,6 +261,38 @@ panvk_android_swapchain_wait_for_present2(struct wsi_swapchain *swapchain,
+    return present_id <= chain->completed_present_id ? VK_SUCCESS : VK_TIMEOUT;
+ }
+
++/* Bounding box of the damaged rectangles, clamped to the image extent.
++ * Returns false when the app reported no usable damage (present it all). */
++static bool
++panvk_android_swapchain_damage_bounds(const VkPresentRegionKHR *damage,
++                                      uint32_t width, uint32_t height,
++                                      ARect *bounds)
++{
++   if (!damage || !damage->pRectangles || damage->rectangleCount == 0)
++      return false;
++
++   int32_t left = INT32_MAX, top = INT32_MAX, right = 0, bottom = 0;
++   for (uint32_t i = 0; i < damage->rectangleCount; i++) {
++      const VkRectLayerKHR *r = &damage->pRectangles[i];
++      int64_t l = MAX2((int64_t)r->offset.x, 0);
++      int64_t t = MAX2((int64_t)r->offset.y, 0);
++      int64_t rr = MIN2((int64_t)r->offset.x + r->extent.width, (int64_t)width);
++      int64_t bb = MIN2((int64_t)r->offset.y + r->extent.height, (int64_t)height);
++      if (rr <= l || bb <= t)
++         continue;
++      left = MIN2(left, (int32_t)l);
++      top = MIN2(top, (int32_t)t);
++      right = MAX2(right, (int32_t)rr);
++      bottom = MAX2(bottom, (int32_t)bb);
++   }
++
++   if (right <= left || bottom <= top)
++      return false;
++
++   *bounds = (ARect){.left = left, .top = top, .right = right, .bottom = bottom};
++   return true;
++}
++
+ static VkResult
+ panvk_android_swapchain_queue_present(
+    struct wsi_swapchain *swapchain,
+@@ -269,25 +304,41 @@ panvk_android_swapchain_queue_present(
+    if (image_index >= chain->base.image_count)
+       return VK_ERROR_OUT_OF_DATE_KHR;
+ 
+-   VK_FROM_HANDLE(vk_device, dev, swapchain->device);
+-   dev->dispatch_table.DeviceWaitIdle(swapchain->device);
++   /* Software WSI already waited on this image's fence in
++    * wsi_common_queue_present() (the fence is signaled once the app's
++    * rendering submit has completed), so the GPU no longer touches the AHB.
++    * The dma-buf path does not wait and keeps the full device flush. */
++   const struct wsi_device *wsi = swapchain->wsi;
++   if (!wsi->sw || swapchain->sw_fence_wait_in_present_thread) {
++      VK_FROM_HANDLE(vk_device, dev, swapchain->device);
++      dev->dispatch_table.DeviceWaitIdle(swapchain->device);
++   }
+ 
+    if (chain->window && chain->images[image_index].ahb) {
++      const struct panvk_android_swapchain_image *img = &chain->images[image_index];
++      ARect damage_bounds;
++      ARect *p_damage_bounds =
++         panvk_android_swapchain_damage_bounds(damage, img->width, img->height,
++                                               &damage_bounds) ? &damage_bounds : NULL;
+       ANativeWindow_Buffer win_buf;
+-      if (ANativeWindow_lock(chain->window, &win_buf, NULL) == 0) {
++      if (ANativeWindow_lock(chain->window, &win_buf, p_damage_bounds) == 0) {
+          void *ahb_data = NULL;
+-         AHardwareBuffer_Desc desc;
+-         AHardwareBuffer_describe(chain->images[image_index].ahb, &desc);
+-         if (AHardwareBuffer_lock(chain->images[image_index].ahb,
+-                                  AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &ahb_data) == 0) {
+-            uint32_t copy_h = win_buf.height < (int)desc.height ? (uint32_t)win_buf.height : desc.height;
+-            uint32_t copy_w = win_buf.width < (int)desc.width ? (uint32_t)win_buf.width : desc.width;
+-            for (uint32_t y = 0; y < copy_h; y++) {
+-               memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
+-                      (char *)ahb_data + y * desc.stride * 4,
+-                      copy_w * 4);
++         if (win_buf.bits && win_buf.width > 0 && win_buf.height > 0 &&
++             AHardwareBuffer_lock(img->ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
++                                  -1, NULL, &ahb_data) == 0) {
++            uint32_t copy_w = MIN2((uint32_t)win_buf.width, img->width);
++            uint32_t copy_h = MIN2((uint32_t)win_buf.height, img->height);
++            if (win_buf.stride == (int32_t)img->stride && copy_w == img->width) {
++               /* Both sides are row-contiguous: copy in one go. */
++               memcpy(win_buf.bits, ahb_data, (size_t)copy_h * img->stride * 4);
++            } else {
++               for (uint32_t y = 0; y < copy_h; y++) {
++                  memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
++                         (char *)ahb_data + y * img->stride * 4,
++                         copy_w * 4);
++               }
+             }
+-            AHardwareBuffer_unlock(chain->images[image_index].ahb, NULL);
++            AHardwareBuffer_unlock(img->ahb, NULL);
+          }
+          ANativeWindow_unlockAndPost(chain->window);
+       }
+@@ -381,6 +432,13 @@ panvk_wsi_android_create_swapchain(
+       /* Ours and still undefined: the no-mapper linear probe may write it. */
+       vk_android_set_owned_ahb(chain->images[i].ahb);
+ 
++      /* Cache the geometry so present does not query the mapper every frame. */
++      AHardwareBuffer_Desc img_desc;
++      AHardwareBuffer_describe(chain->images[i].ahb, &img_desc);
++      chain->images[i].width = img_desc.width;
++      chain->images[i].height = img_desc.height;
++      chain->images[i].stride = img_desc.stride;
++
+       VkExternalMemoryImageCreateInfo emici = {
+          .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+          .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
