@@ -1450,10 +1450,11 @@ panvk_per_arch(get_physical_device_properties)(
    STATIC_ASSERT(sizeof(instance->driver_build_sha) >= VK_UUID_SIZE);
    memcpy(properties->driverUUID, instance->driver_build_sha, VK_UUID_SIZE);
 
-   snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "panvk");
+   /* Identity shown by DXVK HUD / DXVKHUB: the driver is presented as
+    * "Panvk", the version as the plain Mesa release. */
+   snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "Panvk");
    snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,
-            "PanVK-kbase " PANVK_KBASE_RELEASE " (Mesa " PACKAGE_VERSION
-            MESA_GIT_SHA1 ")");
+            "Mesa " PACKAGE_VERSION);
 
    /* VK_EXT_physical_device_drm */
    if (device->drm.primary_rdev) {

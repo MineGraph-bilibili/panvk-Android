@@ -9,7 +9,7 @@ properties.
 | Item | Value |
 | --- | --- |
 | Mesa base | `5a07217f034b3e50d8c7c7794f97a2df1742613b` (26.3.0-devel, branch `main`) |
-| Patch series | 221 patches, `patches/` (order: `common android kbase-common app-loader wsi csf csf-v11 jm-v9 jm-v7 perf local`) |
+| Patch series | 222 patches, `patches/` (order: `common android kbase-common app-loader wsi csf csf-v11 jm-v9 jm-v7 perf local`) |
 | Profile | `profiles/g615-v11-csf.json` — Mali-G615 MC6 / MT6897, panArch 11, CSF, kbase uAPI 1.21 |
 | GPU generations | v6/v7 (Bifrost JM, experimental), v9 (Valhall JM), v10–v14 (CSF) — no v8 |
 | ABI | `android-aarch64-bionic`, hot-loadable Vulkan ICD |
@@ -76,7 +76,7 @@ To reproduce the patched tree from upstream instead of using the checked-in resu
 ```sh
 ./scripts/fetch-mesa.sh                      # clones the pinned commit into work/mesa
 ./scripts/apply-patches.sh --profile g615-v11-csf --mesa work/mesa
-# must print: OK applied=221 profile=g615-v11-csf
+# must print: OK applied=222 profile=g615-v11-csf
 MESA=work/mesa ./scripts/build-android.sh --profile g615-v11-csf --ndk /opt/android-ndk-r27d
 ```
 

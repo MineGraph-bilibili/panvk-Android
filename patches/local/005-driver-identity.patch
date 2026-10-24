@@ -1,0 +1,40 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH local 005] panvk: report "Panvk" / "Mesa 26.3.0-devel" as the driver identity
+
+DXVK HUD and DXVKHUB read VK_KHR_driver_properties. Until now driverName
+was the lower-case "panvk" and driverInfo was "PanVK-kbase beta.18-rc2
+(Mesa 26.3.0-devel (git-...))" from csf-v11/099, which the tools show as
+the driver name/version.
+
+Report the short name "Panvk" and the plain release string
+"Mesa 26.3.0-devel" so DXVK/DXVKHUB show the driver and version the way
+the release is named. The PanVK-kbase release tag stays available in the
+logs (csf-v11/118 prints driverName/deviceName/driverInfo at INFO).
+
+Purpose: fix the driver name/version shown by DXVK HUD and DXVKHUB.
+Tested GPU: Mali-G615 MC6 (build), no behaviour change on the GPU.
+Tested Kbase UAPI: CSF 1.21.
+Mesa base range: 26.3.0-devel (pinned 5a07217f), patches through local/004.
+Dependencies: none (must come after csf-v11/099, which it rewrites).
+Validation test: `strings libvulkan_panfrost.so | grep 'Mesa 26.3.0-devel'`
+and the INFO startup line "Panvk (<gpu>) Mesa 26.3.0-devel".
+
+Generated-by: LLM
+
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -1450,10 +1450,11 @@
+    STATIC_ASSERT(sizeof(instance->driver_build_sha) >= VK_UUID_SIZE);
+    memcpy(properties->driverUUID, instance->driver_build_sha, VK_UUID_SIZE);
+ 
+-   snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "panvk");
++   /* Identity shown by DXVK HUD / DXVKHUB: the driver is presented as
++    * "Panvk", the version as the plain Mesa release. */
++   snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "Panvk");
+    snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,
+-            "PanVK-kbase " PANVK_KBASE_RELEASE " (Mesa " PACKAGE_VERSION
+-            MESA_GIT_SHA1 ")");
++            "Mesa " PACKAGE_VERSION);
+ 
+    /* VK_EXT_physical_device_drm */
+    if (device->drm.primary_rdev) {

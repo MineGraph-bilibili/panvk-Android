@@ -1,7 +1,7 @@
 # 补丁系列说明 / Patch series notes
 
 本仓库的 Mesa 源码树 = 基座提交 `5a07217f034b3e50d8c7c7794f97a2df1742613b`
-(26.3.0-devel) + **221 个补丁**。补丁已在当前树中全部应用，`patches/` 目录保留完整
+(26.3.0-devel) + **222 个补丁**。补丁已在当前树中全部应用，`patches/` 目录保留完整
 系列，用于复现、审阅和回退。
 
 应用顺序由 `scripts/apply-patches.sh` 固定：
@@ -14,7 +14,7 @@ common → android → kbase-common → app-loader → wsi → csf → csf-v11 �
   `--recount`、`-C1`（一行上下文），仍失败则 `PATCH-DRIFT` 硬失败退出。
 * 家族目录下若存在 `files/`，该家族的补丁应用完后会整目录覆盖到 Mesa 树
   （`app-loader`、`kbase-common` 使用这种方式替换基线文件）。
-* 正常输出为 `OK applied=221 profile=g615-v11-csf`。
+* 正常输出为 `OK applied=222 profile=g615-v11-csf`。
 
 补丁头里的 `biblioklept` 标记表示该改动由 AI 辅助生成（遵循上游 Mesa `AGENTS.md`
 的标注约定），`Generated-by: LLM` 同理。
@@ -168,7 +168,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `007-cmd-end-skip-empty-finish-cs` | `EndCommandBuffer` 对空 builder 跳过 `finish_cs`，省掉无效的 CS 等待、错误检查与 cache clean。 |
 | `008-pool-flush-written-prefix` | 池 BO 记录写入高水位，只 flush 已写入的前缀而不是整块 slab（实测 5.6–7.3 µs → 1–2 µs）。 |
 
-## 11. local（4）— 全部自研
+## 11. local（5）— 全部自研
 
 本机（MT6897 / MT6985 + Android 15）实测暴露出来、又不适合放进通用系列的改动。
 
@@ -178,6 +178,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `002-tolerate-unseekable-dmabuf` | `pan_kmod.c` 中 `lseek` 探测返回 `-1/0` 时按 `size=0` 继续，而不是直接报错——MTK AFBC gralloc dma-buf 不实现 `llseek`。 |
 | `003-skip-lseek-fd-probe` | `GetMemoryFdPropertiesKHR` 去掉 `lseek(fd,0,SEEK_END)` 有效性探测，只保留 `fd < 0` 检查，避免窗口缓冲导入被误杀导致交换链永不上屏。 |
 | `004-kbase-page-size-helper` | 重新引入 `kbase_kmod_page_size()`（`sysconf(_SC_PAGESIZE)`），修复 jm-v9/023 等补丁引用该助手而参考基线已删除所导致的编译失败。 |
+| `005-driver-identity` | `VK_KHR_driver_properties` 上报的身份从 `panvk` / `PanVK-kbase beta.18-rc2 (Mesa 26.3.0-devel …)` 改为 `Panvk` / `Mesa 26.3.0-devel`，即 DXVK HUD、DXVKHUB 里显示的驱动名与版本。仅改字符串，不影响 GPU 行为。 |
 
 ---
 
@@ -199,7 +200,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 
 ---
 
-## 13. 附录：完整补丁清单（221）
+## 13. 附录：完整补丁清单（222）
 
 见下方按家族列出的 `文件名 | 上游 subject` 全表。
 ### common (1)
@@ -469,7 +470,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | 007-cmd-end-skip-empty-finish-cs.patch | panvk/csf: skip finish_cs for empty command streams |
 | 008-pool-flush-written-prefix.patch | panvk: flush only the written prefix of pool BOs |
 
-### local (4)
+### local (5)
 
 | Patch | Subject |
 | --- | --- |
@@ -477,4 +478,5 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | 002-tolerate-unseekable-dmabuf.patch | tolerate-unseekable-dmabuf |
 | 003-skip-lseek-fd-probe.patch | skip-lseek-fd-probe |
 | 004-kbase-page-size-helper.patch | kbase: keep the host page-size helper |
+| 005-driver-identity.patch | panvk: report "Panvk" / "Mesa 26.3.0-devel" as the driver identity |
 
