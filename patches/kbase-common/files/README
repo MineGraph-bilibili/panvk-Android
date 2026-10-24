@@ -1,0 +1,17 @@
+New Kbase backend files, copied verbatim from the reference below.
+Provenance: https://github.com/wonderkast02/panvk-g720-kbase-csf
+  branch android-candidate-beta-1.9.4, commit 3549264275c9663ed73e01d652f4c0d16f21df22
+  (src/panfrost/lib/kmod/kbase_* + mali_base_* + mali_kbase_csf_registers.h)
+Licenses preserved in-file: kbase_kmod.[ch] MIT (Copyright 2026 Collabora, Ltd.
+  per reference); ARM UAPI headers GPL-2.0 WITH Linux-syscall-note.
+kbase_kmod.c states target range r32p0-r44p0 (JM uAPI 11.x / CSF uAPI 1.x).
+  Poco X6 Pro DDK version still to be confirmed at runtime (VERSION_CHECK).
+apply-patches.sh copies this tree over the Mesa checkout AFTER applying
+*.patch files. Never edit these copies in the Mesa tree; fix forward here.
+
+011 (2026-09-19, G615 bring-up): NEED_MMAP import fix. This DDK reports
+  NEED_MMAP (not SAME_VA) for dma-heap imports: req.out.gpu_va is the real
+  GPU VA (observed 0x41000) with a separate CPU mapping. same_va now tracks
+  BASE_MEM_SAME_VA only; gpu_va = req.out.gpu_va for NEED_MMAP imports.
+  New cpu_gpu_coherent flag (from BASE_MEM_COHERENT_SYSTEM) skips
+  KBASE_IOCTL_MEM_SYNC for system-coherent regions (EINVAL on this DDK).

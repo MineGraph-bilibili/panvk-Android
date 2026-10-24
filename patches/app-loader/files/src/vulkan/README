@@ -1,0 +1,14 @@
+Application-loadable ICD exports (Android WSI + generic ICD symbols).
+
+The generic Vulkan ICD entry points every alternate-driver loader needs:
+
+- vk_icdGetInstanceProcAddr
+- vk_icdGetPhysicalDeviceProcAddr
+- vk_icdNegotiateLoaderICDInterfaceVersion
+
+Upstream's Android version script (src/vulkan/vulkan-android.sym) exports
+only HMI (HAL modules are loaded by the system libvulkan, not dlopened by
+apps). This overlay adds vulkan-app-loader.sym (HMI + ICD symbols) and the
+app-loader patch switches the Android link to it. This repository only ever
+builds panvk for Android (gallium-drivers=, vulkan-drivers=panfrost), so the
+global swap is safe here; the HAL-only script stays untouched for reference.
