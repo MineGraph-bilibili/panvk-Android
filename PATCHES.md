@@ -1,7 +1,7 @@
 # 补丁系列说明 / Patch series notes
 
 本仓库的 Mesa 源码树 = 基座提交 `5a07217f034b3e50d8c7c7794f97a2df1742613b`
-(26.3.0-devel) + **222 个补丁**。补丁已在当前树中全部应用，`patches/` 目录保留完整
+(26.3.0-devel) + **223 个补丁**。补丁已在当前树中全部应用，`patches/` 目录保留完整
 系列，用于复现、审阅和回退。
 
 应用顺序由 `scripts/apply-patches.sh` 固定：
@@ -14,7 +14,7 @@ common → android → kbase-common → app-loader → wsi → csf → csf-v11 �
   `--recount`、`-C1`（一行上下文），仍失败则 `PATCH-DRIFT` 硬失败退出。
 * 家族目录下若存在 `files/`，该家族的补丁应用完后会整目录覆盖到 Mesa 树
   （`app-loader`、`kbase-common` 使用这种方式替换基线文件）。
-* 正常输出为 `OK applied=222 profile=g615-v11-csf`。
+* 正常输出为 `OK applied=223 profile=g615-v11-csf`。
 
 补丁头里的 `biblioklept` 标记表示该改动由 AI 辅助生成（遵循上游 Mesa `AGENTS.md`
 的标注约定），`Generated-by: LLM` 同理。
@@ -61,7 +61,7 @@ Android 图形栈接入层：让 PanVK 在 Android 上拿到窗口缓冲和 gral
 | --- | --- |
 | `001-android-icd-exports` | 在导出 HMI 符号的同时导出 Vulkan ICD 符号，使 so 能被 Android Vulkan loader 当作 ICD 热加载。 |
 
-## 5. wsi（3）
+## 5. wsi（4）
 
 Android 窗口系统集成层：`VK_KHR_android_surface` + AHB 交换链。
 
@@ -70,6 +70,7 @@ Android 窗口系统集成层：`VK_KHR_android_surface` + AHB 交换链。
 | `016-android-surface-swapchain` | 引入 `VK_KHR_android_surface` 与基于 AHB 的交换链实现。 |
 | `017-android-swapchain-owned-ahb` | 标记交换链自带的 AHB 为驱动所有，避免应用侧提前回收。 |
 | **`018-android-present-fast-copy`（自研）** | 裁剪 Android WSI 呈现路径：present 时直接做一次拷贝，去掉多余的中转与同步，降低每帧呈现的 CPU 开销。该项与 perf 系列同属自研优化，也是 XenDroid+ 黑屏问题排查（`local/002`、`local/003`）所在链路的相邻改动。 |
+| **`019-android-zero-copy-present`（自研）** | 交换链直接渲染进窗口缓冲：创建时预 dequeue 并把每个窗口的 AHB 经延迟 AHB 路径导入为 `VkImage`，acquire 只 dequeue + 等 fence，present 只发一次 `queueBuffer`，去掉每帧整帧 CPU 拷贝与冷缓存 AHB 读。缺符号、几何/格式不匹配、dma-buf 导入失败或 `PANVK_WSI_ZERO_COPY=0` 时整体回退旧拷贝路径并打印一行日志。构建通过，尚未真机验证；仅对直接使用 Android surface 的原生应用生效（Winlator 走自带 X11 WSI，不会触发）。 |
 
 ## 6. csf（2）
 
@@ -200,7 +201,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 
 ---
 
-## 13. 附录：完整补丁清单（222）
+## 13. 附录：完整补丁清单（223）
 
 见下方按家族列出的 `文件名 | 上游 subject` 全表。
 ### common (1)
@@ -239,13 +240,14 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | --- | --- |
 | 001-android-icd-exports.patch | android: export ICD symbols alongside HMI |
 
-### wsi (3)
+### wsi (4)
 
 | Patch | Subject |
 | --- | --- |
 | 016-android-surface-swapchain.patch | panvk: Android VK_KHR_android_surface + AHB swapchain |
 | 017-android-swapchain-owned-ahb.patch | panvk: mark Android WSI swapchain AHBs as driver-owned |
 | 018-android-present-fast-copy.patch | panvk: trim the Android WSI present path |
+| 019-android-zero-copy-present.patch | panvk/android: zero-copy present into the window buffer |
 
 ### csf (2)
 
