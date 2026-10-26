@@ -1,0 +1,117 @@
+# Purpose: PANVK_AFRC=16|24|32 opt-in fixed-rate lossy colour compression (experimental).
+#   Application-created colour images that pass the safety filters try an AFRC
+#   modifier before the AFBC-first automatic modifier list, which otherwise
+#   never selects AFRC.
+# Source/Reference: original, written for this repo (no upstream commit);
+#   arch/format filters follow panvk_image_get_mod()/pan_image_afrc checks.
+# Tested GPU: none yet — build-only validation. Default-off, so the production
+#   path is byte-identical to the perf/local series on Mali-G715 (MT6985).
+# Tested Kbase UAPI: n/a (image modifier selection, no ioctl changes).
+# Mesa base range: 26.3.0-devel (pinned 5a07217f).
+# Dependencies: none. Applies on top of the perf/local families in the
+#   g615-v11-csf series, but is intentionally absent from SERIES.
+# Validation: cross-compiled for v6..v14 (2026-10-25); with PANVK_AFRC unset or
+#   0 the modifier selection path is unchanged. 16/24/32 keep the option open;
+#   WSI/CRC, sparse, mutable, cube, block-texel, storage and host-transfer
+#   images are excluded. No device run yet; enable only for A/B experiments.
+#
+--- a/src/panfrost/vulkan/panvk_image.c
++++ b/src/panfrost/vulkan/panvk_image.c
+@@ -322,6 +322,10 @@
+ }
+ 
+ static uint64_t
++panvk_image_try_afrc(struct panvk_image *image,
++                     const struct pan_image_usage *iusage);
++
++static uint64_t
+ panvk_image_get_mod(struct panvk_image *image,
+                     const VkImageCreateInfo *pCreateInfo)
+ {
+@@ -351,6 +355,11 @@
+    if (iusage.legacy_scanout || image->bc_emul)
+       return DRM_FORMAT_MOD_LINEAR;
+ 
++   /* PANVK_AFRC is an experimental AFRC path, disabled by default. */
++   uint64_t afrc_mod = panvk_image_try_afrc(image, &iusage);
++   if (afrc_mod != DRM_FORMAT_MOD_INVALID)
++      return afrc_mod;
++
+    /* Without external dependencies, pick the best modifier that supports the image. */
+    return panvk_image_get_mod_from_list(image, &iusage, NULL, 0);
+ }
+@@ -452,6 +461,74 @@
+    return bytes_per_pixel <= 4;
+ }
+ 
++/* PANVK_AFRC=16|24|32: opt-in fixed-rate lossy colour compression for
++ * application-created images. 0 (default) keeps the existing modifier
++ * selection untouched. */
++static unsigned
++panvk_afrc_cu_size(void)
++{
++   unsigned cu = debug_get_num_option("PANVK_AFRC", 0);
++   return (cu == 16 || cu == 24 || cu == 32) ? cu : 0;
++}
++
++static uint64_t
++panvk_image_try_afrc(struct panvk_image *image,
++                     const struct pan_image_usage *iusage)
++{
++   struct panvk_physical_device *phys_dev =
++      to_panvk_physical_device(image->vk.base.device->physical);
++   unsigned arch = pan_arch(phys_dev->kmod.dev->props.gpu_id);
++   unsigned cu = panvk_afrc_cu_size();
++
++   if (!cu || arch < 10 || !pan_query_afrc(&phys_dev->kmod.dev->props) ||
++       PANVK_DEBUG(NO_AFBC))
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (image->vk.image_type != VK_IMAGE_TYPE_2D || image->vk.samples != 1 ||
++       image->vk.extent.depth != 1 || image->vk.extent.width < 256 ||
++       image->vk.extent.height < 256)
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (!(vk_format_aspects(image->vk.format) & VK_IMAGE_ASPECT_COLOR_BIT) ||
++       vk_format_get_plane_count(image->vk.format) != 1)
++      return DRM_FORMAT_MOD_INVALID;
++
++   if ((image->vk.usage | image->vk.stencil_usage) &
++       (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT |
++        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (image->vk.create_flags &
++       (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
++        VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
++        VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
++        VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT |
++        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
++      return DRM_FORMAT_MOD_INVALID;
++
++   /* CRC/AFRC interaction is not validated yet, so skip WSI images. */
++   if (iusage->wsi)
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (!pan_afrc_supports_format(vk_format_to_pipe_format(image->vk.format)))
++      return DRM_FORMAT_MOD_INVALID;
++
++   const uint64_t mod = DRM_FORMAT_MOD_ARM_AFRC(AFRC_FORMAT_MOD_CU_SIZE_P0(
++      cu == 16 ? AFRC_FORMAT_MOD_CU_SIZE_16
++               : cu == 24 ? AFRC_FORMAT_MOD_CU_SIZE_24
++                          : AFRC_FORMAT_MOD_CU_SIZE_32));
++
++   if (!panvk_image_can_use_mod(image, iusage, mod, false))
++      return DRM_FORMAT_MOD_INVALID;
++
++   /* Only reachable with the experimental option enabled; lets users confirm
++    * that AFRC was actually selected for a given image. */
++   mesa_logi("PANVK_AFRC: %ux%u AFRC CU %u selected",
++             image->vk.extent.width, image->vk.extent.height, cu);
++
++   return mod;
++}
++
+ /* AFRC coding-unit size in bytes for a BC2/BC3 shadow. 24 (3 bits per
+  * component, 12 bpp) is the smallest rate that stays above the 8 bpp ASTC
+  * transcode on every mip level of real BC2/BC3 textures (+2.5 to +7.6 dB

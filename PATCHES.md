@@ -480,3 +480,14 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | 004-kbase-page-size-helper.patch | kbase: keep the host page-size helper |
 | 005-driver-identity.patch | panvk: report "Panvk" / "Mesa 26.3.0-devel" as the driver identity |
 
+---
+
+## 14. gpu（1）— 归档，不应用
+
+GPU 侧实验补丁，仅做归档：**不在 `scripts/apply-patches.sh` 的 SERIES 中，构建永不应用**，
+源码树仍等于基座 + 222 个补丁。
+
+| 补丁 | 作用 |
+| --- | --- |
+| `001-afrc-opt-in.patch` | `PANVK_AFRC=16\|24\|32` 时，应用自建彩色图像在 AFBC 优先的自动 modifier 列表之前尝试 AFRC 固定率压缩；默认 0（关闭）时 modifier 选择路径不变，WSI/CRC、sparse、mutable、cube、block-texel、storage、host-transfer 图像均排除。实验性，尚未真机验证。 |
+
