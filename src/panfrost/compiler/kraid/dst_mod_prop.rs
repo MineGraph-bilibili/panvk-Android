@@ -326,7 +326,7 @@ impl<A: AllocSSA> DstModProp<'_, A> {
     fn fold_clamp(
         &mut self,
         dst: &Dst,
-        dst_type: DataType,
+        mut dst_type: DataType,
         clamp: &mut FClamp,
     ) -> bool {
         let DstRef::SSA(vec) = &dst.dst_ref else {
@@ -334,6 +334,10 @@ impl<A: AllocSSA> DstModProp<'_, A> {
         };
         debug_assert!(vec.comps() == 1);
         let ssa = vec[0];
+
+        if dst_type == DataType::F32 && dst.lanes.is_f16_narrow() {
+            dst_type = DataType::F16;
+        }
 
         let mut changed = false;
         if let Some(use_mod) = self.use_mods.get(&ssa) {
@@ -349,11 +353,7 @@ impl<A: AllocSSA> DstModProp<'_, A> {
                 self.set_def_clamp(ssa, ClampUses::F16(*clamp));
             }
             DataType::F32 => {
-                if dst.lanes.is_f16_narrow() {
-                    self.set_def_clamp(ssa, ClampUses::F16(*clamp));
-                } else {
-                    self.set_def_clamp(ssa, ClampUses::F32(*clamp));
-                }
+                self.set_def_clamp(ssa, ClampUses::F32(*clamp));
             }
             _ => panic!("Invlaid dst_type"),
         }

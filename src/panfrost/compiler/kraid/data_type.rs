@@ -290,6 +290,10 @@ impl DataType {
         self.num_type() == NumericType::Integer
     }
 
+    pub fn is_any_int_type(&self) -> bool {
+        self.is_int_type()
+    }
+
     pub fn total_bits(&self) -> u8 {
         let (comps, _, bits) = self.to_pieces();
         comps * bits

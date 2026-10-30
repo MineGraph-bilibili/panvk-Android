@@ -87,6 +87,9 @@ impl WordCopies<'_> {
                 }
             }
             Op::FAdd(op) => {
+                if op.dst.lanes.is_f16_narrow() {
+                    return;
+                }
                 if let DstRef::SSA(vec) = &op.dst.dst_ref {
                     debug_assert_eq!(vec.comps(), 1);
                     let ssa = vec[0];
@@ -248,7 +251,7 @@ impl WordCopies<'_> {
             SrcMod::None => (),
             SrcMod::BNot => {
                 // BNot requires an integer type
-                if !src_type.is_int_type() {
+                if !src_type.is_any_int_type() {
                     return;
                 }
             }

@@ -35,74 +35,101 @@ fn imm_u8(b: &mut impl Builder, shift: u8) -> Src {
     panic!("Failed to find small constant for shift: {shift}");
 }
 
-fn xor_regs(b: &mut impl Builder, dst_b: Range<u16>, src_b: Range<u16>) {
-    let bytes = dst_b.end - dst_b.start;
-    debug_assert_eq!(src_b.end - src_b.start, bytes);
-    debug_assert!(bytes <= u16::from(MAX_COPY_SIZE));
-    let bytes = u8::try_from(bytes).unwrap();
+fn xor_bytes(b: &mut impl Builder, dst_b: Range<u16>, src_b: Range<u16>) {
+    // XOR is used only on 1 byte register swaps
+    debug_assert!(dst_b.len() == 1 && src_b.len() == 1);
 
-    if bytes == 1 {
-        // For this, we're going to write the whole destination register
-        let dst_byte = u8::try_from(dst_b.start % 4).unwrap();
-        let mut dst = RegRef::from_byte_range(dst_b).unwrap();
-        dst.range = RegRange::Regs(1);
+    // For this, we're going to write the whole destination register
+    let dst_byte = u8::try_from(dst_b.start % 4).unwrap();
+    let mut dst = RegRef::from_byte_range(dst_b).unwrap();
+    dst.range = RegRange::Regs(1);
 
-        // For src0, we take the src byte and widen it to 32 bits.  This leaves
-        // us with the src byte in the bottom 8 byts and zeros in the top 24
-        // bits.  We can do this because we know the widen operations on
-        // OpShiftLop sources are unsigned (and we have tests for this).
-        let src = RegRef::from_byte_range(src_b).unwrap();
-        let src0 = Src::from(src).swizzle(Swizzle::widen_u8(0));
+    // For src0, we take the src byte and widen it to 32 bits.  This leaves
+    // us with the src byte in the bottom 8 bits and zeros in the top 24
+    // bits.  We can do this because we know the widen operations on
+    // OpShiftLop sources are unsigned (and we have tests for this).
+    let src = RegRef::from_byte_range(src_b).unwrap();
+    let src0 = Src::from(src).swizzle(Swizzle::widen_u8(0));
 
-        // Then we shift the src up to match dst.  Now the src byte is in the
-        // same position as the dst byte with all other bits in the word zero.
-        // The resulting XOR will leave everything in the destination alone
-        // except the one byte we wish to modify, even though we do a full
-        // 32-bit XOR.
-        let shift = imm_u8(b, dst_byte * 8);
+    // Then we shift the src up to match dst.  Now the src byte is in the
+    // same position as the dst byte with all other bits in the word zero.
+    // The resulting XOR will leave everything in the destination alone
+    // except the one byte we wish to modify, even though we do a full
+    // 32-bit XOR.
+    let shift = imm_u8(b, dst_byte * 8);
 
-        b.push_op(OpShiftLop {
-            dst: dst.into(),
-            dst_type: DataType::U32,
-            shift_op: ShiftOp::LShift,
-            logic_op: LogicOp::Xor,
-            not_result: false,
-            src0,
-            shift,
-            src2: dst.into(),
-        });
-    } else {
-        let comps = if bytes == 2 { 2 } else { 1 };
-        let dst_type = DataType::v(comps, DataType::u(bytes * 8));
+    b.push_op(OpShiftLop {
+        dst: dst.into(),
+        dst_type: DataType::U32,
+        shift_op: ShiftOp::LShift,
+        logic_op: LogicOp::Xor,
+        not_result: false,
+        src0,
+        shift,
+        src2: dst.into(),
+    });
+}
 
-        let dst = RegRef::from_byte_range(dst_b).unwrap();
-        let src = RegRef::from_byte_range(src_b).unwrap();
+#[derive(Clone, Copy)]
+enum AddSubOp {
+    Add,
+    Sub,
+}
 
-        // src2 isn't allowed to have a swizzle so we need to expand it out to
-        // a full register.  It lines up with dst so the mask will take care of
-        // selecting the right half
-        let mut src2 = dst;
-        if bytes < 4 {
-            src2.range = RegRange::Regs(1);
+fn iadd_regs(
+    b: &mut impl Builder,
+    dst_b: Range<u16>,
+    src1_b: Range<u16>,
+    src2_b: Range<u16>,
+    op: AddSubOp,
+) {
+    let bytes = u8::try_from(dst_b.len()).unwrap();
+    // IADD is used on 2/4/8 bytes register swaps.
+    debug_assert!(bytes > 1);
+    debug_assert!(src1_b.len() == bytes.into() && src2_b.len() == bytes.into());
+
+    let comps = if bytes == 2 { 2 } else { 1 };
+    let dst_type = DataType::v(comps, DataType::u(bytes * 8));
+
+    let dst = RegRef::from_byte_range(dst_b).unwrap();
+    let src1 = RegRef::from_byte_range(src1_b).unwrap();
+    let src2 = RegRef::from_byte_range(src2_b).unwrap();
+
+    match op {
+        AddSubOp::Add => {
+            b.push_op(OpIAdd {
+                dst: dst.into(),
+                dst_type,
+                saturate: false,
+                srcs: [src1.into(), src2.into()],
+            });
         }
-
-        b.push_op(OpShiftLop {
-            dst: dst.into(),
-            dst_type,
-            shift_op: ShiftOp::None,
-            logic_op: LogicOp::Xor,
-            not_result: false,
-            src0: src.into(),
-            shift: 0_u8.into(),
-            src2: src2.into(),
-        });
+        AddSubOp::Sub => {
+            b.push_op(OpISub {
+                dst: dst.into(),
+                dst_type,
+                saturate: false,
+                srcs: [src1.into(), src2.into()],
+            });
+        }
     }
 }
 
 fn swap_regs(b: &mut impl Builder, dst_b: Range<u16>, src_b: Range<u16>) {
-    xor_regs(b, dst_b.clone(), src_b.clone());
-    xor_regs(b, src_b.clone(), dst_b.clone());
-    xor_regs(b, dst_b.clone(), src_b.clone());
+    let bytes = dst_b.end - dst_b.start;
+    debug_assert_eq!(src_b.end - src_b.start, bytes);
+    debug_assert!(bytes <= u16::from(MAX_COPY_SIZE));
+
+    if bytes == 1 {
+        xor_bytes(b, dst_b.clone(), src_b.clone());
+        xor_bytes(b, src_b.clone(), dst_b.clone());
+        xor_bytes(b, dst_b.clone(), src_b.clone());
+    } else {
+        use AddSubOp::*;
+        iadd_regs(b, dst_b.clone(), dst_b.clone(), src_b.clone(), Add);
+        iadd_regs(b, src_b.clone(), dst_b.clone(), src_b.clone(), Sub);
+        iadd_regs(b, dst_b.clone(), dst_b.clone(), src_b.clone(), Sub);
+    }
 }
 
 fn copy_mem<A: AllocSSA>(

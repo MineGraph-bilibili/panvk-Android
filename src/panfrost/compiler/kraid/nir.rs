@@ -778,7 +778,7 @@ impl<'a> ShaderFromNir<'a> {
                         _ => panic!("Usupported float comparison"),
                     },
                     srcs: [srcs(0), srcs(1)],
-                    accum: 0_u32.into(),
+                    accum: Src::zero(alu.def.bit_size),
                     accum_op: CmpAccumOp::None,
                 });
             }
@@ -1077,7 +1077,7 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     dst_type: dst_type(NumericType::Integer),
                     saturate: false,
-                    srcs: [0_u32.into(), srcs(0)],
+                    srcs: [Src::zero(alu.def.bit_size), srcs(0)],
                 });
             }
             nir_op_inot => {
@@ -1089,7 +1089,7 @@ impl<'a> ShaderFromNir<'a> {
                     not_result: true,
                     src0: srcs(0),
                     shift: Src::from(0_u8),
-                    src2: 0_u32.into(),
+                    src2: Src::zero(alu.def.bit_size),
                 });
             }
             nir_op_ieq_pan | nir_op_ige_pan | nir_op_ilt_pan
@@ -1137,7 +1137,7 @@ impl<'a> ShaderFromNir<'a> {
                         res_type: CmpResultType::M1,
                         cmp_op,
                         srcs: [srcs(0), srcs(1)],
-                        accum: 0_u32.into(),
+                        accum: Src::zero(alu.def.bit_size),
                         accum_op: CmpAccumOp::None,
                     });
                 }

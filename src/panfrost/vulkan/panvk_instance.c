@@ -393,8 +393,8 @@ PFN_vkVoidFunction
 panvk_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
    VK_FROM_HANDLE(panvk_instance, instance, _instance);
-   return vk_instance_get_proc_addr(&instance->vk, &panvk_instance_entrypoints,
-                                    pName);
+   return vk_instance_get_proc_addr(instance ? &instance->vk : NULL,
+                                    &panvk_instance_entrypoints, pName);
 }
 
 /* The loader wants us to expose a second GetInstanceProcAddr function

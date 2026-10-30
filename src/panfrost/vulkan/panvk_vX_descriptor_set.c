@@ -142,7 +142,7 @@ write_image_view_desc(struct panvk_descriptor_set *set,
       for (uint8_t plane = 0; plane < binding_layout->textures_per_desc;
            plane++)
          write_nulldesc(set, binding, elem,
-                        get_sampler_subdesc_info(binding_layout->type, plane));
+                        get_tex_subdesc_info(binding_layout->type, plane));
       return;
    }
 

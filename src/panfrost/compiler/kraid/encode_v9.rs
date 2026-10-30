@@ -374,7 +374,9 @@ fn op_encode_sr_write(op: &impl Opcode, dst: &Dst) -> SrWrite {
     };
 
     let data_type = op.dst_type(dst);
-    if data_type.total_bits() == 16 {
+    if data_type == DataType::SR {
+        assert_eq!(dst.lanes, ir::DstLanes::All);
+    } else if data_type.total_bits() == 16 {
         assert_eq!(dst.lanes, ir::DstLanes::H0);
     } else {
         debug_assert!(data_type.total_bits() >= 32);

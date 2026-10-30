@@ -1416,10 +1416,26 @@ impl LocalRegAlloc<'_> {
         let bytes = vec.bytes();
         self.choose_ssa_ref_bytes(p, vec, align, |b| {
             let bytes = b..(b + u16::from(bytes));
-            src_bytes
-                .count_set_in_range(bytes.start.into()..bytes.end.into())
-                .try_into()
-                .unwrap_or(u8::MAX)
+
+            let mut cost = 0;
+            for (ssa, bytes) in vec.iter_zip_bytes(bytes) {
+                // If this SSA is already in the right place, it's free
+                if self.ssa_bytes(ssa).start == bytes.start {
+                    continue;
+                }
+
+                // One to move this SSA into place
+                cost += 1;
+
+                // One more if we have to move something else out
+                if src_bytes
+                    .any_set_in_range(bytes.start.into()..bytes.end.into())
+                {
+                    cost += 1;
+                }
+            }
+
+            cost
         })
     }
 

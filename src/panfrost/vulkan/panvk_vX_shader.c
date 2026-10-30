@@ -2865,7 +2865,11 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
        * then let nir_opt_non_uniform_access figure out which ones can really
        * be nonuniform based on divergence analysis */
       NIR_PASS(_, nir, nir_shader_instructions_pass,
-               mark_all_access_non_uniform, nir_metadata_all, NULL);
+               mark_all_access_non_uniform,
+               nir_metadata_control_flow |
+                  nir_metadata_live_defs |
+                  nir_metadata_instr_index,
+               NULL);
    }
 #endif
 
@@ -3961,15 +3965,16 @@ panvk_compile_shader(struct panvk_device *dev,
 
       nir_shader *nir = info->nir;
 
+      bool allow_merging_workgroups = false;
 #if PAN_ARCH >= 9
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-      variant->info.cs.allow_merging_workgroups =
+      allow_merging_workgroups =
          valhall_can_merge_workgroups(nir);
 
       /* With merged workgroups, we need to use different divergence analysis
        * options to take into account that threads from different workgroups
        * may be in the same subgroup */
-      if (variant->info.cs.allow_merging_workgroups) {
+      if (allow_merging_workgroups) {
          nir->options = pan_get_nir_shader_compiler_options(
             PAN_ARCH, MESA_SHADER_COMPUTE, true);
          /* Invalidate the old divergence analysis */
@@ -3980,7 +3985,7 @@ panvk_compile_shader(struct panvk_device *dev,
 
       panvk_lower_nir(dev, nir, info->set_layout_count, info->set_layouts,
                       info->robustness, state, &shader->desc_info,
-                      variant->info.cs.allow_merging_workgroups);
+                      allow_merging_workgroups);
 
       variant->own_bin = true;
 
@@ -3991,6 +3996,8 @@ panvk_compile_shader(struct panvk_device *dev,
          panvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
          return result;
       }
+      /* pan_postprocess_nir() zeroes info, so store the decision last. */
+      variant->info.cs.allow_merging_workgroups = allow_merging_workgroups;
       break;
    }
 

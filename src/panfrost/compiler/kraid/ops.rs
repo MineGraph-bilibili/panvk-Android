@@ -990,7 +990,9 @@ impl DisplayOp for OpDiscard {
             self.cmp_op,
             self.fmt_src(&self.srcs[0]),
             self.fmt_src(&self.srcs[1]),
-        )
+        )?;
+
+        Ok(())
     }
 }
 
@@ -4231,6 +4233,7 @@ impl TexWriteMask {
 
 impl fmt::Display for TexWriteMask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, ".")?;
         for (i, c) in "rgba".chars().enumerate() {
             if (self.0 & (1 << i)) != 0 {
                 write!(f, "{c}")?;

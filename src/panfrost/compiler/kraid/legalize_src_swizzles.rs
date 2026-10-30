@@ -28,18 +28,25 @@ fn legalize_op_swizzles(b: &mut impl SSABuilder, op: &mut Op) {
         };
     }
 
-    for (i, (src, src_type)) in op.srcs_types_mut().enumerate() {
+    for (i, (op_src, src_type)) in op.srcs_types_mut().enumerate() {
         if swizzle_bits[i] == 0 {
             continue;
         }
 
+        let swz_type = DataType::get(
+            swizzle_bits[i] / src_type.bits(),
+            src_type.num_type(),
+            src_type.bits(),
+        );
+
         let tmp = b.alloc_ssa(swizzle_bits[i]);
-        let src_ref = std::mem::replace(&mut src.src_ref, tmp.into());
-        let swizzle = std::mem::replace(&mut src.swizzle, Swizzle::NONE);
+        let mut src = Src::from(tmp);
+        std::mem::swap(&mut op_src.src_ref, &mut src.src_ref);
+        std::mem::swap(&mut op_src.swizzle, &mut src.swizzle);
         b.push_op(OpSwz {
             dst: tmp.into(),
-            src_type,
-            src: Src::from(src_ref).swizzle(swizzle),
+            src_type: swz_type,
+            src,
         });
     }
 }
@@ -62,5 +69,6 @@ impl Shader<'_> {
             b.push_instr(instr);
             b.into_mapped()
         });
+        self.info.src_swizzles_legal = true;
     }
 }

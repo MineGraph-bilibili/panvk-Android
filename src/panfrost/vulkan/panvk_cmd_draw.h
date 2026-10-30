@@ -48,6 +48,7 @@ struct panvk_attrib_buf {
 
 struct panvk_resolve_attachment {
    VkResolveModeFlagBits mode;
+   VkRenderingAttachmentFlagsKHR flags;
    struct panvk_image_view *dst_iview;
 };
 
@@ -174,6 +175,7 @@ struct panvk_cmd_graphics_state {
       uint32_t draws;
       uint8_t pre_color, pre_zs;
       bool clean_tile, frame_shaders_set;
+      uint32_t clean_tile_skip;
    } pass_stats;
    /* PANVK_RP_MERGE=1: a render pass that ends with a compatible pass right
     * behind it is kept open (suspended) and the next one resumes it, so the

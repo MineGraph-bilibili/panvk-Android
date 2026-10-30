@@ -87,7 +87,7 @@ static struct {
    uint32_t area_hist[4];      /* render area vs target: <5%, <25%, <75%, >=75% */
    uint32_t size_hist[3];      /* target px: <=256x256, <=1280x720, larger */
    uint32_t c_load, c_clear, c_store, zs_load, zs_clear, zs_store;
-   uint32_t clean_tile, pre_always, msaa, layered, no_fs_info;
+   uint32_t clean_tile, clean_tile_skip, pre_always, msaa, layered, no_fs_info;
    uint64_t area_px, target_px;
 } pstat = { .lock = SIMPLE_MTX_INITIALIZER };
 
@@ -137,6 +137,7 @@ pass_stats_record(struct panvk_cmd_buffer *cmdbuf)
                             r->fb.load.s.in_bounds_load == PAN_FB_LOAD_CLEAR);
    pstat.zs_store += zs && (r->fb.store.zs.store || r->fb.store.s.store);
    pstat.clean_tile += ps->clean_tile;
+   pstat.clean_tile_skip += ps->clean_tile_skip;
    pstat.pre_always += ps->pre_color == MALI_PRE_POST_FRAME_SHADER_MODE_ALWAYS ||
                        ps->pre_zs == MALI_PRE_POST_FRAME_SHADER_MODE_ALWAYS;
    pstat.no_fs_info += !ps->frame_shaders_set;
@@ -150,7 +151,8 @@ pass_stats_record(struct panvk_cmd_buffer *cmdbuf)
                 "6-20:%u 21+:%u | area%% <5:%u <25:%u <75:%u full:%u | "
                 "target small:%u 720p:%u big:%u | color load:%u clear:%u "
                 "store:%u | zs load:%u clear:%u store:%u | clean_tile:%u "
-                "preload_always:%u msaa:%u layered:%u nofs:%u | "
+                "clean_tile_skip:%u preload_always:%u msaa:%u layered:%u "
+                "nofs:%u | "
                 "render-area Mpx %.1f of target Mpx %.1f",
                 pstat.passes, pstat.draws_total, pstat.draws_hist[0],
                 pstat.draws_hist[1], pstat.draws_hist[2], pstat.draws_hist[3],
@@ -158,8 +160,8 @@ pass_stats_record(struct panvk_cmd_buffer *cmdbuf)
                 pstat.area_hist[2], pstat.area_hist[3], pstat.size_hist[0],
                 pstat.size_hist[1], pstat.size_hist[2], pstat.c_load,
                 pstat.c_clear, pstat.c_store, pstat.zs_load, pstat.zs_clear,
-                pstat.zs_store, pstat.clean_tile, pstat.pre_always,
-                pstat.msaa, pstat.layered, pstat.no_fs_info,
+                pstat.zs_store, pstat.clean_tile, pstat.clean_tile_skip,
+                pstat.pre_always, pstat.msaa, pstat.layered, pstat.no_fs_info,
                 pstat.area_px / 1e6, pstat.target_px / 1e6);
       rpm_log();
       simple_mtx_t lock = pstat.lock;

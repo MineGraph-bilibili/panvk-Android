@@ -1383,20 +1383,23 @@ upload_shader_desc_info(struct panvk_device *dev,
    assert(lower_info->dyn_ubos.count <=
           ARRAY_SIZE(desc_info->dyn_ubos.map));
    desc_info->dyn_ubos.count = lower_info->dyn_ubos.count;
-   memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
-          lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
+   if (lower_info->dyn_ubos.count != 0)
+      memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
+             lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
    assert(lower_info->dyn_ssbos.count <=
           ARRAY_SIZE(desc_info->dyn_ssbos.map));
    desc_info->dyn_ssbos.count = lower_info->dyn_ssbos.count;
-   memcpy(
-      desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
-      lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
+   if (lower_info->dyn_ssbos.count != 0)
+      memcpy(
+         desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
+         lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
 #else
    assert(lower_info->dyn_bufs.count <=
           ARRAY_SIZE(desc_info->dyn_bufs.map));
    desc_info->dyn_bufs.count = lower_info->dyn_bufs.count;
-   memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
-          lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
+   if (lower_info->dyn_bufs.count != 0)
+      memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
+             lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
 #endif
 
    desc_info->used_set_mask = lower_info->used_set_mask;

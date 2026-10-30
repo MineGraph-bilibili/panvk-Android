@@ -135,7 +135,7 @@ fn try_swizzle_with_iadd(b: &mut impl SSABuilder, dst: Dst, src: Src) -> bool {
         dst,
         dst_type: DataType::V2U16,
         saturate: false,
-        srcs: [src, 0_u32.into()],
+        srcs: [0_u32.into(), src],
     });
     for dst_type in dst_types {
         // Borrow mutable
@@ -148,7 +148,7 @@ fn try_swizzle_with_iadd(b: &mut impl SSABuilder, dst: Dst, src: Src) -> bool {
         let Op::IAdd(add) = &op else {
             unreachable!();
         };
-        if b.model().op_src_supports_swizzle(&op, &add.srcs[0], swz) {
+        if b.model().op_src_supports_swizzle(&op, &add.srcs[1], swz) {
             b.push_op(op);
             return true;
         }

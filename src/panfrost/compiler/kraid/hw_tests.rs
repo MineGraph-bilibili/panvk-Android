@@ -1809,6 +1809,26 @@ fn test_op_imul() {
 }
 
 #[test]
+fn test_op_imul_src1_widen() {
+    const DATA_TYPES: &[DataType] = &[DataType::S32, DataType::U32];
+
+    for &dst_type in DATA_TYPES {
+        for half in [0, 1] {
+            let op = OpIMul {
+                dst: DstRef::None.into(),
+                dst_type,
+                saturate: false,
+                srcs: [
+                    0_u32.into(),
+                    Src::from(0_u32).swizzle(Swizzle::widen_hx(dst_type, half)),
+                ],
+            };
+            test_foldable_op(op, Precision::Exact);
+        }
+    }
+}
+
+#[test]
 fn test_op_isub() {
     const DATA_TYPES: &[DataType] = &[
         DataType::V2S16,

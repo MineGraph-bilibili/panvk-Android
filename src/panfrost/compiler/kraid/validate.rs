@@ -5,7 +5,11 @@ use crate::debug::*;
 use crate::ir::*;
 use rustc_hash::FxHashSet;
 
-fn validate_instr(instr: &Instr, ssa_vals: &mut FxHashSet<SSAValue>) {
+fn validate_instr(
+    s: &Shader,
+    instr: &Instr,
+    ssa_vals: &mut FxHashSet<SSAValue>,
+) {
     for (src, src_type) in instr.srcs_types() {
         if let SrcRef::SSA(vec) = &src.src_ref {
             for ssa in vec {
@@ -20,18 +24,29 @@ fn validate_instr(instr: &Instr, ssa_vals: &mut FxHashSet<SSAValue>) {
             assert!(src.src_ref.bytes_read() <= 4);
         }
 
-        if src_type.comps() == 1 {
-            if src_type.bits() == 8 {
-                assert!(src.replicates_byte());
-            } else if src_type.bits() == 16 {
-                assert!(src.replicates_half());
-            }
+        if s.info.src_swizzles_legal {
+            assert!(
+                s.model.op_src_supports_swizzle(&instr.op, src, src.swizzle),
+                "{instr} uses an unsupported swizzle"
+            );
         }
 
         let src_bytes = src_type.total_bytes();
         if src_type == DataType::SR || src_bytes > 8 {
             assert!(src.swizzle == Swizzle::NONE);
         } else {
+            if src_bytes == 1 {
+                assert!(
+                    src.swizzle.replicates_byte(),
+                    "{instr} uses invalid swizzle",
+                );
+            } else if src_bytes == 2 {
+                assert!(
+                    src.swizzle.replicates_half(),
+                    "{instr} uses invalid swizzle",
+                );
+            }
+
             let src_ref_byte_mask = match &src.src_ref {
                 SrcRef::Zero => 0xff,
                 SrcRef::Imm32(_) => 0xf,
@@ -74,6 +89,12 @@ fn validate_instr(instr: &Instr, ssa_vals: &mut FxHashSet<SSAValue>) {
         if dst.lanes.is_f16_narrow() {
             assert_eq!(dst_type, DataType::F32);
             assert_eq!(dst.dst_ref.bytes_written(), 2);
+            continue;
+        }
+
+        if dst_type == DataType::SR {
+            let dst_bytes = dst.dst_ref.bytes_written();
+            assert_eq!(dst_bytes, dst.lanes.bytes(dst_bytes));
             continue;
         }
 
@@ -122,7 +143,7 @@ impl Shader<'_> {
                     is_prelude = false;
                 }
 
-                validate_instr(instr, &mut ssa_vals);
+                validate_instr(self, instr, &mut ssa_vals);
             }
 
             let mut is_postlude = true;
