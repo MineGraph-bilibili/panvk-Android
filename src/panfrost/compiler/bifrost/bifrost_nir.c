@@ -22,6 +22,14 @@
 static bool
 bi_use_kraid(nir_shader *nir, uint64_t gpu_id)
 {
+   /* PanVK's own blit/present helpers are compiled without a name.  The
+    * decision must be made here so every earlier lowering pass agrees with
+    * the back end that eventually compiles the shader.
+    */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+       (!nir->info.name || !nir->info.name[0]))
+      return false;
+
    return pan_use_kraid(pan_arch(gpu_id), nir->info.stage,
                         nir->info.internal);
 }
@@ -1408,6 +1416,60 @@ bifrost_dump_shader(nir_shader *nir, struct util_dynarray *binary,
       fclose(dump_stream);
 }
 
+#ifdef WITH_PANFROST_RUST
+/* KRAID has no IDVS support: nir_intrinsic_load_shader_output_pan maps to the
+ * ShaderOutput FAU which only exists on v12+.  Below v12 the C backend compiles
+ * two specialized variants (position + varying) into one binary, inlining that
+ * intrinsic with the variant's output address.  Do the same here so KRAID can
+ * be used for vertex shaders on v11.
+ */
+static void
+bifrost_kraid_compile_idvs_variant(nir_shader *nir,
+                                   const struct pan_compile_inputs *inputs,
+                                   struct util_dynarray *binary,
+                                   struct pan_shader_info *info,
+                                   enum bi_idvs_mode idvs)
+{
+   unsigned offset = binary->size;
+   nir_shader *specialized = nir;
+
+   /* Specializing is destructive, so clone for the first variant only. */
+   if (offset == 0)
+      specialized = nir_shader_clone(ralloc_parent(nir), nir);
+
+   uint64_t position = VA_SHADER_OUTPUT_POSITION_BIT |
+                       VA_SHADER_OUTPUT_ATTRIB_BIT;
+
+   NIR_PASS(_, specialized, nir_inline_sysval,
+            nir_intrinsic_load_shader_output_pan,
+            (idvs == BI_IDVS_POSITION) ? position : VA_SHADER_OUTPUT_VARY_BIT);
+
+   /* After specializing, clean up the mess */
+   bool progress = true;
+
+   while (progress) {
+      progress = false;
+
+      NIR_PASS(progress, specialized, nir_opt_constant_folding);
+      NIR_PASS(progress, specialized, nir_opt_dce);
+      NIR_PASS(progress, specialized, nir_opt_dead_cf);
+      NIR_PASS(progress, specialized, nir_opt_cse);
+   }
+
+   kraid_compile_nir(specialized, inputs, binary, info);
+
+   if (idvs == BI_IDVS_VARYING) {
+      /* The secondary (varying) shader gets its own preload/register counts,
+       * the position shader's stay in the primary slots.
+       */
+      info->vs.secondary_enable = (binary->size > offset);
+      info->vs.secondary_offset = offset;
+      info->vs.secondary_preload = info->preload;
+      info->vs.secondary_work_reg_count = info->work_reg_count;
+   }
+}
+#endif
+
 void
 bifrost_compile_shader_nir(nir_shader *nir,
                            const struct pan_compile_inputs *inputs,
@@ -1451,7 +1513,20 @@ bifrost_compile_shader_nir(nir_shader *nir,
                   &info->fau, &info->ubo_mask);
       }
 #ifdef WITH_PANFROST_RUST
-      kraid_compile_nir(nir, inputs, binary, info);
+      if (nir->info.stage == MESA_SHADER_VERTEX && info->vs.idvs &&
+          pan_arch(inputs->gpu_id) < 12) {
+         bifrost_kraid_compile_idvs_variant(nir, inputs, binary, info,
+                                            BI_IDVS_POSITION);
+         uint64_t pos_preload = info->preload;
+         unsigned pos_regs = info->work_reg_count;
+         bifrost_kraid_compile_idvs_variant(nir, inputs, binary, info,
+                                            BI_IDVS_VARYING);
+         /* The varying variant's values were moved to the secondary slots. */
+         info->preload = pos_preload;
+         info->work_reg_count = pos_regs;
+      } else {
+         kraid_compile_nir(nir, inputs, binary, info);
+      }
 #endif
    } else if (nir->info.stage == MESA_SHADER_VERTEX && info->vs.idvs) {
       /* On 5th Gen, IDVS is only in one binary */

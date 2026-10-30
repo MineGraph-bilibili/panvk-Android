@@ -40,14 +40,14 @@ pan_want_debug_info(unsigned arch)
 #define USE_KRAID_FS (1ull << 1)
 #define USE_KRAID_VS (1ull << 2)
 #define USE_KRAID_INTERNAL (1ull << 3)
-#define USE_KRAID_ALL 0xf
+#define USE_KRAID_ALL (USE_KRAID_CS | USE_KRAID_FS)
 
 static const struct debug_named_value pan_use_kraid_flags[] = {
    { "cs", USE_KRAID_CS, "Use Kraid for compute shaders" },
    { "fs", USE_KRAID_FS, "Use Kraid for fragment shaders" },
    { "vs", USE_KRAID_VS, "Use Kraid for vertex shaders" },
    { "internal", USE_KRAID_INTERNAL, "Use Kraid for internal shaders" },
-   { "all", USE_KRAID_ALL, "Use Kraid for all shader stages" },
+   { "all", USE_KRAID_ALL, "Use Kraid for compute and fragment shaders" },
    DEBUG_NAMED_VALUE_END,
 };
 
