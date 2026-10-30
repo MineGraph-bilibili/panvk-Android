@@ -79,6 +79,7 @@ bool kbase_kmod_supports_dmabuf(const struct pan_kmod_dev *dev);
  */
 int kbase_kmod_csf_group_create(struct pan_kmod_dev *dev,
                                 uint32_t cs_queue_count,
+                                bool tiler_oom_handler,
                                 uint32_t *group_handle);
 void kbase_kmod_csf_group_destroy(struct pan_kmod_dev *dev,
                                   uint32_t group_handle);
