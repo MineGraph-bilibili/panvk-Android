@@ -1,0 +1,117 @@
+From: panvk-kbase-android worker <panvk-worker@localhost>
+Subject: [PATCH local 006] panvk/csf: PANVK_KBASE_SAFE_SUBMIT A/B switch
+
+Adds an opt-in conservative mode (env PANVK_KBASE_SAFE_SUBMIT=1) that
+restores the serialization the aggressive kbase submit/recycling paths
+removed: per-job 0x233 cache flush, no ring-drain completion shortcut,
+graphics drain before tiler-heap replacement, and inline heap TERM.
+Used to attribute GPU faults between the submit path and the heap
+recycling path; default off, behaviour unchanged.
+
+Generated-by: LLM
+
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -22,6 +22,7 @@
+ 
+ #include "util/bitscan.h"
+ #include "util/os_time.h"
++#include "util/u_debug.h"
+ #include "vk_drm_syncobj.h"
+ #include "vk_log.h"
+ #include "vk_sync.h"
+@@ -122,6 +123,11 @@
+                           uint64_t target_seqno, uint32_t rekick_mask,
+                           bool allow_ring_drain, uint64_t abs_timeout_ns);
+ 
++static VkResult
++kbase_wait_sync_targets(
++   void *data, const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
++   uint64_t abs_timeout_ns);
++
+ static bool
+ gpu_queue_uses_kbase(const struct panvk_device *dev)
+ {
+@@ -129,6 +135,26 @@
+           '\0';
+ }
+ 
++/* Conservative submission mode for A/B diagnosis, enabled with
++ * PANVK_KBASE_SAFE_SUBMIT=1:
++ * - emit the 0x233 cache clean/invalidate before every job instead of once
++ *   per subqueue and batch;
++ * - never treat "the firmware consumed the ring entry" as job completion;
++ * - drain the graphics subqueues before replacing the tiler heap, and destroy
++ *   retired heaps inline rather than handing them to the heap worker.
++ * This restores the serialization the aggressive submit/recycling paths
++ * removed, so a fault that disappears in this mode is caused by them. */
++static bool
++kbase_safe_submit(void)
++{
++   static int safe = -1;
++
++   if (safe < 0)
++      safe = debug_get_bool_option("PANVK_KBASE_SAFE_SUBMIT", false) ? 1 : 0;
++
++   return safe;
++}
++
+ static uint32_t
+ kbase_resource_mask(enum panvk_subqueue_id subqueue)
+ {
+@@ -891,7 +917,8 @@
+       kbase_cache_invalidate_range((const void *)cell, kbase_seqno_stride());
+       if (cell->seqno >= target_seqno ||
+           (PANVK_DEBUG(KBASE_DIAG) && *ls_copy >= target_seqno) ||
+-          (allow_ring_drain && extract >= target_insert && !active))
++          (!kbase_safe_submit() && allow_ring_drain &&
++           extract >= target_insert && !active))
+          break;
+ 
+       if (cell->error) {
+@@ -2237,6 +2264,14 @@
+ static void
+ kbase_queue_heap_destroy(struct panvk_gpu_queue *queue, uint64_t ctx)
+ {
++   /* PANVK_KBASE_SAFE_SUBMIT keeps the TERM on the submitting thread: the
++    * worker defers chunk/VA release, which is exactly the window under test. */
++   if (kbase_safe_submit()) {
++      struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
++      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
++      return;
++   }
++
+    uint32_t head =
+       __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_RELAXED);
+    uint32_t tail =
+@@ -2515,6 +2550,21 @@
+    const uint32_t max_chunks = kbase_tiler_heap_max_chunks(phys_dev);
+    uint64_t new_ctx, first_chunk;
+ 
++   /* SAFE mode: let every job already handed to the graphics subqueues retire
++    * before the tiler heap it references is replaced and freed. */
++   if (kbase_safe_submit()) {
++      uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
++
++      targets[PANVK_SUBQUEUE_VERTEX_TILER] =
++         queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs;
++      targets[PANVK_SUBQUEUE_FRAGMENT] =
++         queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs;
++
++      VkResult result = kbase_wait_sync_targets(queue, targets, UINT64_MAX);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++
+    /* Hold at most PANVK_KBASE_HEAP_SLOTS - 1 retired contexts: if they are
+     * all still firmware-visible, skip this renewal (VK_INCOMPLETE) and retry
+     * on a later graphics submission.  The next descriptor slot belonged to
+@@ -3135,6 +3185,7 @@
+                                        qsubmit->latest_flush,
+                                        submit->phys_dev->kmod.dev->props.gpu_id,
+                                        queue->kbase_gpu_waits[qsubmit->queue_index],
++                                       kbase_safe_submit() ||
+                                        !(flushed & BITFIELD_BIT(qsubmit->queue_index)));
+       if (result != VK_SUCCESS)
+          return vk_queue_set_lost(&queue->vk, "kbase: ring emission failed");

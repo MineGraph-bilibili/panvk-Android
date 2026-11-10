@@ -152,6 +152,12 @@ struct kbase_kmod_dev {
    /* True for the CSF flavour of kbase (arch >= 10), false for JM. */
    bool is_csf;
 
+   /* Some vendor kernels (e.g. MTK) advertise a CSF uAPI version that
+    * includes MEM_ALLOC_EX but ship without the ioctl.  Cleared the first
+    * time the ioctl is rejected so every later allocation takes the legacy
+    * MEM_ALLOC path. */
+   bool no_mem_alloc_ex;
+
    /* CSF interface information (CSF only), queried from
     * KBASE_IOCTL_CS_GET_GLB_IFACE and stored in the panthor uAPI layout
     * so CSF-generic code can consume either backend. */
@@ -2310,7 +2316,9 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
       }
    }
 
-   if (kbase_dev->is_csf &&
+   bool alloc_done = false;
+
+   if (kbase_dev->is_csf && !kbase_dev->no_mem_alloc_ex &&
        pan_kmod_driver_version_at_least(&dev->driver, 1, 9)) {
       /* Match current Arm userspace on modern CSF kernels.  Besides keeping
        * the allocation ABI aligned with kbase, this leaves room for fixed-VA
@@ -2324,15 +2332,26 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
          },
       };
 
-      if (ioctl(dev->fd, KBASE_IOCTL_MEM_ALLOC_EX, &req)) {
+      if (ioctl(dev->fd, KBASE_IOCTL_MEM_ALLOC_EX, &req) == 0) {
+         alloc_flags = req.out.flags;
+         alloc_gpu_va = req.out.gpu_va;
+         alloc_done = true;
+      } else if (errno == ENOTTY || errno == EINVAL) {
+         /* Vendor kernel claims uapi >= 1.9 but does not implement the
+          * ioctl (MTK G-series kernels).  Fall back once and stay there. */
+         kbase_dev->no_mem_alloc_ex = true;
+         mesa_logw("kbase: uapi %u.%u without MEM_ALLOC_EX (%s), "
+                   "falling back to MEM_ALLOC",
+                   dev->driver.version.major, dev->driver.version.minor,
+                   strerror(errno));
+      } else {
          mesa_loge("kbase: KBASE_IOCTL_MEM_ALLOC_EX failed: %s",
                    strerror(errno));
          goto err_free_bo;
       }
+   }
 
-      alloc_flags = req.out.flags;
-      alloc_gpu_va = req.out.gpu_va;
-   } else {
+   if (!alloc_done) {
       union kbase_ioctl_mem_alloc req = {
          .in = {
             .va_pages = va_pages,
