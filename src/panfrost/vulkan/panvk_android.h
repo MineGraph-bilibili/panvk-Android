@@ -13,6 +13,10 @@
 
 struct panvk_device;
 
+/* ARM gralloc's first private usage bit, and GRALLOC_USAGE_HW_COMPOSER. See panvk_android.c. */
+#define MALI_GRALLOC_USAGE_NO_AFBC (1u << 29)
+#define GRALLOC_USAGE_HW_COMPOSER  (1u << 11)
+
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
 
 bool panvk_android_is_gralloc_image(const VkImageCreateInfo *pCreateInfo);

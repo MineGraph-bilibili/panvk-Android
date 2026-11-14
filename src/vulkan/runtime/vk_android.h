@@ -42,6 +42,15 @@ struct vk_image;
 
 struct u_gralloc *vk_android_get_ugralloc(void);
 
+struct native_handle;
+int vk_android_native_handle_dma_buf_fd(const struct native_handle *handle,
+                                        int hal_format, int pixel_stride);
+
+#if ANDROID_API_LEVEL >= 26
+struct AHardwareBuffer;
+int vk_android_ahb_dma_buf_fd(const struct AHardwareBuffer *ahb);
+#endif
+
 VkResult vk_android_import_anb(struct vk_device *device,
                                const VkImageCreateInfo *pCreateInfo,
                                const VkAllocationCallbacks *alloc,

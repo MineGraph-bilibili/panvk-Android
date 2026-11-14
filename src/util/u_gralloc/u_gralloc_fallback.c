@@ -52,6 +52,199 @@ get_native_buffer_fds(const native_handle_t *handle, int fds[3])
    return handle->numFds;
 }
 
+/* The fd of a handle that holds the buffer: the largest dma-buf among its fds. Allocators do not
+ * agree on where it is: MediaTek's ARM gralloc puts -1 first and the buffer second, and a small
+ * shared-attribute region may follow it. Returns -1 when no fd has a size. */
+static int
+largest_handle_fd(const native_handle_t *handle)
+{
+   int fd = -1;
+   off_t best = 0;
+   for (int i = 0; i < handle->numFds; i++) {
+      if (handle->data[i] < 0)
+         continue;
+      const off_t sz = lseek(handle->data[i], 0, SEEK_END);
+      lseek(handle->data[i], 0, SEEK_SET);
+      if (sz > best) {
+         best = sz;
+         fd = handle->data[i];
+      }
+   }
+   return fd;
+}
+
+/*
+ * ARM's mali gralloc private handle, as the Exynos 9820 (Android 12) and 9611 (Android 13)
+ * allocators hand it out behind IMapper 2.x, which offers no layout query. Measured from the
+ * handles themselves: indices are into native_handle_t::data[], fds included, 64-bit fields
+ * as low/high int pairs. The byte stride is the allocator's own (a 65x33 buffer is 80x48), and
+ * a linear buffer starts at offset 0 of the dma-buf, both confirmed by the vendor driver
+ * rendering into such a buffer and the pixels read back through the dma-buf.
+ */
+#define ARM_GRALLOC_MAGIC        0x03141592
+/* Offsets from the magic, which is data[5] on the Exynos handles. MediaTek's allocator (Galaxy
+ * A31, MT6768, Android 12: 3 fds and 18 ints of its own first) puts the same ARM handle behind a
+ * prefix, magic at data[21], and has 6 more ints before plane_info. So the magic is searched for,
+ * and the plane-0 {byte stride, width, height} triple is taken from the first known offset where
+ * it is consistent with the buffer. */
+struct arm_hnd_layout {
+   int plane0, width, height, req_format;
+};
+static const struct arm_hnd_layout arm_hnd_layouts[] = {
+   {15, 2, 3, 4}, /* Exynos */
+   {21, 2, 3, 4}, /* MediaTek */
+};
+enum { ARM_HND_EXYNOS, ARM_HND_MTK };
+/* The u64 alloc format (HAL format low, AFBC and other layout bits from 32) sits 5 ints before
+ * plane_info on both: magic+10 on Exynos, magic+16 on MediaTek. */
+#define ARM_HND_ALLOC_FORMAT_BACK 5
+#define ARM_HND_PLANE_INTS       3  /* plane_info[3] of {byte stride, width, height} */
+#define ARM_HND_MIN_INTS         36
+#define ARM_ALLOC_FORMAT_AFBC    (1ull << 32)
+/* MediaTek's allocator gives GPU-only buffers (sampled + framebuffer, no CPU or composer usage)
+ * alloc format 0x311_<hal format>, whatever the size: AFBC with 16x16 superblocks, headers tiled
+ * 8x8 (so 128x128-pixel aligned), YUV transform and sparse bodies, the header at offset 0 and the
+ * body right after it on a 4 KB boundary. That is the layout Mesa computes for the equivalent DRM
+ * modifier, and the plane stride is the uncompressed byte stride of the aligned width, which is
+ * what the AFBC import takes as its row pitch. Read off the handles at 16x16 to
+ * 1920x1080 and checked pixel for pixel in both directions against the vendor GLES driver.
+ * Only this combination, and only RGBA/RGBX 8888, is taken as AFBC.
+ * A BGRA 8888 request is stored as RGBA AFBC (alloc format 0x311_00000001), so it is reported
+ * as RGBA, which is also the Vulkan format the vendor driver gives such a buffer. */
+#define ARM_MTK_AFBC_ALLOC_BITS  0x311u
+/* Exynos's allocator (Galaxy S10e, Android 12) makes the same GPU-only buffers AFBC with alloc
+ * format 0x1_<hal format>: 16x16 superblocks, untiled headers, no YUV transform, the plane stride
+ * that of the 16-aligned width. Its body starts at the header size rounded up to 4 KB where Mesa
+ * uses 128 bytes; readers follow the header's offsets and Mesa's body ends inside the buffer, so
+ * that does not matter. Checked like the MediaTek layout: 16x16 + sparse
+ * passes both directions, with YUV transform every pixel is wrong. A BGRA 8888 buffer is stored in
+ * RGBA component order here too (alloc format 0x1_00000005), as the vendor driver reports it. */
+#define ARM_EXYNOS_AFBC_ALLOC_BITS 0x1u
+
+/* Returns -ENOENT when the handle is not an ARM gralloc handle. */
+static int
+arm_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
+                            struct u_gralloc_buffer_basic_info *out)
+{
+   const native_handle_t *handle = hnd->handle;
+
+   const int total = handle->numFds + handle->numInts;
+   if (total < ARM_HND_MIN_INTS)
+      return -ENOENT;
+
+   int m = handle->numFds;
+   while (m < total && (uint32_t)handle->data[m] != ARM_GRALLOC_MAGIC)
+      m++;
+   if (m + ARM_HND_MIN_INTS - 5 > total)
+      return -ENOENT;
+
+   const int *h = &handle->data[m];
+   int format = 0, layout = -1, plane0 = -1;
+   uint32_t width = 0, height = 0, bpp = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(arm_hnd_layouts) && plane0 < 0; i++) {
+      const struct arm_hnd_layout *l = &arm_hnd_layouts[i];
+      const int o = l->plane0;
+      if (m + o + 2 * ARM_HND_PLANE_INTS > total)
+         continue;
+      format = h[l->req_format];
+      width = h[l->width];
+      height = h[l->height];
+      bpp = get_hal_format_bpp(format);
+      const uint32_t ps = h[o], pw = h[o + 1], ph = h[o + 2];
+      if (bpp && width && ps >= width * bpp && ps <= INT32_MAX && pw >= width && ph >= height &&
+          ps >= pw * bpp) {
+         plane0 = o;
+         layout = i;
+      }
+   }
+   if (plane0 < 0)
+      return -ENOENT;
+
+   const uint32_t stride = h[plane0];
+   const int af = plane0 - ARM_HND_ALLOC_FORMAT_BACK;
+   const uint64_t alloc_format =
+      (uint64_t)(uint32_t)h[af] | ((uint64_t)(uint32_t)h[af + 1] << 32);
+
+   if (is_hal_format_yuv(format) || h[plane0 + ARM_HND_PLANE_INTS]) {
+      mesa_loge("ARM gralloc: multi-planar format 0x%x is not handled", format);
+      return -EINVAL;
+   }
+
+   /* Other AFBC layouts are the allocator's, and nothing here describes them, so such a buffer
+    * is refused rather than read as linear. Swapchain images and the driver's own
+    * AHardwareBuffers avoid AFBC by asking for MALI_GRALLOC_USAGE_NO_AFBC and composer usage. */
+   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+   int stored_format = format;
+   if (alloc_format & ARM_ALLOC_FORMAT_AFBC) {
+      const uint32_t alloc_hal = (uint32_t)alloc_format;
+      const bool mtk_afbc = layout == ARM_HND_MTK &&
+                            (alloc_format >> 32) == ARM_MTK_AFBC_ALLOC_BITS &&
+                            ((alloc_hal == (uint32_t)format &&
+                              (format == HAL_PIXEL_FORMAT_RGBA_8888 ||
+                               format == HAL_PIXEL_FORMAT_RGBX_8888)) ||
+                             (alloc_hal == HAL_PIXEL_FORMAT_RGBA_8888 &&
+                              format == HAL_PIXEL_FORMAT_BGRA_8888));
+      const bool exy_afbc = layout == ARM_HND_EXYNOS &&
+                            (alloc_format >> 32) == ARM_EXYNOS_AFBC_ALLOC_BITS &&
+                            alloc_hal == (uint32_t)format &&
+                            (format == HAL_PIXEL_FORMAT_RGBA_8888 ||
+                             format == HAL_PIXEL_FORMAT_RGBX_8888 ||
+                             format == HAL_PIXEL_FORMAT_BGRA_8888);
+      if (!mtk_afbc && !exy_afbc) {
+         mesa_loge("ARM gralloc: AFBC buffer (alloc format 0x%llx) is not handled",
+                   (unsigned long long)alloc_format);
+         return -EINVAL;
+      }
+      if (mtk_afbc) {
+         modifier = DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |
+                                            AFBC_FORMAT_MOD_TILED | AFBC_FORMAT_MOD_YTR |
+                                            AFBC_FORMAT_MOD_SPARSE);
+         stored_format = alloc_hal;
+      } else {
+         modifier = DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |
+                                            AFBC_FORMAT_MOD_SPARSE);
+         stored_format = format == HAL_PIXEL_FORMAT_BGRA_8888 ? HAL_PIXEL_FORMAT_RGBA_8888
+                                                              : format;
+      }
+   }
+
+   const int drm_fourcc = get_fourcc_from_hal_format(stored_format);
+   if (drm_fourcc == -1 || !bpp || !width || stride < width * bpp || stride > INT32_MAX) {
+      mesa_loge("ARM gralloc: inconsistent handle (format 0x%x, %ux%u, stride %u)", format,
+                width, height, stride);
+      return -EINVAL;
+   }
+
+   /* The buffer's dma-buf: the first fd big enough to hold it. Exynos puts it first; MediaTek's
+    * handle carries 3 fds and the first is not one (lseek gives no size). */
+   int fd = -1;
+   off_t fd_size = 0;
+   for (int i = 0; i < handle->numFds && fd < 0; i++) {
+      const off_t sz = lseek(handle->data[i], 0, SEEK_END);
+      lseek(handle->data[i], 0, SEEK_SET);
+      if (sz > 0 && (uint64_t)sz >= (uint64_t)stride * height) {
+         fd = handle->data[i];
+         fd_size = sz;
+      }
+   }
+   if (fd < 0) {
+      mesa_loge("ARM gralloc: no fd of the handle holds %u bytes", stride * height);
+      return -EINVAL;
+   }
+
+   out->drm_fourcc = drm_fourcc;
+   out->modifier = modifier;
+   out->num_planes = 1;
+   out->fds[0] = fd;
+   out->offsets[0] = 0;
+   out->strides[0] = stride;
+   /* The whole dma-buf: an AFBC import bounds its plane by it, since the allocator's body can
+    * sit further out than the driver's own layout puts it. */
+   out->alloc_size = fd_size;
+
+   return 0;
+}
+
 
 typedef const native_handle_t *panvk_v19_buffer_handle_t;
 typedef int32_t (*panvk_v19_import_fn)(const native_handle_t *, panvk_v19_buffer_handle_t *);
@@ -637,6 +830,12 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
 
    int stable_ret = panvk_v19_query_mapper(hnd->handle, out);
    if (stable_ret != 0) {
+      /* The mapper's metadata is the allocator's own answer, but ARM gralloc behind IMapper 2.x
+       * has none. Its handle still describes the AFBC layout of a GPU-only buffer (see
+       * arm_gralloc_get_buffer_info), so take that rather than refuse the import. */
+      int arm_ret = arm_gralloc_get_buffer_info(hnd, out);
+      if (arm_ret == 0)
+         return 0;
       mesa_logw("[P0A-V19-FULLPLANE] complete metadata unavailable rc=%d; refusing guessed layout",
                 stable_ret);
       return stable_ret;

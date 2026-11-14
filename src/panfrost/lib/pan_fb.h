@@ -254,6 +254,16 @@ struct pan_fb_load_target {
     */
    bool always;
 
+   /** Candidate for skipping the preload entirely
+    *
+    * The driver sets this when loadOp is DONT_CARE/NONE, storeOp is NONE and
+    * there is no resolve.  Whether the preload can actually be skipped also
+    * depends on the final tile size: if an AFBC/AFRC block is larger than a
+    * tile, the clean tile write-back must still be fed with the loaded tile
+    * contents and the preload is kept.
+    */
+   bool discard_candidate;
+
    /** MSAA mode used when load op is IMAGE */
    enum pan_fb_msaa_copy_op msaa;
 

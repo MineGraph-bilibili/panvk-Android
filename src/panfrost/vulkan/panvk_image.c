@@ -322,6 +322,10 @@ panvk_image_get_mod_from_list(struct panvk_image *image,
 }
 
 static uint64_t
+panvk_image_try_afrc(struct panvk_image *image,
+                     const struct pan_image_usage *iusage);
+
+static uint64_t
 panvk_image_get_mod(struct panvk_image *image,
                     const VkImageCreateInfo *pCreateInfo)
 {
@@ -350,6 +354,11 @@ panvk_image_get_mod(struct panvk_image *image,
    /* legacy scanout (images without any external modifier info) should default to LINEAR. */
    if (iusage.legacy_scanout || image->bc_emul)
       return DRM_FORMAT_MOD_LINEAR;
+
+   /* PANVK_AFRC is an experimental AFRC path, disabled by default. */
+   uint64_t afrc_mod = panvk_image_try_afrc(image, &iusage);
+   if (afrc_mod != DRM_FORMAT_MOD_INVALID)
+      return afrc_mod;
 
    /* Without external dependencies, pick the best modifier that supports the image. */
    return panvk_image_get_mod_from_list(image, &iusage, NULL, 0);
@@ -450,6 +459,69 @@ panvk_should_checksum(struct panvk_image *image,
    unsigned bytes_per_pixel =
       MAX2(image->vk.samples, 1) * util_format_get_blocksize(pfmt);
    return bytes_per_pixel <= 4;
+}
+
+/* PANVK_AFRC=16|24|32: opt-in fixed-rate lossy colour compression for
+ * application-created images. 0 (default) keeps the existing modifier
+ * selection untouched. */
+static unsigned
+panvk_afrc_cu_size(void)
+{
+   unsigned cu = debug_get_num_option("PANVK_AFRC", 0);
+   return (cu == 16 || cu == 24 || cu == 32) ? cu : 0;
+}
+
+static uint64_t
+panvk_image_try_afrc(struct panvk_image *image,
+                     const struct pan_image_usage *iusage)
+{
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(image->vk.base.device->physical);
+   unsigned arch = pan_arch(phys_dev->kmod.dev->props.gpu_id);
+   unsigned cu = panvk_afrc_cu_size();
+
+   if (!cu || arch < 10 || !pan_query_afrc(&phys_dev->kmod.dev->props) ||
+       PANVK_DEBUG(NO_AFBC))
+      return DRM_FORMAT_MOD_INVALID;
+
+   if (image->vk.image_type != VK_IMAGE_TYPE_2D || image->vk.samples != 1 ||
+       image->vk.extent.depth != 1 || image->vk.extent.width < 256 ||
+       image->vk.extent.height < 256)
+      return DRM_FORMAT_MOD_INVALID;
+
+   if (!(vk_format_aspects(image->vk.format) & VK_IMAGE_ASPECT_COLOR_BIT) ||
+       vk_format_get_plane_count(image->vk.format) != 1)
+      return DRM_FORMAT_MOD_INVALID;
+
+   if ((image->vk.usage | image->vk.stencil_usage) &
+       (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT |
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+      return DRM_FORMAT_MOD_INVALID;
+
+   if (image->vk.create_flags &
+       (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+        VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+        VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+        VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT |
+        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
+      return DRM_FORMAT_MOD_INVALID;
+
+   /* CRC/AFRC interaction is not validated yet, so skip WSI images. */
+   if (iusage->wsi)
+      return DRM_FORMAT_MOD_INVALID;
+
+   if (!pan_afrc_supports_format(vk_format_to_pipe_format(image->vk.format)))
+      return DRM_FORMAT_MOD_INVALID;
+
+   const uint64_t mod = DRM_FORMAT_MOD_ARM_AFRC(AFRC_FORMAT_MOD_CU_SIZE_P0(
+      cu == 16 ? AFRC_FORMAT_MOD_CU_SIZE_16
+               : cu == 24 ? AFRC_FORMAT_MOD_CU_SIZE_24
+                          : AFRC_FORMAT_MOD_CU_SIZE_32));
+
+   if (!panvk_image_can_use_mod(image, iusage, mod, false))
+      return DRM_FORMAT_MOD_INVALID;
+
+   return mod;
 }
 
 /* AFRC coding-unit size in bytes for a BC2/BC3 shadow. 24 (3 bits per
@@ -556,8 +628,11 @@ panvk_bc_can_drop_raw(const struct panvk_image *image,
                       VK_IMAGE_CREATE_DISJOINT_BIT))
       return false;
 
+   /* Copying a BC image out returns its raw blocks; without the raw plane
+    * there is nothing valid to copy, so keep it for transfer sources. */
    const VkImageUsageFlags bad_usage =
-      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT |
       VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
    if (info->usage & bad_usage)
@@ -859,10 +934,12 @@ panvk_image_init(struct panvk_image *image,
 {
    /* Needs to happen early for some panvk_image_ helpers to work. */
    image->plane_count = get_plane_count(image);
+   const struct panvk_physical_device *pdev =
+      to_panvk_physical_device(image->vk.base.device->physical);
    image->bc_emul =
       panvk_format_is_bc(image->vk.format) &&
-      panvk_bc_emul_enabled(
-         to_panvk_physical_device(image->vk.base.device->physical));
+      panvk_bc_emul_enabled(pdev) &&
+      !panvk_bc_format_native(pdev, image->vk.format);
    image->bc_afrc = panvk_bc_use_afrc(image);
    image->bc_noraw = panvk_bc_can_drop_raw(image, pCreateInfo);
 
@@ -1308,6 +1385,14 @@ panvk_GetImageMemoryRequirements2(VkDevice device,
    pMemoryRequirements->memoryRequirements.alignment = alignment;
    pMemoryRequirements->memoryRequirements.size = size;
 
+   if (size >= (32ull << 20))
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] ImageMemReqs size=%llu MiB sparse=%d usage=0x%x "
+              "flags=0x%x memTypeBits=0x%x\n",
+              (unsigned long long)(size >> 20),
+              (int)!!(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT),
+              (unsigned)image->vk.usage, (unsigned)image->vk.create_flags,
+              (unsigned)pMemoryRequirements->memoryRequirements.memoryTypeBits);
+
    vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
       switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
@@ -1685,6 +1770,13 @@ panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
          *bind_status->pResult = bind_result;
       if (bind_result != VK_SUCCESS)
          result = bind_result;
+      else if (pBindInfos[i].memory != VK_NULL_HANDLE) {
+         VK_FROM_HANDLE(panvk_device_memory, mem, pBindInfos[i].memory);
+         if (mem != NULL) {
+            panvk_import_probe_track_image(pBindInfos[i].image, mem->bo);
+            panvk_import_probe_note_bind(pBindInfos[i].image, mem->bo);
+         }
+      }
    }
 
    return result;

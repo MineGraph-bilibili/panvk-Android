@@ -1,0 +1,1405 @@
+diff --git a/src/panfrost/lib/pan_fb.h b/src/panfrost/lib/pan_fb.h
+index f9383a0..18e0511 100644
+--- a/src/panfrost/lib/pan_fb.h
++++ b/src/panfrost/lib/pan_fb.h
+@@ -254,6 +254,16 @@ struct pan_fb_load_target {
+     */
+    bool always;
+ 
++   /** Candidate for skipping the preload entirely
++    *
++    * The driver sets this when loadOp is DONT_CARE/NONE, storeOp is NONE and
++    * there is no resolve.  Whether the preload can actually be skipped also
++    * depends on the final tile size: if an AFBC/AFRC block is larger than a
++    * tile, the clean tile write-back must still be fed with the loaded tile
++    * contents and the preload is kept.
++    */
++   bool discard_candidate;
++
+    /** MSAA mode used when load op is IMAGE */
+    enum pan_fb_msaa_copy_op msaa;
+ 
+diff --git a/src/panfrost/vulkan/panvk_android.h b/src/panfrost/vulkan/panvk_android.h
+index cbd4203..13560f7 100644
+--- a/src/panfrost/vulkan/panvk_android.h
++++ b/src/panfrost/vulkan/panvk_android.h
+@@ -13,6 +13,10 @@
+ 
+ struct panvk_device;
+ 
++/* ARM gralloc's first private usage bit, and GRALLOC_USAGE_HW_COMPOSER. See panvk_android.c. */
++#define MALI_GRALLOC_USAGE_NO_AFBC (1u << 29)
++#define GRALLOC_USAGE_HW_COMPOSER  (1u << 11)
++
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+ 
+ bool panvk_android_is_gralloc_image(const VkImageCreateInfo *pCreateInfo);
+diff --git a/src/panfrost/vulkan/panvk_image.c b/src/panfrost/vulkan/panvk_image.c
+index 7465635..432af33 100644
+--- a/src/panfrost/vulkan/panvk_image.c
++++ b/src/panfrost/vulkan/panvk_image.c
+@@ -321,6 +321,10 @@ panvk_image_get_mod_from_list(struct panvk_image *image,
+    return DRM_FORMAT_MOD_INVALID;
+ }
+ 
++static uint64_t
++panvk_image_try_afrc(struct panvk_image *image,
++                     const struct pan_image_usage *iusage);
++
+ static uint64_t
+ panvk_image_get_mod(struct panvk_image *image,
+                     const VkImageCreateInfo *pCreateInfo)
+@@ -351,6 +355,11 @@ panvk_image_get_mod(struct panvk_image *image,
+    if (iusage.legacy_scanout || image->bc_emul)
+       return DRM_FORMAT_MOD_LINEAR;
+ 
++   /* PANVK_AFRC is an experimental AFRC path, disabled by default. */
++   uint64_t afrc_mod = panvk_image_try_afrc(image, &iusage);
++   if (afrc_mod != DRM_FORMAT_MOD_INVALID)
++      return afrc_mod;
++
+    /* Without external dependencies, pick the best modifier that supports the image. */
+    return panvk_image_get_mod_from_list(image, &iusage, NULL, 0);
+ }
+@@ -452,6 +461,69 @@ panvk_should_checksum(struct panvk_image *image,
+    return bytes_per_pixel <= 4;
+ }
+ 
++/* PANVK_AFRC=16|24|32: opt-in fixed-rate lossy colour compression for
++ * application-created images. 0 (default) keeps the existing modifier
++ * selection untouched. */
++static unsigned
++panvk_afrc_cu_size(void)
++{
++   unsigned cu = debug_get_num_option("PANVK_AFRC", 0);
++   return (cu == 16 || cu == 24 || cu == 32) ? cu : 0;
++}
++
++static uint64_t
++panvk_image_try_afrc(struct panvk_image *image,
++                     const struct pan_image_usage *iusage)
++{
++   struct panvk_physical_device *phys_dev =
++      to_panvk_physical_device(image->vk.base.device->physical);
++   unsigned arch = pan_arch(phys_dev->kmod.dev->props.gpu_id);
++   unsigned cu = panvk_afrc_cu_size();
++
++   if (!cu || arch < 10 || !pan_query_afrc(&phys_dev->kmod.dev->props) ||
++       PANVK_DEBUG(NO_AFBC))
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (image->vk.image_type != VK_IMAGE_TYPE_2D || image->vk.samples != 1 ||
++       image->vk.extent.depth != 1 || image->vk.extent.width < 256 ||
++       image->vk.extent.height < 256)
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (!(vk_format_aspects(image->vk.format) & VK_IMAGE_ASPECT_COLOR_BIT) ||
++       vk_format_get_plane_count(image->vk.format) != 1)
++      return DRM_FORMAT_MOD_INVALID;
++
++   if ((image->vk.usage | image->vk.stencil_usage) &
++       (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT |
++        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (image->vk.create_flags &
++       (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
++        VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
++        VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
++        VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT |
++        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
++      return DRM_FORMAT_MOD_INVALID;
++
++   /* CRC/AFRC interaction is not validated yet, so skip WSI images. */
++   if (iusage->wsi)
++      return DRM_FORMAT_MOD_INVALID;
++
++   if (!pan_afrc_supports_format(vk_format_to_pipe_format(image->vk.format)))
++      return DRM_FORMAT_MOD_INVALID;
++
++   const uint64_t mod = DRM_FORMAT_MOD_ARM_AFRC(AFRC_FORMAT_MOD_CU_SIZE_P0(
++      cu == 16 ? AFRC_FORMAT_MOD_CU_SIZE_16
++               : cu == 24 ? AFRC_FORMAT_MOD_CU_SIZE_24
++                          : AFRC_FORMAT_MOD_CU_SIZE_32));
++
++   if (!panvk_image_can_use_mod(image, iusage, mod, false))
++      return DRM_FORMAT_MOD_INVALID;
++
++   return mod;
++}
++
+ /* AFRC coding-unit size in bytes for a BC2/BC3 shadow. 24 (3 bits per
+  * component, 12 bpp) is the smallest rate that stays above the 8 bpp ASTC
+  * transcode on every mip level of real BC2/BC3 textures (+2.5 to +7.6 dB
+@@ -556,8 +628,11 @@ panvk_bc_can_drop_raw(const struct panvk_image *image,
+                       VK_IMAGE_CREATE_DISJOINT_BIT))
+       return false;
+ 
++   /* Copying a BC image out returns its raw blocks; without the raw plane
++    * there is nothing valid to copy, so keep it for transfer sources. */
+    const VkImageUsageFlags bad_usage =
+-      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
++      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
++      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+       VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT |
+       VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+    if (info->usage & bad_usage)
+@@ -859,10 +934,12 @@ panvk_image_init(struct panvk_image *image,
+ {
+    /* Needs to happen early for some panvk_image_ helpers to work. */
+    image->plane_count = get_plane_count(image);
++   const struct panvk_physical_device *pdev =
++      to_panvk_physical_device(image->vk.base.device->physical);
+    image->bc_emul =
+       panvk_format_is_bc(image->vk.format) &&
+-      panvk_bc_emul_enabled(
+-         to_panvk_physical_device(image->vk.base.device->physical));
++      panvk_bc_emul_enabled(pdev) &&
++      !panvk_bc_format_native(pdev, image->vk.format);
+    image->bc_afrc = panvk_bc_use_afrc(image);
+    image->bc_noraw = panvk_bc_can_drop_raw(image, pCreateInfo);
+ 
+@@ -1308,6 +1385,14 @@ panvk_GetImageMemoryRequirements2(VkDevice device,
+    pMemoryRequirements->memoryRequirements.alignment = alignment;
+    pMemoryRequirements->memoryRequirements.size = size;
+ 
++   if (size >= (32ull << 20))
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] ImageMemReqs size=%llu MiB sparse=%d usage=0x%x "
++              "flags=0x%x memTypeBits=0x%x\n",
++              (unsigned long long)(size >> 20),
++              (int)!!(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT),
++              (unsigned)image->vk.usage, (unsigned)image->vk.create_flags,
++              (unsigned)pMemoryRequirements->memoryRequirements.memoryTypeBits);
++
+    vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
+       switch (sType) {
+       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
+@@ -1685,6 +1770,13 @@ panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
+          *bind_status->pResult = bind_result;
+       if (bind_result != VK_SUCCESS)
+          result = bind_result;
++      else if (pBindInfos[i].memory != VK_NULL_HANDLE) {
++         VK_FROM_HANDLE(panvk_device_memory, mem, pBindInfos[i].memory);
++         if (mem != NULL) {
++            panvk_import_probe_track_image(pBindInfos[i].image, mem->bo);
++            panvk_import_probe_note_bind(pBindInfos[i].image, mem->bo);
++         }
++      }
+    }
+ 
+    return result;
+diff --git a/src/panfrost/vulkan/panvk_wsi.c b/src/panfrost/vulkan/panvk_wsi.c
+index 015fb18..a55c608 100644
+--- a/src/panfrost/vulkan/panvk_wsi.c
++++ b/src/panfrost/vulkan/panvk_wsi.c
+@@ -13,13 +13,6 @@
+ #include "panvk_instance.h"
+ #include "panvk_physical_device.h"
+ 
+-#include <stdlib.h>
+-#include <string.h>
+-
+-#if defined(HAVE_PAN_KMOD_KBASE)
+-#include "lib/kmod/kbase_kmod.h"
+-#endif
+-
+ #include "vk_util.h"
+ #include "wsi_common.h"
+ 
+@@ -50,30 +43,17 @@ panvk_can_present_on_device(VkPhysicalDevice pdevice, int fd)
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+ #include <android/native_window.h>
+ #include <android/hardware_buffer.h>
+-#include <dlfcn.h>
+-#include <poll.h>
+-#include <pthread.h>
+-#include <unistd.h>
+ #include "wsi_common_private.h"
+ #include "panvk_android.h"
+ #include "panvk_device.h"
+ #include "panvk_entrypoints.h"
+ #include "panvk_image.h"
+-#include "util/log.h"
+ #include "vk_object.h"
+ #include "vk_android.h"
+ 
+ struct panvk_android_swapchain_image {
+    struct wsi_image base;
+    AHardwareBuffer *ahb;
+-   uint32_t width;
+-   uint32_t height;
+-   uint32_t stride; /* in pixels */
+-   /* Zero-copy only: the window buffer backing this image, and whether that
+-    * buffer is currently dequeued from the window (the app may render into
+-    * it). Both are unused by the copy path. */
+-   void *anb;
+-   bool held;
+ };
+ 
+ struct panvk_android_swapchain {
+@@ -81,405 +61,9 @@ struct panvk_android_swapchain {
+    ANativeWindow *window;
+    uint32_t next_image;
+    uint64_t completed_present_id;
+-   /* Zero-copy: the images wrap the window's own buffers, present only
+-    * queues them back. */
+-   bool zero_copy;
+    struct panvk_android_swapchain_image images[4];
+ };
+ 
+-/* ------------------------------------------------------------------------- *
+- * Zero-copy present
+- *
+- * The copy path renders into a driver-owned AHardwareBuffer and then memcpy's
+- * the whole frame into the window's next buffer inside ANativeWindow_lock().
+- * That is a full-frame CPU copy (plus a cache-cold read of the AHB) on every
+- * present, and the frame reaches the compositor whenever the CPU gets around
+- * to it.
+- *
+- * libnativewindow exports the producer-side BufferQueue entry points as LLNDK
+- * symbols (ANativeWindow_dequeueBuffer / queueBuffer / cancelBuffer,
+- * ANativeWindowBuffer_getHardwareBuffer, ANativeWindow_setBufferCount), but
+- * the NDK does not declare them, so they are resolved with dlsym. With them
+- * the swapchain imports the window's own buffers as VkImages and the GPU
+- * renders straight into the surface: present becomes a single queueBuffer()
+- * and the compositor owns pacing (no CPU copy, no tearing).
+- *
+- * This is opportunistic. If the symbols are missing, the window refuses to
+- * hand out buffers, a buffer's geometry/format cannot be used as-is, the
+- * dma-buf cannot be imported (AFBC gralloc buffers are rejected by kbase on
+- * some vendors) or the row pitch panvk derives disagrees with gralloc's
+- * stride, swapchain creation falls back to the copy path. Setting
+- * PANVK_WSI_ZERO_COPY=0 forces the copy path.
+- * ------------------------------------------------------------------------- */
+-
+-struct panvk_android_anw_ops {
+-   int32_t (*dequeue_buffer)(ANativeWindow *window, void **buffer, int *fence_fd);
+-   int32_t (*queue_buffer)(ANativeWindow *window, void *buffer, int fence_fd);
+-   int32_t (*cancel_buffer)(ANativeWindow *window, void *buffer, int fence_fd);
+-   AHardwareBuffer *(*buffer_to_ahb)(void *buffer);
+-   int32_t (*set_buffer_count)(ANativeWindow *window, size_t buffer_count);
+-   int32_t (*query)(const ANativeWindow *window, int query, int *value);
+-};
+-
+-static struct panvk_android_anw_ops panvk_android_anw;
+-static pthread_once_t panvk_android_anw_once = PTHREAD_ONCE_INIT;
+-
+-static void *
+-panvk_android_anw_sym(void *lib, const char *name)
+-{
+-   void *sym = lib ? dlsym(lib, name) : NULL;
+-
+-   return sym ? sym : dlsym(RTLD_DEFAULT, name);
+-}
+-
+-static void
+-panvk_android_anw_resolve(void)
+-{
+-   /* libnativewindow is a public (LLNDK) library, so the app namespace can
+-    * load it and every wrapper above is visible. */
+-   void *lib = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
+-
+-   *(void **)&panvk_android_anw.dequeue_buffer =
+-      panvk_android_anw_sym(lib, "ANativeWindow_dequeueBuffer");
+-   *(void **)&panvk_android_anw.queue_buffer =
+-      panvk_android_anw_sym(lib, "ANativeWindow_queueBuffer");
+-   *(void **)&panvk_android_anw.cancel_buffer =
+-      panvk_android_anw_sym(lib, "ANativeWindow_cancelBuffer");
+-   *(void **)&panvk_android_anw.buffer_to_ahb =
+-      panvk_android_anw_sym(lib, "ANativeWindowBuffer_getHardwareBuffer");
+-   *(void **)&panvk_android_anw.set_buffer_count =
+-      panvk_android_anw_sym(lib, "ANativeWindow_setBufferCount");
+-   *(void **)&panvk_android_anw.query =
+-      panvk_android_anw_sym(lib, "ANativeWindow_query");
+-}
+-
+-static void
+-panvk_android_anw_wait_fence(int fence_fd)
+-{
+-   if (fence_fd < 0)
+-      return;
+-
+-   /* The fence only says when the previous owner stopped touching the buffer;
+-    * wait for it, but never let a wedged consumer hang acquire forever. */
+-   struct pollfd pfd = {.fd = fence_fd, .events = POLLIN};
+-   poll(&pfd, 1, 1000);
+-   close(fence_fd);
+-}
+-
+-static bool
+-panvk_android_zero_copy_allowed(void)
+-{
+-   const char *env = getenv("PANVK_WSI_ZERO_COPY");
+-
+-   return !env || strcmp(env, "0") != 0;
+-}
+-
+-static bool
+-panvk_android_zero_copy_format_matches(uint32_t ahb_format, VkFormat vk_format)
+-{
+-   switch (ahb_format) {
+-   case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
+-   case AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM:
+-      return vk_format == VK_FORMAT_R8G8B8A8_UNORM ||
+-             vk_format == VK_FORMAT_R8G8B8A8_SRGB;
+-   /* AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM == 5. The Android stub header
+-    * shipped with the Mesa build has no name for it. */
+-   case 5:
+-      return vk_format == VK_FORMAT_B8G8R8A8_UNORM ||
+-             vk_format == VK_FORMAT_B8G8R8A8_SRGB;
+-   default:
+-      return false;
+-   }
+-}
+-
+-static int
+-panvk_android_swapchain_find_anb(struct panvk_android_swapchain *chain,
+-                                 void *anb)
+-{
+-   for (uint32_t i = 0; i < chain->base.image_count; i++) {
+-      if (chain->images[i].anb == anb)
+-         return (int)i;
+-   }
+-
+-   return -1;
+-}
+-
+-/* ANativeWindowQuery value from vndk/window.h; the NDK does not expose it. */
+-#define PANVK_ANDROID_QUERY_MIN_UNDEQUEUED_BUFFERS 3
+-
+-/* Import an AHardwareBuffer as one swapchain image. The image is created
+- * through the same deferred Android path the copy path uses, so panvk reads
+- * the buffer's real DRM modifier and plane layout from gralloc when the
+- * memory is imported. That makes window buffers usable as render targets
+- * whatever the vendor hands out (linear or AFBC). */
+-static VkResult
+-panvk_android_swapchain_import_ahb(struct panvk_android_swapchain *chain,
+-                                   VkDevice device,
+-                                   const VkAllocationCallbacks *pAllocator,
+-                                   uint32_t index,
+-                                   struct AHardwareBuffer *ahb,
+-                                   const VkSwapchainCreateInfoKHR *pCreateInfo)
+-{
+-   VK_FROM_HANDLE(vk_device, dev, device);
+-   struct panvk_android_swapchain_image *img = &chain->images[index];
+-   VkResult result;
+-
+-   VkExternalMemoryImageCreateInfo emici = {
+-      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+-      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+-   };
+-   VkImageCreateInfo ici = {
+-      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+-      .pNext = &emici,
+-      .imageType = VK_IMAGE_TYPE_2D,
+-      .format = pCreateInfo->imageFormat,
+-      .extent = {pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height, 1},
+-      .mipLevels = 1,
+-      .arrayLayers = 1,
+-      .samples = VK_SAMPLE_COUNT_1_BIT,
+-      .tiling = VK_IMAGE_TILING_OPTIMAL,
+-      .usage = pCreateInfo->imageUsage,
+-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+-   };
+-   result = dev->dispatch_table.CreateImage(device, &ici, pAllocator,
+-                                            &img->base.image);
+-   if (result != VK_SUCCESS)
+-      return result;
+-
+-   VkAndroidHardwareBufferPropertiesANDROID ahb_props = {
+-      .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+-   };
+-   result = panvk_GetAndroidHardwareBufferPropertiesANDROID(device, ahb,
+-                                                            &ahb_props);
+-   if (result != VK_SUCCESS)
+-      return result;
+-
+-   uint32_t chosen_mi = 0;
+-   for (uint32_t m = 0; m < 32; m++) {
+-      if (ahb_props.memoryTypeBits & (1u << m)) {
+-         chosen_mi = m;
+-         break;
+-      }
+-   }
+-
+-   VkImportAndroidHardwareBufferInfoANDROID imp = {
+-      .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+-      .buffer = ahb,
+-   };
+-   VkMemoryDedicatedAllocateInfo dai = {
+-      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+-      .pNext = &imp,
+-      .image = img->base.image,
+-   };
+-   VkMemoryAllocateInfo mai = {
+-      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+-      .pNext = &dai,
+-      .allocationSize = ahb_props.allocationSize,
+-      .memoryTypeIndex = chosen_mi,
+-   };
+-   result = dev->dispatch_table.AllocateMemory(device, &mai, pAllocator,
+-                                               &img->base.memory);
+-   if (result != VK_SUCCESS)
+-      return result;
+-
+-   VkBindImageMemoryInfo bmi = {
+-      .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
+-      .image = img->base.image,
+-      .memory = img->base.memory,
+-      .memoryOffset = 0,
+-   };
+-   return dev->dispatch_table.BindImageMemory2(device, 1, &bmi);
+-}
+-
+-/* Copy path: each image owns a driver-allocated AHB and present() memcpy's the
+- * frame into the window's buffer under ANativeWindow_lock(). */
+-static VkResult
+-panvk_android_swapchain_init_copy(struct panvk_android_swapchain *chain,
+-                                  VkDevice device,
+-                                  const VkAllocationCallbacks *pAllocator,
+-                                  const VkSwapchainCreateInfoKHR *pCreateInfo,
+-                                  uint32_t num_images)
+-{
+-   VkResult result = VK_SUCCESS;
+-
+-   for (uint32_t i = 0; i < num_images; i++) {
+-      AHardwareBuffer_Desc desc = {
+-         .width = pCreateInfo->imageExtent.width,
+-         .height = pCreateInfo->imageExtent.height,
+-         .layers = 1,
+-         .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+-         .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+-                  AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+-                  AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+-      };
+-      if (AHardwareBuffer_allocate(&desc, &chain->images[i].ahb) != 0 ||
+-          !chain->images[i].ahb)
+-         return VK_ERROR_INITIALIZATION_FAILED;
+-
+-      /* Ours and still undefined: the no-mapper linear probe may write it. */
+-      vk_android_set_owned_ahb(chain->images[i].ahb);
+-
+-      /* Cache the geometry so present does not query the mapper every frame. */
+-      AHardwareBuffer_Desc img_desc;
+-      AHardwareBuffer_describe(chain->images[i].ahb, &img_desc);
+-      chain->images[i].width = img_desc.width;
+-      chain->images[i].height = img_desc.height;
+-      chain->images[i].stride = img_desc.stride;
+-
+-      result = panvk_android_swapchain_import_ahb(chain, device, pAllocator, i,
+-                                                  chain->images[i].ahb,
+-                                                  pCreateInfo);
+-      if (result != VK_SUCCESS)
+-         break;
+-   }
+-
+-   vk_android_set_owned_ahb(NULL);
+-   return result;
+-}
+-
+-/* Zero-copy: import the window's own buffers and let the GPU render into them.
+- *
+- * The image pool has to be sized before any buffer is held for the life of the
+- * swapchain. Query M, the number of buffers that must stay un-dequeued, raise
+- * the pool to image_count + M, then dequeue the image_count buffers this
+- * swapchain needs and cancel them again. Before the first queued buffer the
+- * dequeue limit does not apply, so this cannot block, and afterwards the pool
+- * is large enough for the app to hold every image it may acquire. */
+-static VkResult
+-panvk_android_swapchain_init_zero_copy(struct panvk_android_swapchain *chain,
+-                                       VkDevice device,
+-                                       const VkAllocationCallbacks *pAllocator,
+-                                       const VkSwapchainCreateInfoKHR *pCreateInfo,
+-                                       uint32_t num_images,
+-                                       uint32_t *out_num_images)
+-{
+-   if (!chain->window || !panvk_android_anw.dequeue_buffer ||
+-       !panvk_android_anw.queue_buffer || !panvk_android_anw.cancel_buffer ||
+-       !panvk_android_anw.buffer_to_ahb || !panvk_android_anw.set_buffer_count ||
+-       !panvk_android_anw.query) {
+-      mesa_logi("panvk: zero-copy unavailable: ANativeWindow producer symbols "
+-                "not found");
+-      return VK_ERROR_INITIALIZATION_FAILED;
+-   }
+-
+-   int min_undequeued = 0;
+-   if (panvk_android_anw.query(chain->window,
+-                               PANVK_ANDROID_QUERY_MIN_UNDEQUEUED_BUFFERS,
+-                               &min_undequeued) != 0 ||
+-       min_undequeued < 0) {
+-      mesa_logi("panvk: zero-copy unavailable: ANativeWindow_query failed");
+-      return VK_ERROR_INITIALIZATION_FAILED;
+-   }
+-
+-   int32_t set_count_status =
+-      panvk_android_anw.set_buffer_count(chain->window,
+-                                         num_images + min_undequeued);
+-   if (set_count_status != 0) {
+-      mesa_logi("panvk: zero-copy unavailable: the window rejected a buffer "
+-                "count of %u (status %d)", num_images + min_undequeued,
+-                set_count_status);
+-      return VK_ERROR_INITIALIZATION_FAILED;
+-   }
+-
+-   uint32_t count = 0;
+-   for (; count < num_images; count++) {
+-      void *anb = NULL;
+-      int fence_fd = -1;
+-      if (panvk_android_anw.dequeue_buffer(chain->window, &anb, &fence_fd) != 0 ||
+-          !anb) {
+-         if (fence_fd >= 0)
+-            close(fence_fd);
+-         mesa_logi("panvk: zero-copy unavailable: dequeue failed after %u "
+-                   "buffers", count);
+-         break;
+-      }
+-
+-      AHardwareBuffer *ahb = panvk_android_anw.buffer_to_ahb(anb);
+-      if (!ahb) {
+-         panvk_android_anw.cancel_buffer(chain->window, anb, -1);
+-         close(fence_fd);
+-         break;
+-      }
+-
+-      AHardwareBuffer_Desc desc;
+-      AHardwareBuffer_describe(ahb, &desc);
+-      if (desc.width != pCreateInfo->imageExtent.width ||
+-          desc.height != pCreateInfo->imageExtent.height ||
+-          desc.layers != 1 ||
+-          !panvk_android_zero_copy_format_matches(desc.format,
+-                                                 pCreateInfo->imageFormat)) {
+-         mesa_logi("panvk: window buffer %ux%ux%u fmt 0x%x cannot back a %ux%u "
+-                   "VkFormat %d swapchain image", desc.width, desc.height,
+-                   desc.layers, desc.format, pCreateInfo->imageExtent.width,
+-                   pCreateInfo->imageExtent.height, pCreateInfo->imageFormat);
+-         panvk_android_anw.cancel_buffer(chain->window, anb, -1);
+-         close(fence_fd);
+-         break;
+-      }
+-
+-      panvk_android_anw_wait_fence(fence_fd);
+-
+-      chain->images[count].anb = anb;
+-      VkResult import_result =
+-         panvk_android_swapchain_import_ahb(chain, device, pAllocator, count,
+-                                            ahb, pCreateInfo);
+-      if (import_result != VK_SUCCESS) {
+-         chain->images[count].anb = NULL;
+-         panvk_android_anw.cancel_buffer(chain->window, anb, -1);
+-         mesa_logi("panvk: zero-copy unavailable: dma-buf import of a %ux%u "
+-                   "format 0x%x window buffer failed (%d)", desc.width,
+-                   desc.height, desc.format, import_result);
+-         break;
+-      }
+-   }
+-
+-   /* Every buffer goes back to the window; from now on acquire dequeues one
+-    * and present queues it. */
+-   for (uint32_t i = 0; i < count; i++)
+-      panvk_android_anw.cancel_buffer(chain->window, chain->images[i].anb, -1);
+-
+-   if (count < 2 || count < pCreateInfo->minImageCount) {
+-      mesa_logi("panvk: zero-copy unavailable: the window handed out only %u "
+-                "usable buffers", count);
+-      return VK_ERROR_INITIALIZATION_FAILED;
+-   }
+-
+-   *out_num_images = count;
+-   return VK_SUCCESS;
+-}
+-
+-static void
+-panvk_android_swapchain_free_images(struct panvk_android_swapchain *chain,
+-                                    VkDevice device,
+-                                    const VkAllocationCallbacks *pAllocator)
+-{
+-   VK_FROM_HANDLE(vk_device, dev, device);
+-
+-   for (uint32_t i = 0; i < ARRAY_SIZE(chain->images); i++) {
+-      struct panvk_android_swapchain_image *img = &chain->images[i];
+-
+-      if (chain->zero_copy && img->held && img->anb && chain->window) {
+-         panvk_android_anw.cancel_buffer(chain->window, img->anb, -1);
+-         img->held = false;
+-      }
+-
+-      if (img->base.image != VK_NULL_HANDLE)
+-         dev->dispatch_table.DestroyImage(device, img->base.image, pAllocator);
+-      if (img->base.memory != VK_NULL_HANDLE)
+-         dev->dispatch_table.FreeMemory(device, img->base.memory, pAllocator);
+-      /* Copy path only: zero-copy images are backed by buffers the window owns
+-       * and the imported memory already holds the buffer reference. */
+-      if (img->ahb)
+-         AHardwareBuffer_release(img->ahb);
+-
+-      img->ahb = NULL;
+-      img->anb = NULL;
+-      img->base.image = VK_NULL_HANDLE;
+-      img->base.memory = VK_NULL_HANDLE;
+-   }
+-}
+-
+ static VkResult
+ panvk_wsi_android_get_support(VkIcdSurfaceBase *surface,
+                               struct wsi_device *wsi_device,
+@@ -635,43 +219,10 @@ panvk_android_swapchain_acquire_next_image(
+    uint32_t *image_index)
+ {
+    struct panvk_android_swapchain *chain = (struct panvk_android_swapchain *)swapchain;
+-
+-   if (!chain->zero_copy) {
+-      uint32_t idx = chain->next_image;
+-      chain->next_image = (chain->next_image + 1) % chain->base.image_count;
+-      *image_index = idx;
+-      return VK_SUCCESS;
+-   }
+-
+-   /* Zero-copy: take the next buffer the window hands out and map it back to
+-    * the image that wraps it. A buffer that was never imported means the
+-    * window reallocated its pool; hand it straight back and look again. */
+-   for (uint32_t attempt = 0; attempt < chain->base.image_count + 4; attempt++) {
+-      void *anb = NULL;
+-      int fence_fd = -1;
+-      if (panvk_android_anw.dequeue_buffer(chain->window, &anb, &fence_fd) != 0 ||
+-          !anb) {
+-         if (fence_fd >= 0)
+-            close(fence_fd);
+-         return VK_ERROR_OUT_OF_DATE_KHR;
+-      }
+-
+-      int idx = panvk_android_swapchain_find_anb(chain, anb);
+-      if (idx < 0) {
+-         panvk_android_anw.cancel_buffer(chain->window, anb, -1);
+-         if (fence_fd >= 0)
+-            close(fence_fd);
+-         continue;
+-      }
+-
+-      panvk_android_anw_wait_fence(fence_fd);
+-      chain->images[idx].held = true;
+-      chain->next_image = (idx + 1) % chain->base.image_count;
+-      *image_index = (uint32_t)idx;
+-      return VK_SUCCESS;
+-   }
+-
+-   return VK_ERROR_OUT_OF_DATE_KHR;
++    uint32_t idx = chain->next_image;
++    chain->next_image = (chain->next_image + 1) % chain->base.image_count;
++    *image_index = idx;
++    return VK_SUCCESS;
+ }
+ 
+ static VkResult
+@@ -679,20 +230,10 @@ panvk_android_swapchain_release_images(struct wsi_swapchain *swapchain,
+                                        uint32_t count,
+                                        const uint32_t *indices)
+ {
+-   struct panvk_android_swapchain *chain = (struct panvk_android_swapchain *)swapchain;
+-
+    for (uint32_t i = 0; i < count; i++) {
+       if (indices[i] >= swapchain->image_count)
+          return VK_ERROR_OUT_OF_DATE_KHR;
+ 
+-      /* Zero-copy: the app dropped the image without presenting it, so the
+-       * window buffer has to go back to the pool untouched. */
+-      struct panvk_android_swapchain_image *img = &chain->images[indices[i]];
+-      if (chain->zero_copy && img->held) {
+-         panvk_android_anw.cancel_buffer(chain->window, img->anb, -1);
+-         img->held = false;
+-      }
+-
+       swapchain->get_wsi_image(swapchain, indices[i])->acquired = false;
+    }
+ 
+@@ -710,38 +251,6 @@ panvk_android_swapchain_wait_for_present2(struct wsi_swapchain *swapchain,
+    return present_id <= chain->completed_present_id ? VK_SUCCESS : VK_TIMEOUT;
+ }
+ 
+-/* Bounding box of the damaged rectangles, clamped to the image extent.
+- * Returns false when the app reported no usable damage (present it all). */
+-static bool
+-panvk_android_swapchain_damage_bounds(const VkPresentRegionKHR *damage,
+-                                      uint32_t width, uint32_t height,
+-                                      ARect *bounds)
+-{
+-   if (!damage || !damage->pRectangles || damage->rectangleCount == 0)
+-      return false;
+-
+-   int32_t left = INT32_MAX, top = INT32_MAX, right = 0, bottom = 0;
+-   for (uint32_t i = 0; i < damage->rectangleCount; i++) {
+-      const VkRectLayerKHR *r = &damage->pRectangles[i];
+-      int64_t l = MAX2((int64_t)r->offset.x, 0);
+-      int64_t t = MAX2((int64_t)r->offset.y, 0);
+-      int64_t rr = MIN2((int64_t)r->offset.x + r->extent.width, (int64_t)width);
+-      int64_t bb = MIN2((int64_t)r->offset.y + r->extent.height, (int64_t)height);
+-      if (rr <= l || bb <= t)
+-         continue;
+-      left = MIN2(left, (int32_t)l);
+-      top = MIN2(top, (int32_t)t);
+-      right = MAX2(right, (int32_t)rr);
+-      bottom = MAX2(bottom, (int32_t)bb);
+-   }
+-
+-   if (right <= left || bottom <= top)
+-      return false;
+-
+-   *bounds = (ARect){.left = left, .top = top, .right = right, .bottom = bottom};
+-   return true;
+-}
+-
+ static VkResult
+ panvk_android_swapchain_queue_present(
+    struct wsi_swapchain *swapchain,
+@@ -753,56 +262,25 @@ panvk_android_swapchain_queue_present(
+    if (image_index >= chain->base.image_count)
+       return VK_ERROR_OUT_OF_DATE_KHR;
+ 
+-   /* Software WSI already waited on this image's fence in
+-    * wsi_common_queue_present() (the fence is signaled once the app's
+-    * rendering submit has completed), so the GPU no longer touches the AHB.
+-    * The dma-buf path does not wait and keeps the full device flush. */
+-   const struct wsi_device *wsi = swapchain->wsi;
+-   if (!wsi->sw || swapchain->sw_fence_wait_in_present_thread) {
+-      VK_FROM_HANDLE(vk_device, dev, swapchain->device);
+-      dev->dispatch_table.DeviceWaitIdle(swapchain->device);
+-   }
+-
+-   if (chain->zero_copy) {
+-      struct panvk_android_swapchain_image *img = &chain->images[image_index];
+-      if (!img->held)
+-         return VK_ERROR_OUT_OF_DATE_KHR;
++   VK_FROM_HANDLE(vk_device, dev, swapchain->device);
++   dev->dispatch_table.DeviceWaitIdle(swapchain->device);
+ 
+-      /* The GPU already wrote straight into this buffer, so presenting is just
+-       * handing it back to the window. No fence: the software WSI waited for
+-       * the rendering submit above. */
+-      int32_t status =
+-         panvk_android_anw.queue_buffer(chain->window, img->anb, -1);
+-      img->held = false;
+-      if (status != 0) {
+-         panvk_android_anw.cancel_buffer(chain->window, img->anb, -1);
+-         return VK_ERROR_OUT_OF_DATE_KHR;
+-      }
+-   } else if (chain->window && chain->images[image_index].ahb) {
+-      const struct panvk_android_swapchain_image *img = &chain->images[image_index];
+-      ARect damage_bounds;
+-      ARect *p_damage_bounds =
+-         panvk_android_swapchain_damage_bounds(damage, img->width, img->height,
+-                                               &damage_bounds) ? &damage_bounds : NULL;
++   if (chain->window && chain->images[image_index].ahb) {
+       ANativeWindow_Buffer win_buf;
+-      if (ANativeWindow_lock(chain->window, &win_buf, p_damage_bounds) == 0) {
++      if (ANativeWindow_lock(chain->window, &win_buf, NULL) == 0) {
+          void *ahb_data = NULL;
+-         if (win_buf.bits && win_buf.width > 0 && win_buf.height > 0 &&
+-             AHardwareBuffer_lock(img->ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+-                                  -1, NULL, &ahb_data) == 0) {
+-            uint32_t copy_w = MIN2((uint32_t)win_buf.width, img->width);
+-            uint32_t copy_h = MIN2((uint32_t)win_buf.height, img->height);
+-            if (win_buf.stride == (int32_t)img->stride && copy_w == img->width) {
+-               /* Both sides are row-contiguous: copy in one go. */
+-               memcpy(win_buf.bits, ahb_data, (size_t)copy_h * img->stride * 4);
+-            } else {
+-               for (uint32_t y = 0; y < copy_h; y++) {
+-                  memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
+-                         (char *)ahb_data + y * img->stride * 4,
+-                         copy_w * 4);
+-               }
++         AHardwareBuffer_Desc desc;
++         AHardwareBuffer_describe(chain->images[image_index].ahb, &desc);
++         if (AHardwareBuffer_lock(chain->images[image_index].ahb,
++                                  AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &ahb_data) == 0) {
++            uint32_t copy_h = win_buf.height < (int)desc.height ? (uint32_t)win_buf.height : desc.height;
++            uint32_t copy_w = win_buf.width < (int)desc.width ? (uint32_t)win_buf.width : desc.width;
++            for (uint32_t y = 0; y < copy_h; y++) {
++               memcpy((char *)win_buf.bits + y * win_buf.stride * 4,
++                      (char *)ahb_data + y * desc.stride * 4,
++                      copy_w * 4);
+             }
+-            AHardwareBuffer_unlock(img->ahb, NULL);
++            AHardwareBuffer_unlock(chain->images[image_index].ahb, NULL);
+          }
+          ANativeWindow_unlockAndPost(chain->window);
+       }
+@@ -822,7 +300,14 @@ panvk_android_swapchain_destroy(
+    VK_FROM_HANDLE(vk_device, dev, swapchain->device);
+ 
+    vk_android_set_owned_ahb(NULL);
+-   panvk_android_swapchain_free_images(chain, swapchain->device, pAllocator);
++   for (uint32_t i = 0; i < chain->base.image_count; i++) {
++      if (chain->images[i].base.image != VK_NULL_HANDLE)
++         dev->dispatch_table.DestroyImage(swapchain->device, chain->images[i].base.image, pAllocator);
++      if (chain->images[i].base.memory != VK_NULL_HANDLE)
++         dev->dispatch_table.FreeMemory(swapchain->device, chain->images[i].base.memory, pAllocator);
++      if (chain->images[i].ahb)
++         AHardwareBuffer_release(chain->images[i].ahb);
++   }
+ 
+    wsi_swapchain_finish(&chain->base);
+    vk_free2(&dev->alloc, pAllocator, chain);
+@@ -870,39 +355,100 @@ panvk_wsi_android_create_swapchain(
+                                        pCreateInfo->imageExtent.width,
+                                        pCreateInfo->imageExtent.height,
+                                        WINDOW_FORMAT_RGBA_8888);
+-      mesa_logi("panvk: Android WSI swapchain %ux%u, %u images requested",
+-                pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height,
+-                num_images);
+    }
+ 
+-   if (chain->window && panvk_android_zero_copy_allowed()) {
+-      pthread_once(&panvk_android_anw_once, panvk_android_anw_resolve);
+-
+-      uint32_t zc_images = num_images;
+-      if (panvk_android_swapchain_init_zero_copy(chain, device, pAllocator,
+-                                                 pCreateInfo, num_images,
+-                                                 &zc_images) == VK_SUCCESS) {
+-         chain->zero_copy = true;
+-         num_images = zc_images;
+-         mesa_logi("panvk: zero-copy present enabled: %u window images, "
+-                   "present is a single queueBuffer", num_images);
+-      } else {
+-         panvk_android_swapchain_free_images(chain, device, pAllocator);
+-         mesa_logi("panvk: zero-copy present unavailable, using the AHB copy "
+-                   "path");
++   for (uint32_t i = 0; i < num_images; i++) {
++      AHardwareBuffer_Desc desc = {
++         .width = pCreateInfo->imageExtent.width,
++         .height = pCreateInfo->imageExtent.height,
++         .layers = 1,
++         .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
++         .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
++                  AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
++                  AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
++      };
++      if (AHardwareBuffer_allocate(&desc, &chain->images[i].ahb) != 0 || !chain->images[i].ahb) {
++         panvk_android_swapchain_destroy(&chain->base, pAllocator);
++         return VK_ERROR_INITIALIZATION_FAILED;
+       }
+-   }
++      /* Ours and still undefined: the no-mapper linear probe may write it. */
++      vk_android_set_owned_ahb(chain->images[i].ahb);
+ 
+-   if (!chain->zero_copy) {
+-      result = panvk_android_swapchain_init_copy(chain, device, pAllocator,
+-                                                 pCreateInfo, num_images);
++      VkExternalMemoryImageCreateInfo emici = {
++         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
++         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
++      };
++      VkImageCreateInfo ici = {
++         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
++         .pNext = &emici,
++         .imageType = VK_IMAGE_TYPE_2D,
++         .format = pCreateInfo->imageFormat,
++         .extent = {pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height, 1},
++         .mipLevels = 1,
++         .arrayLayers = 1,
++         .samples = VK_SAMPLE_COUNT_1_BIT,
++         .tiling = VK_IMAGE_TILING_OPTIMAL,
++         .usage = pCreateInfo->imageUsage,
++         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++      };
++      result = dev->dispatch_table.CreateImage(device, &ici, pAllocator, &chain->images[i].base.image);
+       if (result != VK_SUCCESS) {
+          panvk_android_swapchain_destroy(&chain->base, pAllocator);
+          return result;
+       }
+-   }
+ 
+-   chain->base.image_count = num_images;
++      VkAndroidHardwareBufferPropertiesANDROID ahb_props = {
++         .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
++      };
++      result = panvk_GetAndroidHardwareBufferPropertiesANDROID(device, chain->images[i].ahb, &ahb_props);
++      if (result != VK_SUCCESS) {
++         panvk_android_swapchain_destroy(&chain->base, pAllocator);
++         return result;
++      }
++
++      uint32_t chosen_mi = 0;
++      for (uint32_t m = 0; m < 32; m++) {
++         if (ahb_props.memoryTypeBits & (1u << m)) {
++            chosen_mi = m;
++            break;
++         }
++      }
++
++      VkImportAndroidHardwareBufferInfoANDROID imp = {
++         .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
++         .buffer = chain->images[i].ahb,
++      };
++      VkMemoryDedicatedAllocateInfo dai = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
++         .pNext = &imp,
++         .image = chain->images[i].base.image,
++      };
++      VkMemoryAllocateInfo mai = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++         .pNext = &dai,
++         .allocationSize = ahb_props.allocationSize,
++         .memoryTypeIndex = chosen_mi,
++      };
++      result = dev->dispatch_table.AllocateMemory(device, &mai, pAllocator, &chain->images[i].base.memory);
++      if (result != VK_SUCCESS) {
++         panvk_android_swapchain_destroy(&chain->base, pAllocator);
++         return result;
++      }
++
++      VkBindImageMemoryInfo bmi = {
++         .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
++         .image = chain->images[i].base.image,
++         .memory = chain->images[i].base.memory,
++         .memoryOffset = 0,
++      };
++      result = dev->dispatch_table.BindImageMemory2(device, 1, &bmi);
++      if (result != VK_SUCCESS) {
++         panvk_android_swapchain_destroy(&chain->base, pAllocator);
++         return result;
++      }
++   }
++   vk_android_set_owned_ahb(NULL);
+ 
+    *swapchain_out = &chain->base;
+    return VK_SUCCESS;
+@@ -949,55 +495,17 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
+ {
+    struct panvk_instance *instance =
+       to_panvk_instance(physical_device->vk.instance);
+-   const bool uses_kbase = physical_device->kbase_node_path[0] != '\0';
+-   const char *dri3_option = getenv("PANVK_KBASE_DRI3");
+-   /* The proprietary Termux:X11 layer uses WSI_X11_TERMUX=1 as its
+-    * process-wide switch.  Accept the same switch here when no explicit
+-    * PanVK override is present, so both ICDs exercise the same raw-FD DRI3
+-    * transport instead of silently falling back to the slower SHM path. */
+-   const char *termux_wsi = getenv("WSI_X11_TERMUX");
+-   const bool termux_raw_dri3 =
+-      uses_kbase && !dri3_option && termux_wsi && strcmp(termux_wsi, "0") != 0;
+-   const bool kbase_raw_dri3 =
+-      termux_raw_dri3 ||
+-      (uses_kbase && dri3_option &&
+-       (!strcmp(dri3_option, "raw") || !strcmp(dri3_option, "termux")));
+-   const bool kbase_dmabuf =
+-#if defined(HAVE_PAN_KMOD_KBASE)
+-      uses_kbase &&
+-      ((!dri3_option && termux_raw_dri3) ||
+-       (dri3_option && strcmp(dri3_option, "0") != 0)) &&
+-      kbase_kmod_supports_dmabuf(physical_device->kmod.dev);
+-#else
+-      false;
+-#endif
+    VkResult result;
+ 
+    result = wsi_device_init(&physical_device->wsi_device,
+                             panvk_physical_device_to_handle(physical_device),
+                             panvk_wsi_proc_addr, &instance->vk.alloc, -1,
+                             &instance->drirc.options,
+-                            &(struct wsi_device_options){
+-                               .sw_device = uses_kbase && !kbase_dmabuf,
+-                                  kbase_dmabuf && kbase_raw_dri3,
+-                            });
++                            &(struct wsi_device_options){.sw_device = false});
+    if (result != VK_SUCCESS)
+       return result;
+ 
+-   /* kbase syncs carry GPU seqno state in userspace and cannot be copied via
+-    * DRM syncobj fd payloads.  Keep even empty WSI submits on the real queue
+-    * so present fences are backed by the kbase submission timeline.
+-    */
+-   physical_device->wsi_device.disable_unordered_submits = uses_kbase;
+-
+-   /* kbase is not a DRM fd.  The default CPU WSI path presents through
+-    * MIT-SHM.  Android dma-heaps can also provide shareable
+-    * allocations, but some Android X servers advertise DRI3 while rejecting
+-    * standard PixmapFromBuffer.  PANVK_KBASE_DRI3=raw (or termux) uses the
+-    * Termux:X11/Winlator private raw-FD modifier instead of DRM modifiers.
+-    */
+-   physical_device->wsi_device.supports_modifiers =
+-      !uses_kbase || (kbase_dmabuf && !kbase_raw_dri3);
++   physical_device->wsi_device.supports_modifiers = true;
+    physical_device->wsi_device.can_present_on_device =
+       panvk_can_present_on_device;
+ 
+diff --git a/src/util/u_gralloc/u_gralloc_fallback.c b/src/util/u_gralloc/u_gralloc_fallback.c
+index 0437db4..659bbde 100644
+--- a/src/util/u_gralloc/u_gralloc_fallback.c
++++ b/src/util/u_gralloc/u_gralloc_fallback.c
+@@ -52,6 +52,199 @@ get_native_buffer_fds(const native_handle_t *handle, int fds[3])
+    return handle->numFds;
+ }
+ 
++/* The fd of a handle that holds the buffer: the largest dma-buf among its fds. Allocators do not
++ * agree on where it is: MediaTek's ARM gralloc puts -1 first and the buffer second, and a small
++ * shared-attribute region may follow it. Returns -1 when no fd has a size. */
++static int
++largest_handle_fd(const native_handle_t *handle)
++{
++   int fd = -1;
++   off_t best = 0;
++   for (int i = 0; i < handle->numFds; i++) {
++      if (handle->data[i] < 0)
++         continue;
++      const off_t sz = lseek(handle->data[i], 0, SEEK_END);
++      lseek(handle->data[i], 0, SEEK_SET);
++      if (sz > best) {
++         best = sz;
++         fd = handle->data[i];
++      }
++   }
++   return fd;
++}
++
++/*
++ * ARM's mali gralloc private handle, as the Exynos 9820 (Android 12) and 9611 (Android 13)
++ * allocators hand it out behind IMapper 2.x, which offers no layout query. Measured from the
++ * handles themselves: indices are into native_handle_t::data[], fds included, 64-bit fields
++ * as low/high int pairs. The byte stride is the allocator's own (a 65x33 buffer is 80x48), and
++ * a linear buffer starts at offset 0 of the dma-buf, both confirmed by the vendor driver
++ * rendering into such a buffer and the pixels read back through the dma-buf.
++ */
++#define ARM_GRALLOC_MAGIC        0x03141592
++/* Offsets from the magic, which is data[5] on the Exynos handles. MediaTek's allocator (Galaxy
++ * A31, MT6768, Android 12: 3 fds and 18 ints of its own first) puts the same ARM handle behind a
++ * prefix, magic at data[21], and has 6 more ints before plane_info. So the magic is searched for,
++ * and the plane-0 {byte stride, width, height} triple is taken from the first known offset where
++ * it is consistent with the buffer. */
++struct arm_hnd_layout {
++   int plane0, width, height, req_format;
++};
++static const struct arm_hnd_layout arm_hnd_layouts[] = {
++   {15, 2, 3, 4}, /* Exynos */
++   {21, 2, 3, 4}, /* MediaTek */
++};
++enum { ARM_HND_EXYNOS, ARM_HND_MTK };
++/* The u64 alloc format (HAL format low, AFBC and other layout bits from 32) sits 5 ints before
++ * plane_info on both: magic+10 on Exynos, magic+16 on MediaTek. */
++#define ARM_HND_ALLOC_FORMAT_BACK 5
++#define ARM_HND_PLANE_INTS       3  /* plane_info[3] of {byte stride, width, height} */
++#define ARM_HND_MIN_INTS         36
++#define ARM_ALLOC_FORMAT_AFBC    (1ull << 32)
++/* MediaTek's allocator gives GPU-only buffers (sampled + framebuffer, no CPU or composer usage)
++ * alloc format 0x311_<hal format>, whatever the size: AFBC with 16x16 superblocks, headers tiled
++ * 8x8 (so 128x128-pixel aligned), YUV transform and sparse bodies, the header at offset 0 and the
++ * body right after it on a 4 KB boundary. That is the layout Mesa computes for the equivalent DRM
++ * modifier, and the plane stride is the uncompressed byte stride of the aligned width, which is
++ * what the AFBC import takes as its row pitch. Read off the handles at 16x16 to
++ * 1920x1080 and checked pixel for pixel in both directions against the vendor GLES driver.
++ * Only this combination, and only RGBA/RGBX 8888, is taken as AFBC.
++ * A BGRA 8888 request is stored as RGBA AFBC (alloc format 0x311_00000001), so it is reported
++ * as RGBA, which is also the Vulkan format the vendor driver gives such a buffer. */
++#define ARM_MTK_AFBC_ALLOC_BITS  0x311u
++/* Exynos's allocator (Galaxy S10e, Android 12) makes the same GPU-only buffers AFBC with alloc
++ * format 0x1_<hal format>: 16x16 superblocks, untiled headers, no YUV transform, the plane stride
++ * that of the 16-aligned width. Its body starts at the header size rounded up to 4 KB where Mesa
++ * uses 128 bytes; readers follow the header's offsets and Mesa's body ends inside the buffer, so
++ * that does not matter. Checked like the MediaTek layout: 16x16 + sparse
++ * passes both directions, with YUV transform every pixel is wrong. A BGRA 8888 buffer is stored in
++ * RGBA component order here too (alloc format 0x1_00000005), as the vendor driver reports it. */
++#define ARM_EXYNOS_AFBC_ALLOC_BITS 0x1u
++
++/* Returns -ENOENT when the handle is not an ARM gralloc handle. */
++static int
++arm_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
++                            struct u_gralloc_buffer_basic_info *out)
++{
++   const native_handle_t *handle = hnd->handle;
++
++   const int total = handle->numFds + handle->numInts;
++   if (total < ARM_HND_MIN_INTS)
++      return -ENOENT;
++
++   int m = handle->numFds;
++   while (m < total && (uint32_t)handle->data[m] != ARM_GRALLOC_MAGIC)
++      m++;
++   if (m + ARM_HND_MIN_INTS - 5 > total)
++      return -ENOENT;
++
++   const int *h = &handle->data[m];
++   int format = 0, layout = -1, plane0 = -1;
++   uint32_t width = 0, height = 0, bpp = 0;
++   for (unsigned i = 0; i < ARRAY_SIZE(arm_hnd_layouts) && plane0 < 0; i++) {
++      const struct arm_hnd_layout *l = &arm_hnd_layouts[i];
++      const int o = l->plane0;
++      if (m + o + 2 * ARM_HND_PLANE_INTS > total)
++         continue;
++      format = h[l->req_format];
++      width = h[l->width];
++      height = h[l->height];
++      bpp = get_hal_format_bpp(format);
++      const uint32_t ps = h[o], pw = h[o + 1], ph = h[o + 2];
++      if (bpp && width && ps >= width * bpp && ps <= INT32_MAX && pw >= width && ph >= height &&
++          ps >= pw * bpp) {
++         plane0 = o;
++         layout = i;
++      }
++   }
++   if (plane0 < 0)
++      return -ENOENT;
++
++   const uint32_t stride = h[plane0];
++   const int af = plane0 - ARM_HND_ALLOC_FORMAT_BACK;
++   const uint64_t alloc_format =
++      (uint64_t)(uint32_t)h[af] | ((uint64_t)(uint32_t)h[af + 1] << 32);
++
++   if (is_hal_format_yuv(format) || h[plane0 + ARM_HND_PLANE_INTS]) {
++      mesa_loge("ARM gralloc: multi-planar format 0x%x is not handled", format);
++      return -EINVAL;
++   }
++
++   /* Other AFBC layouts are the allocator's, and nothing here describes them, so such a buffer
++    * is refused rather than read as linear. Swapchain images and the driver's own
++    * AHardwareBuffers avoid AFBC by asking for MALI_GRALLOC_USAGE_NO_AFBC and composer usage. */
++   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
++   int stored_format = format;
++   if (alloc_format & ARM_ALLOC_FORMAT_AFBC) {
++      const uint32_t alloc_hal = (uint32_t)alloc_format;
++      const bool mtk_afbc = layout == ARM_HND_MTK &&
++                            (alloc_format >> 32) == ARM_MTK_AFBC_ALLOC_BITS &&
++                            ((alloc_hal == (uint32_t)format &&
++                              (format == HAL_PIXEL_FORMAT_RGBA_8888 ||
++                               format == HAL_PIXEL_FORMAT_RGBX_8888)) ||
++                             (alloc_hal == HAL_PIXEL_FORMAT_RGBA_8888 &&
++                              format == HAL_PIXEL_FORMAT_BGRA_8888));
++      const bool exy_afbc = layout == ARM_HND_EXYNOS &&
++                            (alloc_format >> 32) == ARM_EXYNOS_AFBC_ALLOC_BITS &&
++                            alloc_hal == (uint32_t)format &&
++                            (format == HAL_PIXEL_FORMAT_RGBA_8888 ||
++                             format == HAL_PIXEL_FORMAT_RGBX_8888 ||
++                             format == HAL_PIXEL_FORMAT_BGRA_8888);
++      if (!mtk_afbc && !exy_afbc) {
++         mesa_loge("ARM gralloc: AFBC buffer (alloc format 0x%llx) is not handled",
++                   (unsigned long long)alloc_format);
++         return -EINVAL;
++      }
++      if (mtk_afbc) {
++         modifier = DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |
++                                            AFBC_FORMAT_MOD_TILED | AFBC_FORMAT_MOD_YTR |
++                                            AFBC_FORMAT_MOD_SPARSE);
++         stored_format = alloc_hal;
++      } else {
++         modifier = DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |
++                                            AFBC_FORMAT_MOD_SPARSE);
++         stored_format = format == HAL_PIXEL_FORMAT_BGRA_8888 ? HAL_PIXEL_FORMAT_RGBA_8888
++                                                              : format;
++      }
++   }
++
++   const int drm_fourcc = get_fourcc_from_hal_format(stored_format);
++   if (drm_fourcc == -1 || !bpp || !width || stride < width * bpp || stride > INT32_MAX) {
++      mesa_loge("ARM gralloc: inconsistent handle (format 0x%x, %ux%u, stride %u)", format,
++                width, height, stride);
++      return -EINVAL;
++   }
++
++   /* The buffer's dma-buf: the first fd big enough to hold it. Exynos puts it first; MediaTek's
++    * handle carries 3 fds and the first is not one (lseek gives no size). */
++   int fd = -1;
++   off_t fd_size = 0;
++   for (int i = 0; i < handle->numFds && fd < 0; i++) {
++      const off_t sz = lseek(handle->data[i], 0, SEEK_END);
++      lseek(handle->data[i], 0, SEEK_SET);
++      if (sz > 0 && (uint64_t)sz >= (uint64_t)stride * height) {
++         fd = handle->data[i];
++         fd_size = sz;
++      }
++   }
++   if (fd < 0) {
++      mesa_loge("ARM gralloc: no fd of the handle holds %u bytes", stride * height);
++      return -EINVAL;
++   }
++
++   out->drm_fourcc = drm_fourcc;
++   out->modifier = modifier;
++   out->num_planes = 1;
++   out->fds[0] = fd;
++   out->offsets[0] = 0;
++   out->strides[0] = stride;
++   /* The whole dma-buf: an AFBC import bounds its plane by it, since the allocator's body can
++    * sit further out than the driver's own layout puts it. */
++   out->alloc_size = fd_size;
++
++   return 0;
++}
++
+ 
+ typedef const native_handle_t *panvk_v19_buffer_handle_t;
+ typedef int32_t (*panvk_v19_import_fn)(const native_handle_t *, panvk_v19_buffer_handle_t *);
+@@ -637,6 +830,12 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
+ 
+    int stable_ret = panvk_v19_query_mapper(hnd->handle, out);
+    if (stable_ret != 0) {
++      /* The mapper's metadata is the allocator's own answer, but ARM gralloc behind IMapper 2.x
++       * has none. Its handle still describes the AFBC layout of a GPU-only buffer (see
++       * arm_gralloc_get_buffer_info), so take that rather than refuse the import. */
++      int arm_ret = arm_gralloc_get_buffer_info(hnd, out);
++      if (arm_ret == 0)
++         return 0;
+       mesa_logw("[P0A-V19-FULLPLANE] complete metadata unavailable rc=%d; refusing guessed layout",
+                 stable_ret);
+       return stable_ret;
+diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
+index 97637ed..1f031e7 100644
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -211,6 +211,41 @@ vk_gralloc_to_drm_explicit_layout(
+    return VK_SUCCESS;
+ }
+ 
++/* The dma-buf is not always the handle's first fd: MediaTek's ARM gralloc handle carries three,
++ * the first is -1 and the buffer is the second. The gralloc backend that parsed the handle knows
++ * which, so ask it, and fall back to the first fd.
++ */
++int
++vk_android_native_handle_dma_buf_fd(const struct native_handle *handle,
++                                    int hal_format, int pixel_stride)
++{
++   assert(handle && handle->numFds > 0);
++   struct u_gralloc *gralloc = vk_android_get_ugralloc();
++   if (gralloc) {
++      struct u_gralloc_buffer_handle gr_handle = {
++         .handle = handle,
++         .hal_format = hal_format,
++         .pixel_stride = pixel_stride,
++      };
++      struct u_gralloc_buffer_basic_info info = {0};
++      if (u_gralloc_get_buffer_basic_info(gralloc, &gr_handle, &info) == 0 &&
++          info.fds[0] > 0)
++         return info.fds[0];
++   }
++   return handle->data[0];
++}
++
++#if ANDROID_API_LEVEL >= 26
++int
++vk_android_ahb_dma_buf_fd(const struct AHardwareBuffer *ahb)
++{
++   AHardwareBuffer_Desc desc;
++   AHardwareBuffer_describe(ahb, &desc);
++   return vk_android_native_handle_dma_buf_fd(
++      AHardwareBuffer_getNativeHandle(ahb), desc.format, desc.stride);
++}
++#endif
++
+ VkResult
+ vk_android_import_anb_memory(struct vk_device *device,
+                              struct vk_image *image,
+@@ -219,7 +254,8 @@ vk_android_import_anb_memory(struct vk_device *device,
+ {
+    assert(anb && anb->handle && anb->handle->numFds > 0);
+ 
+-   int dma_buf_fd = anb->handle->data[0];
++   int dma_buf_fd =
++      vk_android_native_handle_dma_buf_fd(anb->handle, anb->format, anb->stride);
+ 
+    /* Query image memory requirements for size and supported memory types */
+    VkMemoryRequirements mem_reqs;
+@@ -1013,14 +1049,15 @@ vk_image_create_info_to_ahb_usage(const VkImageCreateInfo *info)
+ }
+ 
+ static bool
+-vk_ahb_probe_format(uint32_t ahb_format, uint64_t ahb_usage)
++vk_ahb_probe_format(uint32_t ahb_format, uint64_t ahb_usage,
++                    uint64_t extra_usage)
+ {
+    AHardwareBuffer_Desc desc = {
+       .width = 16,
+       .height = 16,
+       .layers = 1,
+       .format = ahb_format,
+-      .usage = ahb_usage,
++      .usage = ahb_usage | extra_usage,
+    };
+ #if ANDROID_API_LEVEL >= 29
+    return AHardwareBuffer_isSupported(&desc);
+@@ -1078,6 +1115,8 @@ vk_alloc_ahardware_buffer(const VkMemoryAllocateInfo *pAllocateInfo)
+              !vk_format_is_depth_or_stencil(image->format))
+             usage |= AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
+       }
++
++      usage |= image->base.device->physical->android_ahb_image_usage;
+    } else {
+       /* AHB export allocation for VkBuffer requires a valid allocationSize */
+       assert(pAllocateInfo->allocationSize);
+@@ -1156,6 +1195,22 @@ get_ahb_buffer_format_properties2(
+ 
+    p->format = vk_ahb_format_to_image_format(desc.format);
+ 
++   /* An allocator may store a BGRA buffer as RGBA: MediaTek's ARM gralloc does for GPU-only
++    * (AFBC) buffers, where only the component order in the descriptor tells them apart. Report
++    * the format the buffer is stored in, as the vendor driver there does. */
++   if (p->format == VK_FORMAT_B8G8R8A8_UNORM && vk_android_get_ugralloc()) {
++      struct u_gralloc_buffer_handle bgra_handle = {
++         .handle = AHardwareBuffer_getNativeHandle(buffer),
++         .pixel_stride = desc.stride,
++         .hal_format = desc.format,
++      };
++      struct u_gralloc_buffer_basic_info bgra_info = {0};
++      if (u_gralloc_get_buffer_basic_info(vk_android_get_ugralloc(), &bgra_handle,
++                                          &bgra_info) == 0 &&
++          bgra_info.drm_fourcc == DRM_FORMAT_ABGR8888)
++         p->format = VK_FORMAT_R8G8B8A8_UNORM;
++   }
++
+    VkFormat external_format = p->format;
+ 
+    if (p->format != VK_FORMAT_UNDEFINED)
+@@ -1422,7 +1477,8 @@ vk_android_get_ahb_image_properties(
+    }
+ 
+    const uint64_t ahb_usage = vk_image_format_info_to_ahb_usage(info);
+-   if (!vk_ahb_probe_format(ahb_format, ahb_usage)) {
++   if (!vk_ahb_probe_format(ahb_format, ahb_usage,
++                            pdevice->android_ahb_image_usage)) {
+       return vk_errorf(pdevice, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                        "ahb_format (%u) ahb_usage (0x%" PRIx64 ") unsupported",
+                        ahb_format, ahb_usage);
+@@ -1446,7 +1502,8 @@ vk_android_get_ahb_image_properties(
+    ahb_usage_props =
+       vk_find_struct(props->pNext, ANDROID_HARDWARE_BUFFER_USAGE_ANDROID);
+    if (ahb_usage_props)
+-      ahb_usage_props->androidHardwareBufferUsage = ahb_usage;
++      ahb_usage_props->androidHardwareBufferUsage =
++         ahb_usage | pdevice->android_ahb_image_usage;
+ 
+    return VK_SUCCESS;
+ }
+diff --git a/src/vulkan/runtime/vk_android.h b/src/vulkan/runtime/vk_android.h
+index ed20e97..d786d15 100644
+--- a/src/vulkan/runtime/vk_android.h
++++ b/src/vulkan/runtime/vk_android.h
+@@ -42,6 +42,15 @@ struct vk_image;
+ 
+ struct u_gralloc *vk_android_get_ugralloc(void);
+ 
++struct native_handle;
++int vk_android_native_handle_dma_buf_fd(const struct native_handle *handle,
++                                        int hal_format, int pixel_stride);
++
++#if ANDROID_API_LEVEL >= 26
++struct AHardwareBuffer;
++int vk_android_ahb_dma_buf_fd(const struct AHardwareBuffer *ahb);
++#endif
++
+ VkResult vk_android_import_anb(struct vk_device *device,
+                                const VkImageCreateInfo *pCreateInfo,
+                                const VkAllocationCallbacks *alloc,
+diff --git a/src/vulkan/runtime/vk_physical_device.h b/src/vulkan/runtime/vk_physical_device.h
+index 9d9de34..f827fcd 100644
+--- a/src/vulkan/runtime/vk_physical_device.h
++++ b/src/vulkan/runtime/vk_physical_device.h
+@@ -107,6 +107,13 @@ struct vk_physical_device {
+     */
+    const struct vk_sync_type *const *supported_sync_types;
+ 
++   /** Gralloc usage bits added to every image AHardwareBuffer the runtime
++    * allocates, probes or recommends (VkAndroidHardwareBufferUsageANDROID),
++    * for allocators whose default layout for GPU-only usage the driver
++    * cannot import.
++    */
++   uint64_t android_ahb_image_usage;
++
+    /** A null-terminated array of supported pipeline cache object types
+     *
+     * The common implementation of VkPipelineCache uses this to remember the

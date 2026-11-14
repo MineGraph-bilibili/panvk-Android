@@ -107,6 +107,13 @@ struct vk_physical_device {
     */
    const struct vk_sync_type *const *supported_sync_types;
 
+   /** Gralloc usage bits added to every image AHardwareBuffer the runtime
+    * allocates, probes or recommends (VkAndroidHardwareBufferUsageANDROID),
+    * for allocators whose default layout for GPU-only usage the driver
+    * cannot import.
+    */
+   uint64_t android_ahb_image_usage;
+
    /** A null-terminated array of supported pipeline cache object types
     *
     * The common implementation of VkPipelineCache uses this to remember the

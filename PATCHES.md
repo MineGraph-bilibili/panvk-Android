@@ -183,6 +183,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `007-kraid-rc-upgrade` | kraid 编译器整体对齐本地 rc66：ISA 描述切到 `isa-v9-v14.xml`，新增 `opt_exec_units` / `opt_fuse` / `opt_normalize_consts` 三个 pass，编解码与指令集扩到 v14。 |
 | `008-compiler-tex` | NIR 增加 Panfrost 专用 tex 源与 `TEX_DUAL`，mediump 走 16-bit，Bifrost 常量排序/IDVS/repair-SSA 对齐本地，`bi_ra.c` 回到本地旧版求解器。 |
 | `009-perf-lifecycle` | 命令池自动裁剪窗口、TLS 稀疏化/收缩、kbase 稀疏缓冲与回读镜像、tiler heap 槽位与终止策略对齐本地。 |
+| `010-android-afbc-gralloc` | 绕过 ARM gralloc 对 GPU-only 缓冲区强制 AFBC 的布局，补 dma-buf fd 查找与 BGRA/RGBA 处理；`panvk_wsi.c` 改回本地同步 WSI（覆盖仓库 zero-copy 实现）。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -259,6 +260,35 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
   / `PANVK_KBASE_SAFE_SUBMIT=1` 是逐项回退开关。稀疏镜像目前只是 CPU 侧影子拷贝，
   真实 sparse 语义仍需在 kbase 上验证。
 * **来源**：rc66 本地树（对齐本地行为；部分条目源自 csf-v11 226–232）。
+
+#### `010-android-afbc-gralloc`（8 文件）
+
+* **机制**：
+  * `u_gralloc_fallback.c`：直接从 ARM gralloc 的 native_handle 解析布局（Exynos
+    `data[15]`、MediaTek `data[21]` 两套 magic 偏移），按“足够大的 dma-buf fd”定位实际
+    buffer fd，从 `u64 alloc_format` 取出 HAL format 与 AFBC 位，识别 allocator 自建的
+    AFBC 布局；非 ARM handle 返回 `-ENOENT` 让上层回退。
+  * `vk_android.c/h`：新增 `vk_android_native_handle_dma_buf_fd()`（不再假设 0 号 fd 就是
+    dma-buf，MediaTek 的 handle 带三个 fd）与 `vk_android_ahb_dma_buf_fd()`；AHB 探测/分配
+    统一叠加 `vk_physical_device::android_ahb_image_usage`，并为 GPU-only BGRA 实际存成
+    RGBA 的 allocator 做格式回落。
+  * `panvk_physical_device.c`（在本组只补字段使用侧）、`panvk_android.h`：定义
+    `MALI_GRALLOC_USAGE_NO_AFBC`(1<<29) 与 `GRALLOC_USAGE_HW_COMPOSER`(1<<11)，让
+    AHardwareBuffer 请求避开驱动无法导入的 AFBC 布局。
+  * `panvk_image.c`：opt-in 的 `PANVK_AFRC=16|24|32` 固定率压缩（默认 0 关闭，跳过 WSI /
+    CRC 图像），以及 BC 图像 raw plane 可丢弃判定的修正。
+  * `pan_fb.h`：新增 `discard_candidate`，loadOp=DONT_CARE/NONE 且无 resolve 时允许省掉
+    preload（最终是否省还要看 tile 与 AFBC 块大小）。
+  * `panvk_wsi.c`：用本地**同步 WSI** 覆盖仓库原有的 zero-copy 实现（移除 ANativeWindow
+    ops 解析、`panvk_android_zero_copy_*`、AHB 直接导入与 damage 计算，回到“每张 image 自持
+    AHB + present 时同步提交”的路径，114 增 / 606 删）。
+* **收益**：ARM gralloc 机型上 AHB 能被正确导入（拿到对的 fd / stride / modifier），不再因为
+  GPU-only 缓冲被强制 AFBC 而导入失败；AFRC 提供了按需实验入口。
+* **风险/注意**：`panvk_wsi.c` 是**行为级回退**（zero-copy → 同步拷贝），present 路径的
+  延迟/带宽特性与仓库版本不同，这是按“本地行为为准”的决定；gralloc 布局解析依赖具体
+  allocator 的 handle 约定（Exynos / MediaTek 已验证），其它厂商会走 `-ENOENT` 回退；
+  `PANVK_AFRC` 为实验特性，默认关闭。
+* **来源**：rc66 本地树（对齐本地行为）。
 
 ---
 
