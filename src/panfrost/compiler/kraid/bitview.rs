@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#![allow(dead_code)]
-
 use std::ops::Range;
 
 pub trait BitViewable {
@@ -153,10 +151,7 @@ impl<'a, BS: BitViewable + ?Sized> BitView<'a, BS> {
         }
     }
 
-    pub fn subset(
-        &'a self,
-        range: Range<usize>,
-    ) -> BitView<'a, BitView<'a, BS>> {
+    pub fn subset(&'a self, range: Range<usize>) -> BitView<'a, BitView<'a, BS>> {
         BitView::new_subset(self, range)
     }
 
@@ -204,10 +199,7 @@ impl<'a, BS: BitMutViewable + ?Sized> BitMutView<'a, BS> {
         }
     }
 
-    pub fn subset_mut<'b>(
-        &'b mut self,
-        range: Range<usize>,
-    ) -> BitMutView<'b, BitMutView<'a, BS>> {
+    pub fn subset_mut<'b>(&'b mut self, range: Range<usize>) -> BitMutView<'b, BitMutView<'a, BS>> {
         BitMutView::new_subset(self, range)
     }
 
@@ -275,21 +267,11 @@ impl<T: SetFieldU64, F: ToFieldBits> SetField<F> for T {
 }
 
 pub trait SetField2<F> {
-    fn set_field2(
-        &mut self,
-        range1: Range<usize>,
-        range2: Range<usize>,
-        val: F,
-    );
+    fn set_field2(&mut self, range1: Range<usize>, range2: Range<usize>, val: F);
 }
 
 impl<T: SetFieldU64, F: ToFieldBits> SetField2<F> for T {
-    fn set_field2(
-        &mut self,
-        range1: Range<usize>,
-        range2: Range<usize>,
-        val: F,
-    ) {
+    fn set_field2(&mut self, range1: Range<usize>, range2: Range<usize>, val: F) {
         let bits1 = range1.len();
         let bits2 = range2.len();
         let val = val.to_field_bits(bits1 + bits2);
@@ -326,9 +308,7 @@ macro_rules! impl_to_field_bits_for_iN {
 
                 // Check that it fits in the bitfield, taking sign into account
                 let sign_mask = !(mask >> 1);
-                assert!(
-                    (val & sign_mask) == 0 || (val & sign_mask) == sign_mask
-                );
+                assert!((val & sign_mask) == 0 || (val & sign_mask) == sign_mask);
 
                 val & mask
             }

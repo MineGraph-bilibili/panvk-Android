@@ -372,7 +372,14 @@ impl WordCopies<'_> {
                 }
             }
 
-            // TODO: Check for 64-bit immediates as well
+            // Check for 64-bit immediates
+            if let (Ok(lo), Ok(hi)) = (
+                u32::try_from(&words[0].src_ref),
+                u32::try_from(&words[1].src_ref),
+            ) {
+                let imm64 = (u64::from(hi) << 32) | u64::from(lo);
+                return Some(imm64.into());
+            }
         }
 
         // In theory, we could construct a widen that sign-extends the bottom
@@ -395,7 +402,7 @@ impl WordCopies<'_> {
             && words[1].src_ref == words[0].src_ref
         {
             if words[0].swizzle.is_none() {
-                Swizzle::widen_u32(0)
+                Swizzle::widen_s32(0)
             } else {
                 // Byte swizzles are sign-extended when used in 64-bit sources
                 debug_assert!(src.swizzle.is_byte_swizzle());
@@ -483,6 +490,13 @@ impl ByteCopy {
                 let imm32 = src.swizzle.fold_u32(imm.get()).unwrap();
                 ByteCopy {
                     byte_ref: ByteRef::Imm8((imm32 >> (byte * 8)) as u8),
+                    swiz_byte: SwizzleByte::Byte0,
+                }
+            }
+            SrcRef::Imm64(imm) => {
+                let imm64 = src.swizzle.fold_u64(imm.get()).unwrap();
+                ByteCopy {
+                    byte_ref: ByteRef::Imm8((imm64 >> (byte * 8)) as u8),
                     swiz_byte: SwizzleByte::Byte0,
                 }
             }

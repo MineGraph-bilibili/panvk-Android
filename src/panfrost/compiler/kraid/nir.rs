@@ -214,8 +214,11 @@ impl<'a> ShaderFromNir<'a> {
                 Src::from(src_vec[usize::from(w)]).swizzle(swizzle)
             }
             32 => {
-                assert_eq!(swizzle.len(), 1);
-                src_vec[usize::from(swizzle[0])].into()
+                // We can have more than one source component in the case of
+                // nir_op_f2f16 where we support vec2.
+                let vec: SSARef =
+                    swizzle.iter().map(|c| src_vec[usize::from(*c)]).collect();
+                vec.into()
             }
             64 => {
                 assert_eq!(swizzle.len(), 1);
@@ -334,6 +337,16 @@ impl<'a> ShaderFromNir<'a> {
         } else if bits == 16 {
             let ssa = b.copy_i16((imm_u32[0] as u16).into());
             self.set_ssa(&load.def, vec![ssa]);
+        } else if load.def.bit_size == 64 {
+            let mut ssa = Vec::new();
+            for i in 0..load.def.num_components {
+                let off = usize::from(i * 2);
+                let n = u64::from(imm_u32[off])
+                    | (u64::from(imm_u32[off + 1]) << 32);
+                ssa.extend(b.copy_i64(n.into()).iter().copied());
+            }
+
+            self.set_ssa(&load.def, ssa);
         } else {
             self.set_ssa(
                 &load.def,
@@ -628,18 +641,25 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_op_f2f16 | nir_op_f2f16_rtz | nir_op_f2f16_rtne => {
                 assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToF16 {
-                    dst: dst.into(),
-                    src: srcs(0),
-                    round: match alu.op {
-                        nir_op_f2f16 => self.fround(16),
-                        nir_op_f2f16_rtne => FRound::NearestEven,
-                        nir_op_f2f16_rtz => FRound::TowardsZero,
-                        _ => panic!("Invalid f2f16 op"),
-                    },
-                    clamp: FClamp::None,
-                });
+                let round = match alu.op {
+                    nir_op_f2f16 => self.fround(16),
+                    nir_op_f2f16_rtne => FRound::NearestEven,
+                    nir_op_f2f16_rtz => FRound::TowardsZero,
+                    _ => panic!("Invalid f2f16 op"),
+                };
+                match alu.def.num_components {
+                    1 => b.f32_to_f16_to(dst.into(), srcs(0), round),
+                    2 => {
+                        assert!(self.model.arch() <= 10);
+                        b.push_op(OpV2F32ToV2F16 {
+                            dst: dst.into(),
+                            srcs: [srcs(0).word(0), srcs(0).word(1)],
+                            round,
+                            clamp: FClamp::None,
+                        });
+                    }
+                    _ => panic!("Unspported nir_op_f2f16 vector size"),
+                }
             }
             nir_op_f2f32 => {
                 assert!(alu.get_src(0).bit_size() == 16);
@@ -649,62 +669,96 @@ impl<'a> ShaderFromNir<'a> {
                     src: srcs(0),
                 });
             }
-            nir_op_u2f32 => {
+            nir_op_pack_half_2x16_split | nir_op_pack_half_2x16_rtz_split => {
                 assert!(alu.get_src(0).bit_size() == 32);
+                assert!(alu.get_src(1).bit_size() == 32);
+                assert!(alu.def.bit_size() == 32);
+                assert!(self.model.arch() <= 10);
+
+                let round = if alu.op == nir_op_pack_half_2x16_rtz_split {
+                    FRound::TowardsZero
+                } else {
+                    self.fround(16)
+                };
+                b.push_op(OpV2F32ToV2F16 {
+                    dst: dst.into(),
+                    srcs: [srcs(0), srcs(1)],
+                    round,
+                    clamp: FClamp::None,
+                });
+            }
+            nir_op_u2f32 => {
+                assert!(
+                    self.model.arch() <= 10 || alu.get_src(0).bit_size() == 32
+                );
                 assert!(alu.def.num_components == 1);
                 b.push_op(OpIToF32 {
                     dst: dst.into(),
-                    src_type: DataType::U32,
+                    src_type: DataType::u(alu.get_src(0).bit_size()),
                     src: srcs(0),
                     round: self.fround(alu.def.bit_size),
                 });
             }
-            nir_op_f2u32 => {
-                assert!(alu.get_src(0).bit_size() == 32);
+            nir_op_f2u32 | nir_op_f2u32_rtne | nir_op_f2i32
+            | nir_op_f2i32_rtne => {
                 assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::U32,
-                    src: srcs(0),
-                    round: FRound::TowardsZero,
-                });
-            }
-            nir_op_f2u32_rtne => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::U32,
-                    src: srcs(0),
-                    round: FRound::NearestEven,
-                });
-            }
-            nir_op_f2i32 => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::S32,
-                    src: srcs(0),
-                    round: FRound::TowardsZero,
-                });
-            }
-            nir_op_f2i32_rtne => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                assert!(alu.def.num_components == 1);
-                b.push_op(OpF32ToI32 {
-                    dst: dst.into(),
-                    dst_type: DataType::S32,
-                    src: srcs(0),
-                    round: FRound::NearestEven,
-                });
+                let round = match alu.op {
+                    nir_op_f2u32 | nir_op_f2i32 => FRound::TowardsZero,
+                    nir_op_f2u32_rtne | nir_op_f2i32_rtne => {
+                        FRound::NearestEven
+                    }
+                    _ => unreachable!(),
+                };
+                let dst_type = match alu.op {
+                    nir_op_f2u32 | nir_op_f2u32_rtne => DataType::U32,
+                    nir_op_f2i32 | nir_op_f2i32_rtne => DataType::S32,
+                    _ => unreachable!(),
+                };
+                match alu.get_src(0).bit_size() {
+                    32 => {
+                        b.push_op(OpF32ToI32 {
+                            dst: dst.into(),
+                            dst_type,
+                            src: srcs(0),
+                            round,
+                        });
+                    }
+                    16 => {
+                        assert!(self.model.arch() <= 10);
+                        b.push_op(OpF16ToI32 {
+                            dst: dst.into(),
+                            dst_type,
+                            src: srcs(0),
+                            round,
+                        });
+                    }
+                    _ => unreachable!(),
+                }
             }
             nir_op_i2f32 => {
-                assert!(alu.get_src(0).bit_size() == 32);
+                assert!(
+                    self.model.arch() <= 10 || alu.get_src(0).bit_size() == 32
+                );
                 assert!(alu.def.num_components == 1);
                 b.push_op(OpIToF32 {
                     dst: dst.into(),
-                    src_type: DataType::S32,
+                    src_type: DataType::s(alu.get_src(0).bit_size()),
+                    src: srcs(0),
+                    round: self.fround(alu.def.bit_size),
+                });
+            }
+            nir_op_i2f16 | nir_op_u2f16 => {
+                assert!(self.model.arch() <= 10);
+
+                let num_type = if alu.op == nir_op_i2f16 {
+                    NumericType::SignedInteger
+                } else {
+                    NumericType::UnsignedInteger
+                };
+
+                b.push_op(OpIToF16 {
+                    dst: dst.into(),
+                    src_type: src_type(0, num_type),
                     src: srcs(0),
                     round: self.fround(alu.def.bit_size),
                 });
@@ -766,7 +820,7 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_op_feq_pan | nir_op_fge_pan | nir_op_flt_pan
             | nir_op_fneu_pan => {
-                b.push_op(OpFCmp {
+                b.push_op(OpCmp {
                     dst: dst.into(),
                     src_type: src_type(0, NumericType::Float),
                     res_type: CmpResultType::M1,
@@ -784,9 +838,7 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_op_fround_even | nir_op_ftrunc | nir_op_fceil
             | nir_op_ffloor => {
-                debug_assert!(alu.def.bit_size == 32);
-                debug_assert!(alu.def.num_components == 1);
-
+                let src_type = src_type(0, NumericType::Float);
                 let round = match alu.op {
                     nir_op_fround_even => FRound::NearestEven,
                     nir_op_ftrunc => FRound::TowardsZero,
@@ -803,7 +855,7 @@ impl<'a> ShaderFromNir<'a> {
 
                     b.push_op(OpFlush {
                         dst: t.into(),
-                        src_type: DataType::F32,
+                        src_type,
                         src: srcs(0),
                         ftz: true,
                         flush_inf: false,
@@ -817,6 +869,7 @@ impl<'a> ShaderFromNir<'a> {
 
                 b.push_op(OpFRound {
                     dst: dst.into(),
+                    src_type,
                     src,
                     round,
                 });
@@ -890,18 +943,26 @@ impl<'a> ShaderFromNir<'a> {
                 b.fexp_32_to(dst.into(), srcs(1), log2_base);
             }
             nir_op_frexp_exp => {
-                assert!(alu.get_src(0).bit_size() == 32);
+                assert!(alu.def.bit_size == 32);
+
+                let src = match alu.get_src(0).bit_size() {
+                    32 => srcs(0),
+                    16 => srcs(0).swizzle(Swizzle::HF0),
+                    _ => unreachable!(),
+                };
+
                 b.push_op(OpFrexpE {
                     dst: dst.into(),
-                    src: srcs(0),
+                    src_type: DataType::F32,
+                    src,
                     mode: FrexpMode::Normal,
                     neg_result: false,
                 });
             }
             nir_op_frexp_sig => {
-                assert!(alu.get_src(0).bit_size() == 32);
                 b.push_op(OpFrexpM {
                     dst: dst.into(),
+                    src_type: src_type(0, NumericType::Float),
                     src: srcs(0),
                     mode: FrexpMode::Normal,
                 });
@@ -948,13 +1009,7 @@ impl<'a> ShaderFromNir<'a> {
                 debug_assert!(alu.def.bit_size == 32);
                 debug_assert!(alu.def.num_components == 1);
 
-                let x16 = b.alloc_ssa(16);
-                b.push_op(OpF32ToF16 {
-                    dst: x16.into(),
-                    src: srcs(0),
-                    round: FRound::NearestEven,
-                    clamp: FClamp::None,
-                });
+                let x16 = b.f32_to_f16(srcs(0), FRound::NearestEven);
 
                 let flush16 = b.alloc_ssa(16);
                 b.push_op(OpFlush {
@@ -1009,6 +1064,26 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     dst_type: dst_type(NumericType::SignedInteger),
                     src: srcs(0),
+                });
+            }
+            nir_op_uhadd | nir_op_ihadd | nir_op_urhadd | nir_op_irhadd => {
+                assert!(self.model.arch() <= 10);
+                let dst_type = match alu.op {
+                    nir_op_uhadd | nir_op_urhadd => {
+                        dst_type(NumericType::UnsignedInteger)
+                    }
+                    nir_op_ihadd | nir_op_irhadd => {
+                        dst_type(NumericType::SignedInteger)
+                    }
+                    _ => unreachable!(),
+                };
+                let round_up = matches!(alu.op, nir_op_urhadd | nir_op_irhadd);
+
+                b.push_op(OpHAdd {
+                    dst: dst.into(),
+                    dst_type,
+                    round_up,
+                    srcs: [srcs(0), srcs(1)],
                 });
             }
             nir_op_iadd | nir_op_iadd_sat | nir_op_uadd_sat => {
@@ -1131,7 +1206,7 @@ impl<'a> ShaderFromNir<'a> {
                     // clean this up in almost all cases.
                     b.copy_i32_to(dst[1].into(), dst[0].into());
                 } else {
-                    b.push_op(OpICmp {
+                    b.push_op(OpCmp {
                         dst: dst.into(),
                         src_type: src_type(0, num_type),
                         res_type: CmpResultType::M1,
@@ -1334,32 +1409,58 @@ impl<'a> ShaderFromNir<'a> {
     }
 
     fn parse_tex(&mut self, b: &mut impl SSABuilder, tex: &nir_tex_instr) {
-        let mut tex_h = None;
+        let mut tex_handle = None;
         let mut sr: [&[SSAValue]; 2] = [&[], &[]];
+        let mut var_handle = None;
+        let mut var_buf_offset = None;
         for src in tex.srcs_as_slice() {
             match src.src_type {
                 nir_tex_src_texture_handle => {
                     let vec = self.get_src_ssa(&src.src);
                     assert_eq!(vec.comps(), 2);
-                    tex_h = Some(vec);
+                    tex_handle = Some(vec);
                 }
                 nir_tex_src_backend1 => sr[0] = self.get_ssa(src.src.as_def()),
                 nir_tex_src_backend2 => sr[1] = self.get_ssa(src.src.as_def()),
+                nir_tex_src_var_buf_offset_pan => {
+                    let vec = self.get_src_ssa(&src.src);
+                    assert_eq!(vec.comps(), 1);
+                    var_buf_offset = Some(Src::from(vec));
+                }
+                nir_tex_src_var_handle_pan => {
+                    let vec = self.get_src_ssa(&src.src);
+                    assert_eq!(vec.comps(), 1);
+                    var_handle = Some(Src::from(vec));
+                }
                 _ => panic!("Unknown tex source"),
             }
         }
-        let tex_h = tex_h.unwrap();
-        let sr = SSARef::from_iter(
-            sr[0].iter().copied().chain(sr[1].iter().copied()),
-        );
+        let tex_handle = tex_handle.unwrap().into();
+        let sr = if !sr[0].is_empty() {
+            Some(SSARef::from_iter(
+                sr[0].iter().copied().chain(sr[1].iter().copied()),
+            ))
+        } else {
+            None
+        };
 
         let flags: pan_va_tex_flags =
             unsafe { std::mem::transmute(tex.backend_flags) };
-        let skip = flags.skip();
+        let skip = tex.skip_helpers() != 0;
         let wide_indices = flags.wide_indices();
         let array_enable = flags.array_enable();
         let texel_offset = flags.texel_offset();
         let compare_enable = flags.compare_enable();
+        let projection_enable = flags.projection_enable();
+        let sample_position = sample_position_from_pan(flags.var_sample_loc());
+
+        let sample = if (var_handle.is_some() || var_buf_offset.is_some())
+            && sample_position != SamplePosition::Center
+        {
+            Src::from(self.preload(b, PreloadReg::SampleCentroidId))
+        } else {
+            Src::from(0_u32)
+        };
 
         let dim = match tex.sampler_dim.into() {
             GLSL_SAMPLER_DIM_1D | GLSL_SAMPLER_DIM_BUF => TexDim::Tex1D,
@@ -1381,71 +1482,280 @@ impl<'a> ShaderFromNir<'a> {
             BI_VA_LOD_MODE_GRDESC => TexLodMode::GradientDesc,
             _ => panic!("Unknown LOD mode: {}", flags.lod_mode()),
         };
-        let write_mask =
-            TexWriteMask::new(tex.def.components_read().try_into().unwrap());
+        let var_mem_type = if flags.var_buf_src_f16() {
+            DataType::F16
+        } else {
+            DataType::F32
+        };
+        let comps_read = u8::try_from(tex.def.components_read()).unwrap();
 
-        let dst_type = DataType::get(
-            write_mask.comps(),
+        let dst0_comps = if tex.op == nir_texop_dual_pan {
+            // Since the two texture ops are identical, we can simply divide by
+            // 2 to get the per-tex number of components from the NIR dest.
+            assert!(tex.def.num_components % 2 == 0);
+            tex.def.num_components / 2
+        } else {
+            tex.def.num_components
+        };
+        let dst1_comps = tex.def.num_components - dst0_comps;
+
+        let u8_mask = |bits: u8| u8::MAX >> (8 - bits);
+        let make_consecutive = |comps: u8| {
+            debug_assert!(comps <= 0xf);
+            u8_mask(comps.max(1).ilog2() as u8 + 1)
+        };
+
+        // Figure out the write masks.  The first write mask can be anything
+        // but the second write mask must be contiguous components.  If we're
+        // not TEX_DUAL, the second write mask will be empty.
+        let dst0_comps_read = comps_read & u8_mask(dst0_comps);
+        let dst1_comps_read = comps_read >> dst0_comps;
+        let wm0 = if var_handle.is_some() || var_buf_offset.is_some() {
+            if tex.op == nir_texop_dual_pan {
+                u8_mask(4)
+            } else {
+                make_consecutive(dst0_comps_read)
+            }
+        } else {
+            dst0_comps_read.max(1)
+        };
+        let wm1 = if tex.op == nir_texop_dual_pan {
+            make_consecutive(dst1_comps_read)
+        } else {
+            assert!(dst1_comps == 0);
+            0
+        };
+        let write_masks = [TexWriteMask::new(wm0), TexWriteMask::new(wm1)];
+        debug_assert!((comps_read & !(wm0 | (wm1 << dst0_comps))) == 0);
+        debug_assert!(
+            tex.op == nir_texop_dual_pan || write_masks[1].is_empty()
+        );
+
+        let dst0_type = DataType::get(
+            write_masks[0].comps(),
             NumericType::Auto,
             tex.def.bit_size,
         );
-        let tmp = b.alloc_ref(dst_type.total_bits().into());
+
+        // Now allocate the tex destination.  The second tex (if any) is aligned
+        // to a whole register.
+        let mut dst_bits = u16::from(write_masks[0].comps() * tex.def.bit_size);
+        if !write_masks[1].is_empty() {
+            dst_bits = dst_bits.next_multiple_of(32);
+            dst_bits += u16::from(write_masks[1].comps() * tex.def.bit_size);
+        }
+        let tmp = b.alloc_ref(dst_bits);
 
         match tex.op {
+            nir_texop_dual_pan => {
+                assert!(!wide_indices);
+                let dst1_type = DataType::get(
+                    write_masks[1].comps(),
+                    NumericType::Auto,
+                    tex.def.bit_size,
+                );
+
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexBufDual {
+                        dst: tmp.clone().into(),
+                        dst_types: [dst0_type, dst1_type],
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_masks,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexDual {
+                        dst: tmp.clone().into(),
+                        dst_types: [dst0_type, dst1_type],
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_masks,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexDual {
+                        dst: tmp.clone().into(),
+                        dst_types: [dst0_type, dst1_type],
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_masks,
+                        array_enable,
+                        texel_offset,
+                        compare_enable,
+                        lod_mode,
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
+            }
             nir_texop_tex | nir_texop_txb | nir_texop_txl | nir_texop_txd => {
-                b.push_op(OpTexSingle {
-                    dst: tmp.clone().into(),
-                    dst_type,
-                    skip,
-                    dim,
-                    projection_enable: false,
-                    write_mask,
-                    wide_indices,
-                    array_enable,
-                    texel_offset,
-                    compare_enable,
-                    lod_mode,
-                    data: sr.into(),
-                    handle: tex_h.into(),
-                });
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexBufSingle {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexSingle {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        lod_mode,
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexSingle {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        texel_offset,
+                        compare_enable,
+                        lod_mode,
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
             }
             nir_texop_txf | nir_texop_txf_ms => {
+                assert!(!projection_enable);
                 b.push_op(OpTexFetch {
                     dst: tmp.clone().into(),
-                    dst_type,
+                    dst_type: dst0_type,
                     skip,
                     dim,
-                    write_mask,
+                    write_mask: write_masks[0],
                     wide_indices,
                     array_enable,
                     texel_offset,
-                    data: sr.into(),
-                    handle: tex_h.into(),
+                    data: sr
+                        .expect("TEX_FETCH does not have VAR_ variants")
+                        .into(),
+                    handle: tex_handle,
                 });
             }
             nir_texop_tg4 => {
-                b.push_op(OpTexGather {
-                    dst: tmp.clone().into(),
-                    dst_type,
-                    skip,
-                    dim,
-                    projection_enable: false,
-                    write_mask,
-                    wide_indices,
-                    array_enable,
-                    texel_offset,
-                    compare_enable,
-                    coord_mode: TexCoordMode::F32,
-                    gather_comp: match tex.component() {
-                        0 => TexGatherComp::R,
-                        1 => TexGatherComp::G,
-                        2 => TexGatherComp::B,
-                        3 => TexGatherComp::A,
-                        c => panic!("Invalid texture gather component: {c}"),
-                    },
-                    data: sr.into(),
-                    handle: tex_h.into(),
-                });
+                let gather_comp = match tex.component() {
+                    0 => TexGatherComp::R,
+                    1 => TexGatherComp::G,
+                    2 => TexGatherComp::B,
+                    3 => TexGatherComp::A,
+                    c => panic!("Invalid texture gather component: {c}"),
+                };
+
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexBufGather {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        gather_comp,
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert!(!texel_offset);
+                    b.push_op(OpVarTexGather {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        compare_enable,
+                        gather_comp,
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexGather {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        array_enable,
+                        texel_offset,
+                        compare_enable,
+                        coord_mode: TexCoordMode::F32,
+                        gather_comp,
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
             }
             nir_texop_gradient_pan => {
                 let coord_mode = if flags.force_delta_enable() {
@@ -1456,45 +1766,98 @@ impl<'a> ShaderFromNir<'a> {
                 } else {
                     TexGradientCoordMode::Coords
                 };
-                b.push_op(OpTexGradient {
-                    dst: tmp.clone().into(),
-                    dst_type,
-                    skip,
-                    dim,
-                    projection_enable: false,
-                    write_mask,
-                    wide_indices,
-                    coord_mode,
-                    lod_bias_disable: flags.lod_bias_disable(),
-                    lod_clamp_disable: flags.lod_clamp_disable(),
-                    data: sr.into(),
-                    handle: tex_h.into(),
-                });
+
+                if let Some(var_buf_offset) = var_buf_offset {
+                    assert_eq!(coord_mode, TexGradientCoordMode::Coords);
+                    b.push_op(OpVarTexBufGradient {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        var_mem_type,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        lod_bias_disable: flags.lod_bias_disable(),
+                        lod_clamp_disable: flags.lod_clamp_disable(),
+                        tex_handle,
+                        var_buf_offset,
+                        sample,
+                    });
+                } else if let Some(var_handle) = var_handle {
+                    assert_eq!(coord_mode, TexGradientCoordMode::Coords);
+                    b.push_op(OpVarTexGradient {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        sample_position,
+                        update: VaryingUpdateMode::Store,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        lod_bias_disable: flags.lod_bias_disable(),
+                        lod_clamp_disable: flags.lod_clamp_disable(),
+                        tex_handle,
+                        var_handle,
+                        sample,
+                    });
+                } else if let Some(sr) = sr {
+                    b.push_op(OpTexGradient {
+                        dst: tmp.clone().into(),
+                        dst_type: dst0_type,
+                        skip,
+                        dim,
+                        projection_enable,
+                        write_mask: write_masks[0],
+                        wide_indices,
+                        coord_mode,
+                        lod_bias_disable: flags.lod_bias_disable(),
+                        lod_clamp_disable: flags.lod_clamp_disable(),
+                        data: sr.into(),
+                        handle: tex_handle,
+                    });
+                } else {
+                    panic!("Texture op does not have a valid source");
+                }
             }
             _ => panic!("Unsupported tex instruction"),
         }
 
-        let mut comps = (0_u8..).into_iter();
+        let mut c = 0_u8;
         let mut vec_srcs = Vec::new();
         if tex.def.bit_size == 16 {
-            for i in 0..tex.def.num_components {
-                if write_mask.has_comp(i) {
-                    let c = comps.next().unwrap();
-                    let ssa = tmp[usize::from(c) / 2];
-                    vec_srcs.push(Src::from(ssa).half(c % 2));
-                } else {
-                    vec_srcs.push(Src::from(0_u16));
+            for t in 0..2 {
+                // Each texture destination starts at a whole register
+                debug_assert!((c & 1) == 0);
+                let dst_comps = [dst0_comps, dst1_comps][t];
+                for i in 0..dst_comps {
+                    if write_masks[t].has_comp(i) {
+                        let ssa = tmp[usize::from(c) / 2];
+                        vec_srcs.push(Src::from(ssa).half(c % 2));
+                        c += 1;
+                    } else {
+                        vec_srcs.push(Src::from(0_u16));
+                    }
+                }
+                if (write_masks[t].comps() & 1) != 0 {
+                    c += 1;
                 }
             }
         } else {
             assert_eq!(tex.def.bit_size, 32);
-            for i in 0..tex.def.num_components {
-                if write_mask.has_comp(i) {
-                    let c = comps.next().unwrap();
-                    let ssa = tmp[usize::from(c)];
-                    vec_srcs.push(Src::from(ssa));
-                } else {
-                    vec_srcs.push(Src::from(0_u32));
+            for t in 0..2 {
+                let dst_comps = [dst0_comps, dst1_comps][t];
+                for i in 0..dst_comps {
+                    if write_masks[t].has_comp(i) {
+                        let ssa = tmp[usize::from(c)];
+                        vec_srcs.push(Src::from(ssa));
+                        c += 1;
+                    } else {
+                        vec_srcs.push(Src::from(0_u32));
+                    }
                 }
             }
         }
@@ -2142,7 +2505,7 @@ impl<'a> ShaderFromNir<'a> {
                 // Facing is the only field in the low byte, so select it
                 // rather than masking: (primitive_flags & 1) == 0 is front
                 let dst = self.alloc_ssa(b, &intrin.def).into();
-                b.push_op(OpICmp {
+                b.push_op(OpCmp {
                     dst,
                     src_type: DataType::U32,
                     res_type: CmpResultType::M1,
@@ -2324,11 +2687,13 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_intrinsic_atest_pan => {
                 let dst = self.alloc_ssa(b, &intrin.def).into();
+                let datum =
+                    self.special_fau(SpecialFAU::ATestDatum).word(0).into();
                 b.push_op(OpATest {
                     dst,
                     coverage: self.get_src(&srcs[0]),
                     alpha: self.get_f32_src(&srcs[1]),
-                    datum: self.special_fau(SpecialFAU::ATestDatum).into(),
+                    datum,
                 });
             }
             nir_intrinsic_zs_emit_pan => {

@@ -1,10 +1,13 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
+
 mod bitview;
+
 mod builder;
 mod compile;
 mod data_type;
+#[cfg(kraid_disasm)]
 pub mod decode;
 mod dst_mod_prop;
 mod encode_v9;
@@ -27,7 +30,10 @@ mod nir;
 mod ops;
 mod opt_copy_prop;
 mod opt_dce;
+mod opt_exec_units;
 mod opt_flow;
+mod opt_fuse;
+mod opt_normalize_consts;
 mod opt_promote_consts;
 mod opt_var;
 mod parallel_copy;
@@ -54,6 +60,7 @@ mod debug {
             const SPILL = 1 << 2;
             const SERIAL = 1 << 3;
             const PRINT_RAW_CONST = 1 << 4;
+            const STATS = 1 << 5;
         }
     }
 
@@ -71,6 +78,7 @@ mod debug {
                 "spill" => flags |= DebugFlags::SPILL,
                 "serial" => flags |= DebugFlags::SERIAL,
                 "print-raw-constants" => flags |= DebugFlags::PRINT_RAW_CONST,
+                "stats" => flags |= DebugFlags::STATS,
                 unk => eprintln!("Unknown {debug_var} flag \"{}\"", unk),
             }
         }

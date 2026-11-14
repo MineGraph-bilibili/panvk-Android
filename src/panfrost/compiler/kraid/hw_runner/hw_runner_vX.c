@@ -39,6 +39,7 @@ struct hw_runner_cmdstream_info {
    uint8_t fau_count;
 
    uint64_t shader_program_descriptor_device_ptr;
+   uint8_t shader_max_regs;
 
    uint64_t thread_storage_descriptor_device_ptr;
 };
@@ -55,7 +56,7 @@ hw_runner_fill_cmd_stream(struct pan_kmod_dev *dev,
    struct cs_builder_conf conf = {
       .nr_registers = csif_info->cs_reg_count,
       .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
-      .compute_ep_limit = dev->props.max_tasks_per_core,
+      .compute_ep_limit = PAN_ARCH >= 12 ? dev->props.max_tasks_per_core : 0,
       .alloc_buffer = NULL,
       .cookie = NULL,
       .ls_sb_slot = 0,
@@ -91,8 +92,13 @@ hw_runner_fill_cmd_stream(struct pan_kmod_dev *dev,
    cs_move64_to(b, cs_sr_reg64(b, COMPUTE, FAU_0), fau);
 
    assert((info->shader_program_descriptor_device_ptr & BITFIELD64_MASK(5)) == 0);
-   cs_move64_to(b, cs_sr_reg64(b, COMPUTE, SPD_0),
-                info->shader_program_descriptor_device_ptr);
+   uint64_t spd = info->shader_program_descriptor_device_ptr;
+   if (PAN_ARCH >= 14) {
+      spd |= (info->shader_max_regs <= 32) ?
+         MALI_SHADER_REGISTER_ALLOCATION_32_PER_THREAD :
+         MALI_SHADER_REGISTER_ALLOCATION_64_PER_THREAD;
+   }
+   cs_move64_to(b, cs_sr_reg64(b, COMPUTE, SPD_0), spd);
 
    assert((info->thread_storage_descriptor_device_ptr & BITFIELD64_MASK(6)) == 0);
    cs_move64_to(b, cs_sr_reg64(b, COMPUTE, TSD_0),
@@ -282,6 +288,7 @@ GENX(hw_runner_new_cmd_stream)(struct pan_kmod_dev *kdev,
       .fau_device_ptr = fau_device_ptr,
       .fau_count = (info->fau_size_B / 4),
       .shader_program_descriptor_device_ptr = info->descr_bo_device_ptr + spd_offset,
+      .shader_max_regs = (info->register_count <= 32) ? 32 : 64,
       .thread_storage_descriptor_device_ptr = info->descr_bo_device_ptr + tsd_offset,
    };
 

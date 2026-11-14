@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Arm Ltd.
 // SPDX-License-Identifier: MIT
 
-use kraid_rs::decode;
-use std::io::{BufRead, Write};
+use kraid_rs::decode::{Args as DisasmArgs, disassemble};
+use std::io::BufRead;
 
 #[derive(Debug)]
 enum ParseArgError {
@@ -69,6 +69,16 @@ impl Args {
     }
 }
 
+impl From<Args> for DisasmArgs {
+    fn from(value: Args) -> Self {
+        Self {
+            arch: value.arch,
+            print_offset: value.print_offset,
+            print_hexdump: value.print_hexdump,
+        }
+    }
+}
+
 /// Read binary to disassemble from stdin, one byte per line in hex.
 fn from_stdin() -> Vec<u64> {
     let mut instrs_bin: Vec<u64> = Default::default();
@@ -108,38 +118,6 @@ fn from_stdin() -> Vec<u64> {
     instrs_bin
 }
 
-fn disassemble(args: &Args, instrs: &[u64]) -> std::io::Result<()> {
-    let arch = args.arch;
-    let mut print_ctx = decode::PrintCtx {
-        pc_base: 0,
-        fau32: false,
-    };
-
-    let stdio = std::io::stdout();
-    let mut lock = stdio.lock();
-
-    for instr in instrs {
-        if args.print_offset {
-            write!(&mut lock, "{:04x}:    ", print_ctx.pc_base)?;
-        }
-        if args.print_hexdump {
-            write!(&mut lock, "{:016x}    ", instr)?;
-        }
-        match decode::try_decode(*instr, arch) {
-            Ok((m, v)) => {
-                decode::print(*instr, m, v, arch, &mut lock, &print_ctx)?;
-                writeln!(&mut lock, "")?;
-            }
-            Err(err) => {
-                writeln!(&mut lock, "{}", err)?;
-            }
-        }
-        print_ctx.pc_base += 8;
-    }
-
-    Ok(())
-}
-
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
     if let Err(e) = args {
@@ -149,5 +127,8 @@ fn main() -> std::io::Result<()> {
     let args = args.unwrap();
 
     let binary = from_stdin();
-    disassemble(&args, &binary)
+
+    let stdio = std::io::stdout();
+    let mut lock = stdio.lock();
+    disassemble(&mut lock, &args.into(), &binary)
 }

@@ -11,7 +11,6 @@ use crate::phi::PhiMap;
 use crate::ssa_value::*;
 use compiler::bitset::*;
 use compiler::cfg::CFG;
-use compiler::smallvec::*;
 use compiler::union_find::UnionFind;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::collections::VecDeque;
@@ -24,9 +23,6 @@ use std::ops::{BitOrAssign, Range};
 /// for mapping byte ranges used by RA back into the RegRef etc. used by
 /// instructions.
 struct Arena {
-    /// Limit on the number of bytes allocated
-    limit: u16,
-
     /// Number of bytes actually used
     used: std::cell::Cell<u16>,
 
@@ -39,33 +35,35 @@ struct Arena {
     /// True if this arena wants round-robin allocation
     round_robin: bool,
 
-    /// For memory, the offset into the TLS where we can start allocating
-    tls_offset: u16,
+    /// Low physical range, must always be non-empty unless limit == 0
+    low_range: Range<u16>,
 
-    /// True if we are on v9-14 and in 32-reg mode.  In this case, the middle
-    /// 32 registers of the register arena are missing.  To deal with this, we
-    /// assume a contiguous 32 register arena and place the high regs in 48..64
-    /// as part of reg_for_bytes().
-    is_v9_32reg: bool,
-
-    /// True if we are on v9-14 and in 64-reg mode.
-    is_v9_64reg: bool,
+    /// High physical range, can be empty
+    high_range: Range<u16>,
 }
 
 impl Arena {
     /// Creates a new register arena
     pub fn new_reg(model: &dyn Model, limit: u16) -> Arena {
         let granularity = if model.arch() < 15 { 32 * 4 } else { 16 * 4 };
-        Arena {
-            limit: limit.next_multiple_of(granularity.into()),
-            used: 0.into(),
-            granularity,
-            is_mem: false,
-            round_robin: true,
-            tls_offset: 0,
-            is_v9_32reg: model.arch() < 15 && limit <= 32 * 4,
-            is_v9_64reg: model.arch() < 15 && limit > 32 * 4,
-        }
+        let limit = limit.next_multiple_of(granularity.into());
+
+        let arch = model.arch();
+        let (low_range, high_range) = if arch >= 15 {
+            (0..limit, 0..0)
+        } else if arch >= 9 {
+            if limit == 32 * 4 {
+                // v9-v14 32-reg mode splits the low and higher 16s in two ranges
+                // with a 32-reg hole in the middle
+                (0..(16 * 4), (48 * 4)..(64 * 4))
+            } else {
+                (0..limit, 0..0)
+            }
+        } else {
+            panic!("Unsupported arch");
+        };
+
+        Arena::from_reg_ranges(low_range, high_range, granularity)
     }
 
     /// Creates a new memory arena, starting at `tls_start`.  The newly created
@@ -74,30 +72,45 @@ impl Arena {
     /// allows us to deal with any alignments inside the arena.
     fn new_mem(_model: &dyn Model, tls_start: u16) -> Arena {
         let granularity = 8;
+        let tls_start = tls_start.next_multiple_of(granularity.into());
         Arena {
-            limit: u16::MAX - tls_start,
             used: 0.into(),
             granularity,
             is_mem: true,
             round_robin: false,
-            tls_offset: tls_start.next_multiple_of(granularity.into()),
-            is_v9_32reg: false,
-            is_v9_64reg: false,
+            low_range: tls_start..u16::MAX,
+            high_range: 0..0,
         }
     }
 
     /// Creates a new register arena for blend shaders
-    pub fn new_blend(model: &dyn Model) -> Arena {
+    pub fn new_blend() -> Arena {
         let limit = 16 * 4;
+        Arena::from_reg_ranges(0..limit, 0..0, limit as u8)
+    }
+
+    /// Creates a new register arena by using bare register ranges
+    pub fn from_reg_ranges(
+        low_range: Range<u16>,
+        high_range: Range<u16>,
+        granularity: u8,
+    ) -> Arena {
+        assert!(low_range.start % 8 == 0);
+        assert!(low_range.end % 8 == 0);
+        if !high_range.is_empty() {
+            assert!(!low_range.is_empty());
+            assert!(low_range.end < high_range.start);
+            // Arena edges must always be aligned
+            assert!(high_range.start % 8 == 0);
+            assert!(high_range.end % 8 == 0);
+        }
         Arena {
-            limit: limit.into(),
             used: 0.into(),
-            granularity: limit,
+            granularity,
             is_mem: false,
             round_robin: true,
-            tls_offset: 0,
-            is_v9_32reg: model.arch() < 15,
-            is_v9_64reg: false,
+            low_range,
+            high_range,
         }
     }
 
@@ -106,21 +119,29 @@ impl Arena {
     /// final amount we need to report to the driver.
     pub fn bytes_used(&self) -> u16 {
         let used = self.used.get();
-        if self.is_v9_64reg && used > 16 * 4 {
-            // If we've run in 64-reg mode up until now and we've used more
-            // than the first 16 then we've probably used some out of the
-            // middle and it's not safe to report 32 registers.
-            64 * 4
-        } else {
-            used.next_multiple_of(self.granularity.into())
-        }
+        (self.low_range.start + used).next_multiple_of(self.granularity.into())
     }
 
     /// Returns the same as bytes_used but in units of 32-bit registers
-    pub fn regs_used(&self) -> u8 {
+    pub fn regs_used(&self, model: &dyn Model) -> u8 {
         debug_assert!(!self.is_mem);
         debug_assert!(self.bytes_used() % 4 == 0);
-        (self.bytes_used() / 4).try_into().unwrap()
+        let regs_used = (self.bytes_used() / 4).try_into().unwrap();
+        let arch = model.arch();
+        if arch >= 15 {
+            regs_used
+        } else if arch >= 9 {
+            // On v9-v14 we cannot report 32 regs when we decided to use all
+            // range otherwise the hw will think we're not touching 16..48, if
+            // r16 was in our pool always use 64-regs.
+            if self.low_range.contains(&(16 * 4)) {
+                64
+            } else {
+                regs_used
+            }
+        } else {
+            panic!("Unsupported arch");
+        }
     }
 
     /// Returns true if the given SSAValue is in this arena
@@ -139,7 +160,10 @@ impl Arena {
 
     /// Returns true if the given RegRef is entirely out-of-bounds
     pub fn is_reg_oob(&self, reg: &RegRef) -> bool {
-        self.reg_to_bytes(reg).end >= self.limit()
+        let bytes = reg.byte_range();
+        let overlaps =
+            |r: &Range<u16>| bytes.start < r.end && r.start < bytes.end;
+        !overlaps(&self.low_range) && !overlaps(&self.high_range)
     }
 
     /// Returns true if this arena is for registers.  This controls whether
@@ -156,16 +180,16 @@ impl Arena {
     /// Returns the maximum number of bytes that can be allocated from this
     /// arena.
     pub fn limit(&self) -> u16 {
-        self.limit
+        (self.low_range.len() + self.high_range.len())
+            .try_into()
+            .unwrap()
     }
 
     /// Returns true if the given range maps to a contiguous range in the arena
     pub fn is_contiguous(&self, bytes: Range<u16>) -> bool {
-        if self.is_v9_32reg {
-            bytes.end <= 16 * 4 || bytes.start >= 16 * 4
-        } else {
-            true
-        }
+        let split_point = self.low_range.len() as u16;
+
+        bytes.end <= split_point || bytes.start >= split_point
     }
 
     fn mark_used(&self, bytes: Range<u16>) {
@@ -173,47 +197,56 @@ impl Arena {
         self.used.set(self.used.get().max(bytes.end));
     }
 
+    pub fn virt_to_phys(&self, bytes: Range<u16>) -> Range<u16> {
+        let split_point = self.low_range.len() as u16;
+        let offset = if bytes.start < split_point {
+            assert!(bytes.end <= split_point);
+            self.low_range.start
+        } else {
+            assert!(bytes.end <= self.limit());
+            self.high_range.start - split_point
+        };
+
+        (bytes.start + offset)..(bytes.end + offset)
+    }
+
+    fn phys_to_virt(&self, bytes: Range<u16>) -> Range<u16> {
+        // ---- | low_range | ---- | high_range
+        // Remove the gaps to translate from physical to virtual
+        let offset = if bytes.start < self.low_range.end {
+            assert!(bytes.start >= self.low_range.start);
+            assert!(bytes.end <= self.low_range.end);
+            self.low_range.start
+        } else {
+            assert!(bytes.start >= self.high_range.start);
+            assert!(bytes.end <= self.high_range.end);
+            self.high_range.start - self.low_range.len() as u16
+        };
+
+        (bytes.start - offset)..(bytes.end - offset)
+    }
+
     /// Maps a byte range to a [RegRef]
-    pub fn reg_for_bytes(&self, mut bytes: Range<u16>) -> RegRef {
+    pub fn reg_for_bytes(&self, bytes: Range<u16>) -> RegRef {
         debug_assert!(!self.is_mem);
         self.mark_used(bytes.clone());
-        if self.is_v9_32reg {
-            if bytes.start < (16 * 4) {
-                assert!(bytes.end <= 16 * 4);
-            } else {
-                assert!(bytes.end <= 32 * 4);
-                bytes.start += 32 * 4;
-                bytes.end += 32 * 4;
-            }
-        }
-        RegRef::from_byte_range(bytes.clone()).unwrap()
+        RegRef::from_byte_range(self.virt_to_phys(bytes)).unwrap()
     }
 
     /// Maps a [RegRef] for a byte range
     pub fn reg_to_bytes(&self, reg: &RegRef) -> Range<u16> {
         debug_assert!(!self.is_mem);
-        let mut bytes = reg.byte_range();
-        if self.is_v9_32reg {
-            if bytes.start < (16 * 4) {
-                assert!(bytes.end <= 16 * 4);
-            } else {
-                assert!(bytes.start >= 48 * 4);
-                assert!(bytes.end <= 64 * 4);
-                bytes.start -= 32 * 4;
-                bytes.end -= 32 * 4;
-            }
-        }
+        let bytes = self.phys_to_virt(reg.byte_range());
         self.mark_used(bytes.clone());
         bytes
     }
 
     /// Maps a byte range to a [MemRef]
-    fn mem_for_bytes(&self, mut bytes: Range<u16>) -> MemRef {
+    fn mem_for_bytes(&self, bytes: Range<u16>) -> MemRef {
         debug_assert!(self.is_mem);
-        bytes.start += self.tls_offset;
-        bytes.end += self.tls_offset;
+        debug_assert!(self.high_range.is_empty());
         self.mark_used(bytes.clone());
-        MemRef::from_byte_range(bytes).unwrap()
+        MemRef::from_byte_range(self.virt_to_phys(bytes)).unwrap()
     }
 
     /// Maps a byte range to a [Src]
@@ -326,6 +359,7 @@ impl RegAlignConstraint {
     }
 
     fn for_align(mul: u8, offset: u8) -> Self {
+        debug_assert!(offset < mul);
         let mask = match mul {
             1 => 0xff,
             2 => 0x55 << offset,
@@ -634,7 +668,7 @@ impl SSAVecRepr {
     }
 
     fn set_affinity(&self, byte: u8, ssa: &SSAValue, a: &mut SSAAffinity) {
-        a.add_align(RegAlignConstraint::for_align(self.size.min(8), byte));
+        a.add_align(RegAlignConstraint::for_align(self.size.min(8), byte % 8));
 
         let repr = self.repr.as_ref().unwrap();
         if self.comps > 1 && a.vec_size == 0 {
@@ -1351,7 +1385,8 @@ impl LocalRegAlloc<'_> {
                     // Increment the round-robin past the whole vector
                     if self.arena.round_robin {
                         self.search_start.set(
-                            bytes.start + u16::from(a.vec_size) - vec_offset,
+                            (bytes.start + u16::from(a.vec_size) - vec_offset)
+                                .min(self.arena.limit()),
                         );
                     }
 
@@ -1386,20 +1421,11 @@ impl LocalRegAlloc<'_> {
 
     fn choose_src_bytes(
         &self,
-        bl: &BlockLiveness,
-        ip: usize,
         vec: &SSARef,
+        is_killed: bool,
         align: RegAlignConstraint,
         src_bytes: &BitSet<usize>,
     ) -> Range<u16> {
-        let mut is_killed = true;
-        for ssa in vec {
-            if bl.is_live_after_ip(ssa, ip) {
-                is_killed = false;
-                break;
-            }
-        }
-
         let p = if is_killed {
             &self.pinned_in
         } else {
@@ -1486,6 +1512,7 @@ impl LocalRegAlloc<'_> {
 
         struct SrcDst {
             is_src: bool,
+            is_killed: bool,
             mask: u8,
             bytes: u8,
             align: RegAlignConstraint,
@@ -1544,7 +1571,12 @@ impl LocalRegAlloc<'_> {
                 // This is the first time we've seen this SSA ref.  Evict it
                 // and add it to the list.  The evict handling at the end will
                 // ensure we copy it back into place.
+                let mut is_killed = true;
                 for ssa in vec {
+                    if bl.is_live_after_ip(ssa, ip) {
+                        is_killed = false;
+                    }
+
                     let ssa_bytes = self.ssa_bytes(ssa);
                     src_bytes.set_range(
                         ssa_bytes.start.into()..ssa_bytes.end.into(),
@@ -1559,6 +1591,7 @@ impl LocalRegAlloc<'_> {
 
                 srcs_dsts.push(SrcDst {
                     is_src: true,
+                    is_killed,
                     mask: 1 << i,
                     bytes,
                     align,
@@ -1590,6 +1623,7 @@ impl LocalRegAlloc<'_> {
 
             srcs_dsts.push(SrcDst {
                 is_src: false,
+                is_killed: false,
                 mask: 1 << i,
                 bytes,
                 align,
@@ -1638,9 +1672,8 @@ impl LocalRegAlloc<'_> {
             } else if src_dst.is_src {
                 debug_assert_eq!(src_dst.bytes, src_dst.vec.bytes());
                 self.choose_src_bytes(
-                    bl,
-                    ip,
                     &src_dst.vec,
+                    src_dst.is_killed,
                     src_dst.align,
                     &src_bytes,
                 )
@@ -1746,6 +1779,14 @@ impl LocalRegAlloc<'_> {
                         src.swizzle = swz
                             .swizzle(src.swizzle)
                             .expect("8 and 16-bit sources have to swizzle");
+
+                        // If all the SSA values read by this source are killed,
+                        // mark this as the last use.  Only do this if the SSA
+                        // values in question consume whole registers because
+                        // the hardware's last-use concept is per-register, not
+                        // per-byte.
+                        let whole_regs = src_dst.vec[0].bits() == 32;
+                        src.last_use = src_dst.is_killed && whole_regs;
                     } else {
                         assert_eq!(src.swizzle, ra_src.swizzle);
                         instr.srcs_mut()[i].src_ref = ra_src.src_ref;
@@ -2460,7 +2501,7 @@ impl GlobalRegAlloc<'_> {
 
 fn alloc_regs(s: &mut Shader, arena: &Arena, live: Liveness) {
     let phi_map = PhiMap::for_shader(s);
-    let affinities = AffinityMap::for_shader(s, &arena, &live, &phi_map);
+    let affinities = AffinityMap::for_shader(s, arena, &live, &phi_map);
 
     let mut ra = GlobalRegAlloc::new(s.model, arena, &affinities);
     ra.live_out.resize_with(s.blocks.len(), Default::default);
@@ -2472,186 +2513,6 @@ fn alloc_regs(s: &mut Shader, arena: &Arena, live: Liveness) {
             bi,
             &phi_map,
         );
-    }
-}
-
-fn reg_ref_for_byte(b: u8, bytes: u8) -> RegRef {
-    let bytes = u16::from(b)..(u16::from(b) + u16::from(bytes));
-    RegRef::from_byte_range(bytes).unwrap()
-}
-
-fn ra_trivial(s: &mut Shader) {
-    let live = Liveness::for_shader(s);
-
-    // Allocate in units of half registers.  We might be a dumb allocator but
-    // we can at least try to exercise Kraid's half register model.
-    let mut byte_used: BitSet = Default::default();
-    let mut ssa_b: FxHashMap<SSAValue, u8> = Default::default();
-
-    for (bi, block) in s.blocks.iter_mut().enumerate() {
-        let bl = live.block(bi);
-        for (ip, mut instr) in
-            std::mem::take(&mut block.instrs).into_iter().enumerate()
-        {
-            if let Op::RegIn(op) = instr.op {
-                let DstRef::SSA(vec) = op.dst.dst_ref else {
-                    panic!("We must have SSA destinations");
-                };
-
-                let b = op.reg.idx * 4 + op.reg.range.byte_offset();
-                let bytes = vec.bytes();
-                debug_assert_eq!(bytes, op.reg.bytes());
-
-                for (i, ssa) in vec.iter().enumerate() {
-                    ssa_b.insert(*ssa, b + u8::try_from(i * 4).unwrap());
-                }
-                for i in 0..bytes {
-                    let b = usize::from(b) + usize::from(i);
-                    assert!(!byte_used.contains(b));
-                    byte_used.insert(b);
-                }
-
-                // Drop the actual instruction on the floor
-                continue;
-            }
-
-            for src in instr.srcs_mut() {
-                let SrcRef::SSA(vec) = &mut src.src_ref else {
-                    continue;
-                };
-
-                let mut vec_b = 0;
-                for (i, ssa) in vec.iter().enumerate() {
-                    let b = *ssa_b.get(ssa).unwrap();
-
-                    if !bl.is_live_after_ip(ssa, ip) {
-                        let bytes = ssa.bits() / 8;
-                        for b in b..(b + bytes) {
-                            byte_used.remove(b.into());
-                        }
-                    }
-
-                    if i == 0 {
-                        vec_b = b;
-                    } else {
-                        // We don't know how to move registers
-                        assert_eq!(b, vec_b + u8::try_from(i * 4).unwrap());
-                    }
-                }
-
-                let reg = reg_ref_for_byte(vec_b, vec.bytes());
-                let swz = Swizzle::from(reg.range);
-                src.swizzle = swz
-                    .swizzle(src.swizzle)
-                    .expect("16-bit and smaller sources have to swizzle");
-                src.src_ref = reg.into();
-            }
-
-            let mut dst_regs = SmallVec::new();
-            for dst in instr.dsts() {
-                let DstRef::SSA(vec) = &dst.dst_ref else {
-                    continue;
-                };
-
-                let mut alloc_lanes = dst.lanes;
-                while !s.model.op_dst_supports_lanes(&instr.op, alloc_lanes) {
-                    alloc_lanes = widen_lanes(alloc_lanes);
-                }
-
-                let bytes = vec.bytes();
-                let alloc_bytes = alloc_lanes.bytes(bytes);
-                let (align_mul, align_off) = if bytes > 4 {
-                    debug_assert_eq!(alloc_lanes, DstLanes::All);
-                    (bytes.next_power_of_two(), 0)
-                } else if s.model.op_dst_is_staging_reg(&instr.op) {
-                    // Staging register writes respect lanes in the sense that
-                    // that's where they put the data but they may not do
-                    // partial writes correctly.
-                    (4, 0)
-                } else {
-                    alloc_lanes.align()
-                };
-
-                let mut alloc_start = 0;
-                let (b, reg) = loop {
-                    let b = byte_used.find_aligned_unset_range(
-                        alloc_start,
-                        alloc_bytes.into(),
-                        align_mul.into(),
-                        align_off.into(),
-                    );
-
-                    assert!(
-                        b + usize::from(bytes) <= 256,
-                        "Ran out of registers trying to allocate {vec}"
-                    );
-                    let b = b as u8;
-                    let reg = reg_ref_for_byte(b, alloc_bytes);
-                    let lanes = DstLanes::from(reg.range);
-
-                    match alloc_lanes {
-                        DstLanes::All => debug_assert_eq!(lanes, DstLanes::All),
-                        DstLanes::AnyB => debug_assert!(lanes.is_byte()),
-                        DstLanes::AnyH => debug_assert!(lanes.is_half()),
-                        DstLanes::AnyHF => debug_assert!(lanes.is_half()),
-                        DstLanes::HF0 => debug_assert_eq!(lanes, DstLanes::H0),
-                        DstLanes::HF1 => debug_assert_eq!(lanes, DstLanes::H1),
-                        _ => debug_assert_eq!(lanes, alloc_lanes),
-                    }
-
-                    if s.model.op_dst_supports_lanes(&instr.op, lanes) {
-                        break (b, reg);
-                    }
-
-                    alloc_start = usize::from(b) + 1;
-                };
-
-                // In case when the SSA value is smaller than the region we
-                // just allocated, adjust accordingly.
-                let (dst_mul, dst_off) = dst.lanes.align();
-                let b = (b & !(dst_mul - 1)) | dst_off;
-
-                for (i, ssa) in vec.iter().enumerate() {
-                    ssa_b.insert(*ssa, b + u8::try_from(i * 4).unwrap());
-                }
-
-                // In case when the SSA value is smaller than the region we
-                // just allocated, this only marks the bytes consumed by the
-                // SSA value as used.  This effectively kills the other bytes
-                // immediately.
-                for i in 0..bytes {
-                    byte_used.insert(usize::from(b) + usize::from(i));
-                }
-
-                dst_regs.push(reg);
-            }
-
-            for dst in instr.dsts() {
-                let DstRef::SSA(vec) = &dst.dst_ref else {
-                    continue;
-                };
-
-                for ssa in vec {
-                    if !bl.is_live_after_ip(ssa, ip) {
-                        let vec_b = *ssa_b.get(ssa).unwrap();
-                        let bytes = ssa.bits() / 8;
-                        for b in 0..bytes {
-                            byte_used.remove((vec_b + b).into());
-                        }
-                    }
-                }
-            }
-
-            debug_assert_eq!(instr.dsts().len(), dst_regs.len());
-            for (dst, reg) in instr.dsts_mut().iter_mut().zip(dst_regs) {
-                let new_dst = Dst::from(reg);
-                dst.dst_ref = new_dst.dst_ref;
-                dst.lanes = fold_lanes(new_dst.lanes, dst.lanes);
-            }
-
-            block.instrs.push(instr);
-        }
-        s.info.registers_used = 64;
     }
 }
 
@@ -2763,14 +2624,10 @@ impl Shader<'_> {
     }
 
     pub fn assign_registers(&mut self) {
-        if false {
-            return ra_trivial(self);
-        }
-
         pass!(self.lower_repeated_phi_srcs());
 
         if self.info.is_blend {
-            let arena = Arena::new_blend(self.model);
+            let arena = Arena::new_blend();
 
             pass!(self.prop_oob_reg_in(&arena));
 
@@ -2783,7 +2640,7 @@ impl Shader<'_> {
             self.run_pass("allocating registers", |s| {
                 alloc_regs(s, &arena, live);
             });
-            self.info.registers_used = arena.regs_used();
+            self.info.registers_used = arena.regs_used(self.model);
             return;
         }
 
@@ -2838,6 +2695,6 @@ impl Shader<'_> {
         self.run_pass("allocating registers", |s| {
             alloc_regs(s, &reg_arena, live);
         });
-        self.info.registers_used = reg_arena.regs_used();
+        self.info.registers_used = reg_arena.regs_used(self.model);
     }
 }

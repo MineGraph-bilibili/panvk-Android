@@ -7,7 +7,6 @@ use compiler_proc::as_slice::*;
 use kraid_proc::*;
 use proc_macro::TokenStream;
 use std::ops::{Add, Range};
-use std::path::PathBuf;
 use std::str::FromStr;
 use syn::parse::{Parse, ParseStream};
 use syn::parse_macro_input;
@@ -87,18 +86,14 @@ impl Parse for LitRange {
 }
 
 struct GenIsaArgs {
-    xml: String,
     arch: Range<u8>,
 }
 
 impl Parse for GenIsaArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let xml: syn::LitStr = input.parse()?;
-        let _: syn::token::Comma = input.parse()?;
         let arch: LitRange = input.parse()?;
 
         Ok(GenIsaArgs {
-            xml: xml.value(),
             arch: arch.as_range(),
         })
     }
@@ -138,22 +133,17 @@ fn cfg_args() -> CfgArgs {
     CfgArgs { args }
 }
 
-fn cfg_isa_xml_path(args: &GenIsaArgs) -> String {
-    let isa_xml_path = cfg_args()
+fn cfg_isa_xml_path() -> String {
+    cfg_args()
         .find(|(key, _value)| key == "kraid_isa_xml_path")
         .and_then(|(_key, value)| value)
-        .expect("kraid_isa_xml_path not specified");
-
-    let mut xml_path = PathBuf::from(isa_xml_path);
-    xml_path.push(&args.xml);
-
-    String::from(xml_path.to_str().unwrap())
+        .expect("kraid_isa_xml_path not specified")
 }
 
 #[proc_macro]
 pub fn gen_isa_encode(item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(item as GenIsaArgs);
-    let xml_path = cfg_isa_xml_path(&args);
+    let xml_path = cfg_isa_xml_path();
 
     isa::encoder::gen_encoder(&xml_path, args.arch)
         .unwrap()
@@ -163,7 +153,7 @@ pub fn gen_isa_encode(item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn gen_isa_decode(item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(item as GenIsaArgs);
-    let xml_path = cfg_isa_xml_path(&args);
+    let xml_path = cfg_isa_xml_path();
 
     isa::decoder::gen_decoder(&xml_path, args.arch)
         .unwrap()

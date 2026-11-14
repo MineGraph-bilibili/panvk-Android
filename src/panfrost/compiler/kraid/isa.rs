@@ -4,7 +4,6 @@
 
 use crate::ir::{DataType, SmallConstant};
 use compiler::enum_as_u8::*;
-use std::marker::PhantomData;
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -39,6 +38,7 @@ impl std::fmt::Display for EncodeError {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum InvalidInstrError {
     Any,
@@ -135,6 +135,7 @@ pub enum ExecUnit {
     Sfu,
 }
 
+#[allow(dead_code)]
 pub trait FauSpecialPageResolver {
     type P0: TryDecode<u8> + std::fmt::Display;
     type P1: TryDecode<u8> + std::fmt::Display;
@@ -265,132 +266,159 @@ pub struct SrWriteLanes<L: Copy> {
 }
 
 pub mod v9 {
-    enum SourceEncodingX<T, R, const IS64: bool>
-    where
-        T: SmallConstantTable + std::fmt::Display,
-        R: FauSpecialPageResolver,
-    {
-        Register {
-            idx: u8,
-            last: bool,
-        },
-        Fau {
-            idx: u8,
-            page: u8,
-            fau32: bool,
-        },
-        SmallConst(T),
-        FauSpec {
-            word_select: bool,
-            name: String,
-            _r: PhantomData<R>,
-        },
-    }
+    use kraid_proc_macros::*;
+    gen_isa_encode!(9..=14);
 
-    // TODO v14: zext
-    impl<T, R, const IS64: bool> SourceEncodingX<T, R, IS64>
-    where
-        EncodeError: From<<T as TryDecode<u8>>::Error>,
-        T: SmallConstantTable + std::fmt::Display,
-        R: FauSpecialPageResolver,
-        EncodeError: From<<R::P0 as TryDecode<u8>>::Error>,
-        EncodeError: From<<R::P1 as TryDecode<u8>>::Error>,
-        EncodeError: From<<R::P3 as TryDecode<u8>>::Error>,
-    {
-        fn try_decode(
-            v: u8,
-            arch: u8,
-            fau_page_index: u8,
-            fau32: bool,
-        ) -> std::result::Result<SourceEncodingX<T, R, IS64>, EncodeError>
-        {
-            if arch > 14 {
-                return Err("Only supports up to v14 atm".into());
-            }
-            let mode = (v >> 6) & 0b11;
-            let mode2 = (v >> 5) & 0b1;
-            match (mode, mode2) {
-                (0b00, _) | (0b01, _) => Ok(SourceEncodingX::Register {
-                    idx: v & 0x3f,
-                    last: mode != 0,
-                }),
-                (0b10, _) => Ok(SourceEncodingX::Fau {
-                    idx: v & 0x3f,
-                    page: fau_page_index,
-                    fau32,
-                }),
-                (0b11, 0b0) => {
-                    let as_enum = T::try_decode((v & 0x1f) as u8, arch)?;
-                    Ok(SourceEncodingX::SmallConst(as_enum))
+    #[cfg(kraid_disasm)]
+    pub mod decode {
+        use super::*;
+        use crate::isa::*;
+
+        enum SourceEncodingX<const IS64: bool> {
+            Register {
+                idx: u8,
+                last: bool,
+                zext: bool,
+            },
+            Fau {
+                idx: u8,
+                page: u8,
+                fau32: bool,
+                zext: bool,
+            },
+            SmallConst(super::SmallConstantT),
+            FauSpec {
+                word_select: bool,
+                name: String,
+                zext: bool,
+            },
+        }
+
+        impl<const IS64: bool> SourceEncodingX<IS64> {
+            fn try_decode(
+                v: u8,
+                arch: u8,
+                fau_page_index: u8,
+                fau32: bool,
+            ) -> std::result::Result<SourceEncodingX<IS64>, EncodeError>
+            {
+                if arch > 14 {
+                    return Err("Only supports up to v14 atm".into());
                 }
-                (0b11, 0b1) => {
-                    let idx32 = (v & 0x1f) >> 1;
-                    let word_select = (v & 0b1) == 1;
-                    let name = R::get_name(fau_page_index, idx32, arch)?;
-                    Ok(SourceEncodingX::FauSpec {
-                        word_select,
-                        name,
-                        _r: PhantomData,
-                    })
+                /* V14 onwards, bit 0 sets the .zext flag in 64 bit sources */
+                let bit0_is_zext = IS64 && arch >= 14;
+                let bit0 = (v & 1) != 0;
+                let zext = bit0_is_zext && bit0;
+                let mode = (v >> 6) & 0b11;
+                let mode2 = (v >> 5) & 0b1;
+                match (mode, mode2) {
+                    (0b00, _) | (0b01, _) => Ok(SourceEncodingX::Register {
+                        idx: if bit0_is_zext { v & 0x3e } else { v & 0x3f },
+                        last: mode != 0,
+                        zext,
+                    }),
+                    (0b10, _) => Ok(SourceEncodingX::Fau {
+                        idx: if bit0_is_zext { v & 0x3e } else { v & 0x3f },
+                        page: fau_page_index,
+                        fau32,
+                        zext,
+                    }),
+                    (0b11, 0b0) => {
+                        let as_enum =
+                            SmallConstantT::try_decode((v & 0x1f) as u8, arch)?;
+                        Ok(SourceEncodingX::SmallConst(as_enum))
+                    }
+                    (0b11, 0b1) => {
+                        let idx32 = (v & 0x1f) >> 1;
+                        let name = FauSpecialIndexPage::get_name(
+                            fau_page_index,
+                            idx32,
+                            arch,
+                        )?;
+                        Ok(SourceEncodingX::FauSpec {
+                            word_select: !IS64 && bit0,
+                            name,
+                            zext,
+                        })
+                    }
+                    _ => Err("Invalid SourceEncoding".into()),
                 }
-                _ => Err("Invalid SourceEncoding".into()),
             }
         }
-    }
 
-    impl<T, R, const IS64: bool> std::fmt::Display for SourceEncodingX<T, R, IS64>
-    where
-        T: SmallConstantTable + std::fmt::Display,
-        R: FauSpecialPageResolver,
-    {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                SourceEncodingX::Register { idx, last } => {
-                    let tag = if *last { "^" } else { "" };
-                    if IS64 {
-                        write!(f, "[r{}{}:r{}{}]", idx, tag, idx + 1, tag)
-                    } else {
-                        write!(f, "r{}{}", idx, tag)
+        impl<const IS64: bool> std::fmt::Display for SourceEncodingX<IS64> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    SourceEncodingX::Register { idx, last, zext } => {
+                        let tag = if *last { "^" } else { "" };
+                        let zext_tag = if *zext { ".zext" } else { "" };
+                        if IS64 {
+                            write!(
+                                f,
+                                "[r{}{}:r{}{}]{}",
+                                idx,
+                                tag,
+                                idx + 1,
+                                tag,
+                                zext_tag
+                            )
+                        } else {
+                            write!(f, "r{}{}", idx, tag)
+                        }
                     }
-                }
-                SourceEncodingX::SmallConst(value) => {
-                    write!(f, "{}", value)
-                }
-                SourceEncodingX::Fau { idx, page, fau32 } => {
-                    if *fau32 {
-                        write!(f, "u{}", 64 * page + idx)
-                    } else {
+                    SourceEncodingX::SmallConst(value) => {
+                        write!(f, "{}", value)
+                    }
+                    SourceEncodingX::Fau {
+                        idx,
+                        page,
+                        fau32,
+                        zext,
+                    } => {
+                        let zext_tag = if *zext { ".zext" } else { "" };
+                        if *fau32 {
+                            write!(f, "u{}{}", 64 * page + idx, zext_tag)
+                        } else {
+                            let hl = if IS64 {
+                                ""
+                            } else if (idx & 0b1) == 1 {
+                                ".w1"
+                            } else {
+                                ".w0"
+                            };
+                            let idx32 = idx >> 1;
+                            write!(
+                                f,
+                                "u{}{}{}",
+                                32 * page + idx32,
+                                hl,
+                                zext_tag
+                            )
+                        }
+                    }
+                    SourceEncodingX::FauSpec {
+                        name,
+                        word_select,
+                        zext,
+                        ..
+                    } => {
+                        let zext_tag = if *zext { ".zext" } else { "" };
                         let hl = if IS64 {
                             ""
-                        } else if (idx & 0b1) == 1 {
+                        } else if *word_select {
                             ".w1"
                         } else {
                             ".w0"
                         };
-                        let idx32 = idx >> 1;
-                        write!(f, "u{}{}", 32 * page + idx32, hl)
+                        write!(f, "{}{}{}", &name, hl, zext_tag)
                     }
-                }
-                SourceEncodingX::FauSpec {
-                    name, word_select, ..
-                } => {
-                    let hl = if IS64 {
-                        ""
-                    } else if *word_select {
-                        ".w1"
-                    } else {
-                        ".w0"
-                    };
-                    write!(f, "{}{}", &name, hl)
                 }
             }
         }
+
+        type SourceEncoding = SourceEncodingX<false>;
+        type SourceEncoding64 = SourceEncodingX<true>;
+
+        gen_isa_decode!(9..=14);
     }
-
-    type SourceEncoding<T, R> = SourceEncodingX<T, R, false>;
-    type SourceEncoding64<T, R> = SourceEncodingX<T, R, true>;
-
-    use kraid_proc_macros::*;
-    gen_isa_encode!("isa-v9-v14.xml", 9..=14);
-    gen_isa_decode!("isa-v9-v14.xml", 9..=14);
 }

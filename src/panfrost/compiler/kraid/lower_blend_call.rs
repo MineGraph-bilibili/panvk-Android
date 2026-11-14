@@ -36,7 +36,7 @@ fn lower_blend_call(b: &mut impl Builder, op: OpBlendCall, flow: FlowCtrl) {
             src: 0_u32.into(),
         });
     } else {
-        let pc = b.model().fau().special(SpecialFAU::Pc).unwrap();
+        let pc = b.model().fau().special(SpecialFAU::Pc).unwrap().word(0);
         // RA = instr after OpJump
         // Too late for legalization, MUST be a legal IADD_IMM
         b.push_op(OpIAdd {

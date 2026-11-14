@@ -27,7 +27,7 @@ fn validate_instr(
         if s.info.src_swizzles_legal {
             assert!(
                 s.model.op_src_supports_swizzle(&instr.op, src, src.swizzle),
-                "{instr} uses an unsupported swizzle"
+                "{instr} uses an unsupported swizzles for {src:?}"
             );
         }
 
@@ -38,18 +38,19 @@ fn validate_instr(
             if src_bytes == 1 {
                 assert!(
                     src.swizzle.replicates_byte(),
-                    "{instr} uses invalid swizzle",
+                    "{instr} uses invalid swizzle for {src:?}",
                 );
             } else if src_bytes == 2 {
                 assert!(
                     src.swizzle.replicates_half(),
-                    "{instr} uses invalid swizzle",
+                    "{instr} uses invalid swizzle for {src:?}",
                 );
             }
 
             let src_ref_byte_mask = match &src.src_ref {
                 SrcRef::Zero => 0xff,
                 SrcRef::Imm32(_) => 0xf,
+                SrcRef::Imm64(_) => 0xff,
                 SrcRef::FAU(fau) => {
                     if fau.load64 {
                         0xff

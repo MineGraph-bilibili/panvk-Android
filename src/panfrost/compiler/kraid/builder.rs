@@ -59,6 +59,23 @@ pub trait Builder {
         });
     }
 
+    fn f32_to_f16_to(&mut self, mut dst: Dst, src: Src, round: FRound) {
+        debug_assert_eq!(dst.dst_ref.bytes_written(), 2);
+        dst.lanes = DstLanes::AnyHF;
+        let neutral_src = if round != FRound::Down {
+            Src::fneg_zero(32)
+        } else {
+            Src::zero(32)
+        };
+        self.push_op(OpFAdd {
+            dst,
+            dst_type: DataType::F32,
+            round,
+            clamp: FClamp::None,
+            srcs: [src, neutral_src],
+        });
+    }
+
     fn load_tls_to(&mut self, dst: Dst, dst_type: DataType, offset: u16) {
         let tls_ptr = SpecialFAU::ThreadLocalPointer;
         let tls_ptr = self.model().fau().special(tls_ptr).unwrap();
@@ -132,6 +149,12 @@ pub trait SSABuilder: Builder + AllocSSA {
     fn fadd_32(&mut self, a: Src, b: Src) -> SSAValue {
         let def = self.alloc_ssa(32);
         self.fadd_32_to(def.into(), a, b);
+        def
+    }
+
+    fn f32_to_f16(&mut self, a: Src, round: FRound) -> SSAValue {
+        let def = self.alloc_ssa(16);
+        self.f32_to_f16_to(def.into(), a, round);
         def
     }
 
@@ -318,7 +341,7 @@ pub trait SSABuilder: Builder + AllocSSA {
         //
         //  sign_bit = XOR(sign_bit, axis_bit(lane_id)).
         let lane = self.model().fau().special(SpecialFAU::LaneId).unwrap();
-        let mut lane = Src::from(lane);
+        let mut lane = Src::from(lane).word(0);
         if bits == 16 {
             lane = lane.half(0);
         }
@@ -389,6 +412,7 @@ pub trait SSABuilder: Builder + AllocSSA {
         let frexp = self.alloc_ssa(32);
         self.push_op(OpFrexpE {
             dst: frexp.into(),
+            src_type: DataType::F32,
             src: arg.clone(),
             mode: FrexpMode::Log,
             neg_result: false,

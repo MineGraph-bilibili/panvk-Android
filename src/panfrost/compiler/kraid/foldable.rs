@@ -8,8 +8,8 @@ use std::iter;
 
 use compiler::float16::F16;
 use compiler::smallvec::SmallVec;
-
 use crate::bitview::{BitMutViewable, BitViewable};
+
 use crate::ir::*;
 
 pub trait FoldDataView {
@@ -50,33 +50,15 @@ pub struct FoldData<'a, O> {
 impl<'a, O: Opcode> FoldDataView for FoldData<'a, O> {
     fn get_src(&self, src: &Src) -> u64 {
         let idx = self.op.src_idx(src);
-        let data = match &src.src_ref {
-            SrcRef::Zero => 0u64,
-            SrcRef::Imm32(i) => i.get() as u64,
-            SrcRef::FAU(fauref) => {
-                assert!(fauref.page == FAUPage::SmallConst);
-                todo!();
-            }
-            SrcRef::SSA(_) => self.srcs[idx],
-            SrcRef::Reg(_) | SrcRef::Mem(_) => todo!(),
-        };
         let src_type = self.op.src_type(src);
 
-        let data = match src_type.total_bits() {
-            8 | 16 | 32 => src
-                .swizzle
-                .fold_u32(data as u32)
-                .and_then(|x| src.src_mod.fold_u32(src_type, x))
-                .map(|x| x.into()),
-            64 => src
-                .swizzle
-                .fold_u64(data)
-                .and_then(|x| src.src_mod.fold_u64(x)),
-            _ => panic!("Invalid source width"),
+        let mut src = src.clone();
+        if let SrcRef::SSA(_) = src.src_ref {
+            // Replace SSA with immediate
+            src.src_ref = self.srcs[idx].into();
         }
-        .expect("Invalid swizzle or modifier");
 
-        data
+        src.resolve_imm(src_type).expect("Cannot fold src")
     }
 
     fn set_dst(&mut self, dst: &Dst, data: u64) {
@@ -85,7 +67,12 @@ impl<'a, O: Opcode> FoldDataView for FoldData<'a, O> {
 
         self.dsts[dst_idx] = match dst_type.total_bits() {
             8 | 16 | 32 => {
-                let mask = dst.lanes.u32_mask().unwrap();
+                let lanes = match dst.lanes {
+                    DstLanes::AnyB => DstLanes::B0,
+                    DstLanes::AnyH => DstLanes::H0,
+                    lanes => lanes,
+                };
+                let mask = lanes.u32_mask().unwrap();
                 ((data as u32) & mask) as u64
             }
             64 => {

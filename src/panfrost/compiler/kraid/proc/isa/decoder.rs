@@ -406,10 +406,8 @@ impl PrintAs {
                     "SourceEncoding"
                 };
                 let cls_id = Ident::new(n, Span::call_site());
-                ts.extend(
-                    quote! { let #ident = #cls_id::<SmallConstantT, FauSpecialIndexPage>::try_decode(
-                        #ident as u8, arch, (fau_page_index as u8), ctx.fau32)?; }
-                );
+                ts.extend(quote! { let #ident = #cls_id::try_decode(
+                #ident as u8, arch, (fau_page_index as u8), ctx.fau32)?; });
             }
             PrintAs::Staging(s) => {
                 let count_id = &s.count_id;
@@ -737,6 +735,17 @@ impl InstrPrint<'_> {
 
     pub fn declare_types(ts: &mut TokenStream) {
         ts.extend(quote! {
+            struct NullWriter;
+
+            impl std::io::Write for NullWriter {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+
             #[derive(Default)]
             pub struct PrintCtx {
                 pub fau32: bool,
@@ -747,6 +756,15 @@ impl InstrPrint<'_> {
                 Fmt(std::fmt::Error),
                 Io(std::io::Error),
                 InvalidInstr(InvalidInstrError),
+            }
+
+            impl PrintError {
+                fn into_invalid_instr(self) -> InvalidInstrError {
+                    match self {
+                        PrintError::InvalidInstr(e) => e,
+                        _ => panic!("into_invalid_instr called on Fmt or Io"),
+                    }
+                }
             }
 
             impl From<std::convert::Infallible> for PrintError {
@@ -812,7 +830,7 @@ impl ToTokens for InstrPrint<'_> {
         let ident = &self.fn_ident;
         ts.extend(quote! {
             fn #ident (
-                v: u64, arch: u8, f: &mut impl std::io::Write, ctx: &PrintCtx
+                v: u64, arch: u8, f: &mut dyn std::io::Write, ctx: &PrintCtx
             ) -> Result<(), PrintError> {
                 #body_ts
                 Ok(())
@@ -905,57 +923,8 @@ impl ToTokens for SimpleEnum {
     }
 }
 
-struct TryDecodeInstr<'a> {
-    fn_ident: Ident,
-    fields: InstrFields<'a>,
-}
-
-impl TryDecodeInstr<'_> {
-    pub fn new(instr: &Instr) -> TryDecodeInstr<'_> {
-        let mut fields = InstrFields::new(instr);
-
-        for field in &instr.fields {
-            match field {
-                InstrField::Physical(f) => {
-                    fields.load(&f.name);
-                }
-                InstrField::Virtual(f) => {
-                    fields.load(&f.name);
-                }
-                InstrField::Reserved(_) => (),
-            }
-        }
-
-        TryDecodeInstr {
-            fields,
-            fn_ident: unique_instr_ident("try_dec", instr),
-        }
-    }
-}
-
-impl ToTokens for TryDecodeInstr<'_> {
-    fn to_tokens(&self, ts: &mut TokenStream) {
-        let mut loads_ts: TokenStream = Default::default();
-        self.fields.to_tokens(&mut loads_ts);
-
-        let fname = &self.fn_ident;
-        ts.extend(quote! {
-            fn #fname (v: u64, arch: u8) -> Result<(), InvalidInstrError> {
-                #loads_ts
-                Ok(())
-            }
-        });
-    }
-}
-
 fn gen_decode(isa: &ISA, name_e: Ident, var_e: Ident) -> TokenStream {
     let mut decode_per_arch: BTreeMap<_, Box<DecoderNode>> = Default::default();
-
-    let mut try_decode_instr_impls: TokenStream = Default::default();
-    for instr in &isa.instrs {
-        let try_decode = TryDecodeInstr::new(instr);
-        try_decode.to_tokens(&mut try_decode_instr_impls);
-    }
 
     for target_arch in isa.arch.clone() {
         let instrs: Vec<&Instr> = isa
@@ -979,8 +948,9 @@ fn gen_decode(isa: &ISA, name_e: Ident, var_e: Ident) -> TokenStream {
     };
 
     let make_check = |instr: &Instr| {
-        let fn_ident = unique_instr_ident("try_dec", instr);
-        quote! {#fn_ident(input_value, arch)}
+        let fn_ident = unique_instr_ident("print", instr);
+        quote! {(#fn_ident(input_value, arch, &mut NullWriter, &Default::default()))
+        .map_err(|e| e.into_invalid_instr())}
     };
 
     let decoder_cases_ts: TokenStream = decode_per_arch
@@ -994,8 +964,6 @@ fn gen_decode(isa: &ISA, name_e: Ident, var_e: Ident) -> TokenStream {
         .collect();
 
     quote! {
-        #try_decode_instr_impls
-
         pub fn try_decode(
             input_value: u64, arch: u8
         ) -> Result<(Mnemonic, Option<Variant>), InvalidInstrError> {
@@ -1033,10 +1001,6 @@ pub fn gen_decoder(
         gen_decode(&isa, instr_name_enum.ident(), instr_var_enum.ident());
 
     Ok(quote! {
-        pub mod decode {
-        use super::*;
-        use crate::isa::*;
-
         fn sign_ext(v: u32, enc_width: u8) -> i32 {
             let r = 32 - enc_width;
             ((v << r) as i32) >> r
@@ -1049,7 +1013,5 @@ pub fn gen_decoder(
         #decode_ts
 
         #printer_ts
-
-        }
     })
 }

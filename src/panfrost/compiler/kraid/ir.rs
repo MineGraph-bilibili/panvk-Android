@@ -2,7 +2,6 @@
 // Copyright © 2026 Arm Ltd.
 // SPDX-License-Identifier: MIT
 
-use crate::bitview::BitViewable;
 pub use crate::data_type::DataType;
 use crate::data_type::{NumericType, PartialDataType};
 use crate::debug::{DEBUG, DebugFlags};
@@ -22,10 +21,10 @@ use compiler::enum_as_u8::*;
 use compiler::float16::F16;
 use compiler::smallvec::*;
 use kraid_proc_macros::EnumAsU8;
+use crate::bitview::BitViewable;
 
 use std::fmt;
-use std::fmt::Write;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::{Deref, DerefMut, Range};
 
 pub struct SmallConstant {
@@ -397,7 +396,7 @@ impl fmt::Display for ResHandle {
 /// half of a register, it is swizzled accordingly.  For 16-bit destinations,
 /// the instruction itself continues to operate 32 bits wide and the register
 /// write is simply masked.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RegRange {
     Byte0,
     Byte1,
@@ -609,6 +608,7 @@ pub enum SrcRef {
     Zero,
     /// A 32-bit immediate
     Imm32(NonZeroU32),
+    Imm64(NonZeroU64),
     FAU(FAURef),
     SSA(SSARef),
     Reg(RegRef),
@@ -620,11 +620,18 @@ impl fmt::Display for SrcRef {
         match self {
             SrcRef::Zero => write!(f, "k0"),
             SrcRef::Imm32(u) => write!(f, "{u:#x}"),
+            SrcRef::Imm64(u) => write!(f, "{u:#x}"),
             SrcRef::FAU(fau) => fau.fmt(f),
             SrcRef::SSA(ssa) => ssa.fmt(f),
             SrcRef::Reg(reg) => reg.fmt(f),
             SrcRef::Mem(mem) => mem.fmt(f),
         }
+    }
+}
+
+impl fmt::Debug for SrcRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        <Self as fmt::Display>::fmt(self, f)
     }
 }
 
@@ -655,6 +662,7 @@ impl SrcRef {
         match self {
             SrcRef::Zero => 4,
             SrcRef::Imm32(_) => 4,
+            SrcRef::Imm64(_) => 8,
             SrcRef::FAU(fau) => {
                 if fau.load64 {
                     8
@@ -685,6 +693,10 @@ impl SrcRef {
                 assert!(word == 0);
                 SrcRef::Imm32(u)
             }
+            SrcRef::Imm64(u) => {
+                assert!(word < 2);
+                SrcRef::from((u.get() >> (word * 32)) as u32)
+            }
             SrcRef::FAU(fau) => fau.word(word).into(),
             SrcRef::SSA(ssa) => ssa[usize::from(word)].into(),
             SrcRef::Reg(reg) => reg.word(word).into(),
@@ -703,9 +715,32 @@ impl From<u32> for SrcRef {
     }
 }
 
+impl From<u64> for SrcRef {
+    fn from(u: u64) -> SrcRef {
+        if let Some(nz) = NonZeroU64::new(u) {
+            SrcRef::Imm64(nz)
+        } else {
+            SrcRef::Zero
+        }
+    }
+}
+
 impl From<f32> for SrcRef {
     fn from(u: f32) -> SrcRef {
         SrcRef::from(u.to_bits())
+    }
+}
+
+impl TryFrom<&SrcRef> for u64 {
+    type Error = &'static str;
+
+    fn try_from(src_ref: &SrcRef) -> Result<u64, Self::Error> {
+        match src_ref {
+            SrcRef::Zero => Ok(0),
+            SrcRef::Imm32(nz) => Ok(nz.get().into()),
+            SrcRef::Imm64(nz) => Ok(nz.get()),
+            _ => Err("Value not known at compile time"),
+        }
     }
 }
 
@@ -713,11 +748,9 @@ impl TryFrom<&SrcRef> for u32 {
     type Error = &'static str;
 
     fn try_from(src_ref: &SrcRef) -> Result<u32, Self::Error> {
-        match src_ref {
-            SrcRef::Zero => Ok(0),
-            SrcRef::Imm32(nz) => Ok((*nz).into()),
-            _ => Err("Value not known at compile time"),
-        }
+        u64::try_from(src_ref)?
+            .try_into()
+            .map_err(|_| "Value cannot fit in u32")
     }
 }
 
@@ -746,7 +779,7 @@ impl From<MemRef> for SrcRef {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Default, Eq, Hash, PartialEq, EnumAsU8)]
+#[derive(Clone, Copy, Default, Eq, Hash, PartialEq, EnumAsU8, Debug)]
 pub enum SrcMod {
     #[default]
     None = 0,
@@ -852,7 +885,7 @@ impl SrcMod {
 /// modifier can always be applied either before or after the swizzle without
 /// affecting everything.  Howver, because we represent a superset of the ISA,
 /// we need the order to be well-defined.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Src {
     pub src_ref: SrcRef,
     pub swizzle: Swizzle,
@@ -1122,11 +1155,13 @@ impl Src {
     }
 
     pub fn is_zero(&self) -> bool {
-        if matches!(self.src_mod, SrcMod::BNot) {
-            matches!(self.src_ref, SrcRef::Imm32(NonZeroU32::MAX))
-        } else {
-            matches!(self.src_ref, SrcRef::Zero)
+        if !matches!(self.src_mod, SrcMod::BNot | SrcMod::None) {
+            return false;
         }
+        // Always assume we are 64-bits, 32-bit swizzles sign-extend to 64-bits
+        // before applying .bnot anyways.  u32::MAX.bnot might not be 0 if read
+        // from a 64-bit source (unless specifically sign-extended)
+        matches!(self.resolve_imm(DataType::U64), Some(0))
     }
 
     pub fn is_fneg_zero(&self, src_type: DataType) -> bool {
@@ -1163,6 +1198,12 @@ impl Src {
                     b[0] == b[1] && b[0] == b[2] && b[0] == b[3]
                 })
             }
+            SrcRef::Imm64(u) => {
+                self.swizzle.fold_u64(u.into()).is_some_and(|u| {
+                    let b = u.to_le_bytes();
+                    b[1..].iter().all(|e| *e == b[0])
+                })
+            }
             _ => self.swizzle.replicates_byte(),
         }
     }
@@ -1174,6 +1215,11 @@ impl Src {
                 .swizzle
                 .fold_u32(u.into())
                 .is_some_and(|u| (u & 0xffff) == (u >> 16)),
+            SrcRef::Imm64(u) => {
+                self.swizzle.fold_u64(u.into()).is_some_and(|u| {
+                    (1..4).all(|i| ((u >> (16 * i)) & 0xffff) == (u & 0xffff))
+                })
+            }
             _ => self.swizzle.replicates_half(),
         }
     }
@@ -1191,13 +1237,33 @@ impl Src {
             None
         }
     }
+
+    pub fn resolve_imm(&self, src_type: DataType) -> Option<u64> {
+        let imm64 = u64::try_from(&self.src_ref).ok()?;
+
+        match src_type.total_bits() {
+            i if i <= 32 => self
+                .swizzle
+                .fold_u32(imm64 as u32)
+                .and_then(|tmp| self.src_mod.fold_u32(src_type, tmp))
+                .map(u64::from),
+            64 => self
+                .swizzle
+                .fold_u64(imm64)
+                .and_then(|tmp| self.src_mod.fold_u64(tmp)),
+            _ => panic!("Invalid source width"),
+        }
+    }
 }
 
 impl<T: Into<SrcRef>> From<T> for Src {
     fn from(src_ref: T) -> Src {
         let src_ref = src_ref.into();
         let swizzle = match &src_ref {
-            SrcRef::Zero | SrcRef::Imm32(_) | SrcRef::FAU(_) => Swizzle::NONE,
+            SrcRef::Zero
+            | SrcRef::Imm32(_)
+            | SrcRef::Imm64(_)
+            | SrcRef::FAU(_) => Swizzle::NONE,
             SrcRef::SSA(vec) => match vec.bytes() {
                 1 => Swizzle::B0000,
                 2 => Swizzle::H00,
@@ -1357,7 +1423,8 @@ pub enum DstLanes {
     HF1,
 }
 
-pub type DstLanesSet = U8EnumSet<DstLanes, 1>;
+pub type DstLanesSet = <DstLanes as EnumAsU8>::VariantSet;
+pub type AsmSwizzleWidenSet = <AsmSwizzleWiden as EnumAsU8>::VariantSet;
 
 impl fmt::Display for DstLanes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1824,6 +1891,24 @@ pub trait VirtualOpcode {
         swizzle == Swizzle::NONE
     }
 
+    fn src_supported_swizzles(
+        &self,
+        src: &Src,
+        src_type: DataType,
+    ) -> AsmSwizzleWidenSet {
+        // This is for correctness, but should be implemented specifically for Ops where this is
+        // called often.
+        AsmSwizzleWiden::VARIANTS
+            .iter()
+            .filter(|asw| {
+                let Some(swizzle) = asw.to_swizzle(src_type) else {
+                    return false;
+                };
+                self.src_supports_swizzle(src, swizzle)
+            })
+            .collect()
+    }
+
     fn src_supports_mod(&self, _src: &Src, src_mod: SrcMod) -> bool {
         src_mod.is_none()
     }
@@ -2171,39 +2256,76 @@ impl Shader<'_> {
             && self.blocks[0].instrs.len() == 1
             && matches!(self.blocks[0].instrs[0].op, Op::Nop(_))
     }
-}
 
-impl fmt::Display for Shader<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buf = String::new();
-        for b in &self.blocks {
-            write!(buf, "{}\n\n", b.deref())?;
+    pub fn fmt_annotate(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        mut annotator: impl FnMut(usize, usize, &Instr) -> String,
+    ) -> fmt::Result {
+        enum Line {
+            Empty,
+            Label(String),
+            Instr {
+                dst: String,
+                body: String,
+                annot: String,
+            },
+        }
+        let mut max_dst_len = 0usize;
+        let mut max_body_len = 0usize;
+        let space_before_instr = 4;
+
+        let mut rows = vec![];
+        for (bi, block) in self.blocks.iter().enumerate() {
+            rows.push(Line::Label(block.label.to_string()));
+
+            for (ip, instr) in block.instrs.iter().enumerate() {
+                let mut dst = format!("{}", Fmt(|f| instr.fmt_dsts(f)));
+                if !dst.is_empty() {
+                    dst = format!("{dst} = ");
+                }
+
+                let body = format!(
+                    "{}{}{}",
+                    Fmt(|f| instr.fmt_name(f)),
+                    instr.flow,
+                    Fmt(|f| instr.fmt_body(f)),
+                );
+                let annot = annotator(bi, ip, instr);
+
+                max_dst_len = max_dst_len.max(dst.chars().count());
+                max_body_len = max_body_len.max(body.chars().count());
+
+                rows.push(Line::Instr { dst, body, annot });
+            }
+            rows.push(Line::Empty);
         }
 
-        // Pad to correct width
-        let eq_pos = |s: &str| s.chars().position(|c| c == '=');
-        let max_eq = buf.lines().filter_map(eq_pos).max().unwrap_or(0);
+        let dst_align = space_before_instr + max_dst_len;
+        let body_align = max_body_len;
 
-        for line in buf.lines() {
-            let line = line.trim_end();
-            if line.is_empty() {
-                writeln!(f)?;
-            } else if line.starts_with("__") {
-                writeln!(f, "{line}")?;
-            } else if let Some(pos) = eq_pos(line) {
-                writeln!(f, "{:pad$}{line}", "", pad = max_eq - pos)?;
-            } else {
-                writeln!(
-                    f,
-                    "{:pad$}{}",
-                    "",
-                    line.trim_start(),
-                    pad = max_eq + 2
-                )?;
+        for row in rows {
+            match row {
+                Line::Empty => writeln!(f)?,
+                Line::Label(l) => writeln!(f, "{l}:")?,
+                Line::Instr { dst, body, annot } => {
+                    write!(f, "{dst:>dst_align$}")?;
+                    if annot.is_empty() {
+                        writeln!(f, "{body}")?;
+                    } else {
+                        writeln!(f, "{body:<body_align$} # {annot}")?;
+                    }
+                }
             }
         }
 
         Ok(())
+    }
+}
+
+impl fmt::Display for Shader<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_annotate(f, |_, _, _| String::new())
     }
 }
 

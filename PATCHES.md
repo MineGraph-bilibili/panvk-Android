@@ -180,6 +180,34 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `003-skip-lseek-fd-probe` | `GetMemoryFdPropertiesKHR` 去掉 `lseek(fd,0,SEEK_END)` 有效性探测，只保留 `fd < 0` 检查，避免窗口缓冲导入被误杀导致交换链永不上屏。 |
 | `004-kbase-page-size-helper` | 重新引入 `kbase_kmod_page_size()`（`sysconf(_SC_PAGESIZE)`），修复 jm-v9/023 等补丁引用该助手而参考基线已删除所导致的编译失败。 |
 | `005-driver-identity` | `VK_KHR_driver_properties` 上报的身份从 `panvk` / `PanVK-kbase beta.18-rc2 (Mesa 26.3.0-devel …)` 改为 `Panvk` / `Mesa 26.3.0-devel`，即 DXVK HUD、DXVKHUB 里显示的驱动名与版本。仅改字符串，不影响 GPU 行为。 |
+| `007-kraid-rc-upgrade` | kraid 编译器整体对齐本地 rc66：ISA 描述切到 `isa-v9-v14.xml`，新增 `opt_exec_units` / `opt_fuse` / `opt_normalize_consts` 三个 pass，编解码与指令集扩到 v14。 |
+
+### 本地树同步 `007`–`013`
+
+这一段不是新增功能，而是把 `work/mesa`（rc66 状态）与本仓库树的真实差异按功能分组回写：
+逐组用本地版本覆盖同名文件，冲突处**一律以本地行为为准**（见 `010` 的 `panvk_wsi.c`、
+`008` 的 `bi_ra.c`）。仓库独有的打包设施（`patches/`、`scripts/`、`meson/`、`profiles/`、
+`dist/`、`sources.lock`、`validation/`、`BUILDING.md`、`PATCHES.md`）保持不变，本地没有的
+仓库文件也不删除。每组补丁由 `git diff --cached -- <该组文件>` 生成，可
+`git apply --check --reverse` 回退单组。注意：诊断宏 `panvk_diag_result` /
+`PANVK_DIAG_PRINTF` 定义在 `013` 才落地的 `panvk_macros.h`，因此 `007`–`012` 单独检出
+不可编译，完整序列（含 `013`）才是自洽状态。
+
+#### `007-kraid-rc-upgrade`（39 文件）
+
+* **机制**：kraid 目录 36 个既有文件 + 3 个新增文件整体替换为本地 rc66 版本。ISA 描述由
+  `isa-v9-v14.xml` 显式指定（`--cfg kraid_isa_xml_path`），新增 `opt_exec_units`、
+  `opt_fuse`、`opt_normalize_consts` 三个 pass 并在 `lib.rs` 注册；`ops.rs` 增补
+  `OpCmp` / `OpHAdd` / `OpICmpMulti` / `OpIDpAdd` / `OpIToF16` / `OpF16ToI32` 等指令与
+  相应折叠，`encode_v9` / `decode` 扩展到 v14 编码，`ra.rs` 重写、`stats.rs` 增加编译统计
+  （`PANVK_KRAID_DEBUG=stats`），反汇编器由 `kraid_disasm` cfg 打开（bindgen 同时放行
+  `fwrite|fflush` 与 `FILE`）。
+* **收益**：编译器覆盖 v9–v14 指令集，常量归一化/指令融合带来的冗余被消除，寄存器分配与
+  上游 rc66 对齐，减少后端生成错误指令的机会。
+* **风险/注意**：kraid 是 Rust 组件，必须用 rustc + bindgen 环境验证；`meson.build` 里
+  `isa_path` 由目录改为 `isa-v9-v14.xml` 文件名，若本地只保留 `isa-v15.xml` 会直接构建失败；
+  该组是本系列最大的一组（约 5.7k 增 / 1.8k 删），回退时按整组反向应用。
+* **来源**：rc66 本地树（对齐本地行为）。
 
 ---
 

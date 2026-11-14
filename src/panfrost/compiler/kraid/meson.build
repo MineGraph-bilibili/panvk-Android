@@ -48,6 +48,8 @@ _kraid_bindings_rs = rust.bindgen(
     '--allowlist-function', 'pan_.*',
     '--allowlist-function', 'kraid_.*',
     '--allowlist-function', 'val_.*',
+    '--allowlist-function', 'fwrite|fflush',
+    '--allowlist-type', 'FILE',
     '--allowlist-var', 'BI_VA_LOD_MODE_.*',
     '--no-prepend-enum-name',
     '--with-derive-default',
@@ -114,7 +116,8 @@ libpanfrost_kraid = static_library(
   rust_abi : 'c',
   rust_args : [
     panfrost_rust_args,
-    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
+    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() / 'isa-v9-v14.xml' + '"',
+    '--cfg', 'kraid_disasm',
     # Otherwise, rustc trips up on -pthread
     '-Clink-arg=-Wno-unused-command-line-argument',
   ],
@@ -137,7 +140,8 @@ libpanfrost_kraid_rs = static_library(
   rust_abi : 'rust',
   rust_args : [
     panfrost_rust_args,
-    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
+    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() / 'isa-v9-v14.xml' + '"',
+    '--cfg', 'kraid_disasm',
     # Otherwise, rustc trips up on -pthread
     '-Clink-arg=-Wno-unused-command-line-argument',
   ],
