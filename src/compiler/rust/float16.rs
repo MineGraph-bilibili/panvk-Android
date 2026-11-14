@@ -18,6 +18,7 @@ impl F16 {
     pub const BITS: u32 = 16;
     pub const MANTISSA_DIGITS: u32 = 11;
     pub const ZERO: F16 = F16::from_bits(0x0000);
+    pub const ONE: F16 = F16::from_bits(0x3c00);
     pub const EPSILON: F16 = F16::from_bits(0x1400);
     pub const MIN: F16 = F16::from_bits(0xfbff);
     pub const MIN_POSITIVE: F16 = F16::from_bits(0x0001);

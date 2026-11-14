@@ -250,10 +250,144 @@ va_resolve_swizzles(bi_context *ctx, bi_instr *I, unsigned s)
    return value;
 }
 
+/*
+ * A 64-bit operand read as two 32-bit sources (the texture handle of TEX, for
+ * one) must come from one register pair or one 64-bit FAU slot. Two constants
+ * lowered one word at a time land in different slots, and va_lower_split_64bit
+ * then moves both into registers. Push the pair into one slot instead.
+ */
+static bool
+va_lower_constant_pair(bi_context *ctx, bi_instr *I, unsigned s)
+{
+   struct pan_fau_layout *fau = ctx->info.fau;
+
+   if (s + 1 >= I->nr_srcs || I->src[s].type != BI_INDEX_CONSTANT ||
+       I->src[s + 1].type != BI_INDEX_CONSTANT || I->src[s].neg ||
+       I->src[s + 1].neg || s < valhall_opcodes[I->op].nr_staging_srcs ||
+       va_src_info(I->op, s).size != VA_SIZE_64 ||
+       bi_count_read_registers(I, s) != 1)
+      return false;
+
+   const uint32_t lo = va_resolve_swizzles(ctx, I, s);
+   const uint32_t hi = va_resolve_swizzles(ctx, I, s + 1);
+   int idx = -1;
+
+   for (unsigned i = ALIGN_POT(fau->reserved, 2); i + 1 < fau->count; i += 2) {
+      if (BITSET_TEST(fau->is_const, i) && BITSET_TEST(fau->is_const, i + 1) &&
+          fau->words[i].constant == lo && fau->words[i + 1].constant == hi) {
+         idx = i;
+         break;
+      }
+   }
+
+   if (idx < 0) {
+      if (pan_fau_available(fau) < 2 + (fau->count & 1))
+         return false;
+      if (fau->count & 1)
+         pan_fau_emit_const(fau, 0);
+      idx = pan_fau_emit_const(fau, lo);
+      pan_fau_emit_const(fau, hi);
+   }
+
+   I->src[s] = bi_fau((enum bir_fau)(BIR_FAU_UNIFORM | (idx >> 1)), false);
+   I->src[s + 1] = bi_fau((enum bir_fau)(BIR_FAU_UNIFORM | (idx >> 1)), true);
+   return true;
+}
+
+/*
+ * An instruction reads at most one 64-bit uniform slot. Two 32-bit constants
+ * that no LUT entry covers (FMA x, 0.75, 0.05) used to land in different slots
+ * or stay immediates, and one of them was moved into a register for every
+ * thread. Put both words in one slot instead, shared with any other
+ * instruction that needs the same two.
+ */
+static void
+va_lower_two_constants(bi_context *ctx, bi_instr *I)
+{
+   struct pan_fau_layout *fau = ctx->info.fau;
+   const bool is_signed = valhall_opcodes[I->op].is_signed;
+   unsigned srcs[3], nr = 0;
+   uint32_t vals[2];
+   unsigned nr_vals = 0;
+
+   bi_foreach_src(I, s) {
+      bi_index src = I->src[s];
+
+      /* Anything else in the FAU (a push constant, a special value) owns the
+       * one slot this instruction may read. */
+      if (src.type == BI_INDEX_FAU)
+         return;
+      if (src.type != BI_INDEX_CONSTANT ||
+          s < valhall_opcodes[I->op].nr_staging_srcs)
+         continue;
+
+      struct va_src_info info = va_src_info(I->op, s);
+      if (info.size != VA_SIZE_32 || src.swizzle != BI_SWIZZLE_H01 || src.abs)
+         return;
+
+      const uint32_t value = va_resolve_swizzles(ctx, I, s);
+
+      /* A LUT immediate takes a word of the 64-bit budget too. */
+      if (!bi_is_null(va_lookup_constant(value, info, is_signed)))
+         return;
+
+      if (!(nr_vals == 1 && vals[0] == value) &&
+          !(nr_vals == 2 && (vals[0] == value || vals[1] == value))) {
+         if (nr_vals == 2)
+            return;
+         vals[nr_vals++] = value;
+      }
+      srcs[nr++] = s;
+      if (nr == ARRAY_SIZE(srcs))
+         return;
+   }
+
+   if (nr_vals != 2)
+      return;
+
+   int idx = -1;
+   for (unsigned i = ALIGN_POT(fau->reserved, 2); i + 1 < fau->count; i += 2) {
+      if (!BITSET_TEST(fau->is_const, i) || !BITSET_TEST(fau->is_const, i + 1))
+         continue;
+      const uint32_t lo = fau->words[i].constant, hi = fau->words[i + 1].constant;
+      if ((lo == vals[0] && hi == vals[1]) || (lo == vals[1] && hi == vals[0])) {
+         idx = i;
+         break;
+      }
+   }
+
+   if (idx < 0) {
+      if (pan_fau_available(fau) < 2 + (fau->count & 1))
+         return;
+      if (fau->count & 1)
+         pan_fau_emit_const(fau, 0);
+      idx = pan_fau_emit_const(fau, vals[0]);
+      pan_fau_emit_const(fau, vals[1]);
+   }
+
+   for (unsigned i = 0; i < nr; i++) {
+      const unsigned s = srcs[i];
+      const uint32_t value = va_resolve_swizzles(ctx, I, s);
+      const bool hi = fau->words[idx + 1].constant == value &&
+                      fau->words[idx].constant != value;
+      bi_index cons = bi_fau((enum bir_fau)(BIR_FAU_UNIFORM | (idx >> 1)), hi);
+      cons.neg = I->src[s].neg;
+      I->src[s] = cons;
+   }
+}
+
 void
 va_lower_constants(bi_context *ctx, bi_instr *I, struct hash_table_u64 *counts, uint32_t min_fau_count)
 {
    bi_builder b = bi_init_builder(ctx, bi_before_instr(I));
+
+   if (ctx->inputs->fau.promote_immediates) {
+      bi_foreach_src(I, s) {
+         if (va_lower_constant_pair(ctx, I, s))
+            s++;
+      }
+      va_lower_two_constants(ctx, I);
+   }
 
    bi_foreach_src(I, s) {
       if (I->src[s].type == BI_INDEX_CONSTANT) {

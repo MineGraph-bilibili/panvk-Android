@@ -181,6 +181,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `004-kbase-page-size-helper` | 重新引入 `kbase_kmod_page_size()`（`sysconf(_SC_PAGESIZE)`），修复 jm-v9/023 等补丁引用该助手而参考基线已删除所导致的编译失败。 |
 | `005-driver-identity` | `VK_KHR_driver_properties` 上报的身份从 `panvk` / `PanVK-kbase beta.18-rc2 (Mesa 26.3.0-devel …)` 改为 `Panvk` / `Mesa 26.3.0-devel`，即 DXVK HUD、DXVKHUB 里显示的驱动名与版本。仅改字符串，不影响 GPU 行为。 |
 | `007-kraid-rc-upgrade` | kraid 编译器整体对齐本地 rc66：ISA 描述切到 `isa-v9-v14.xml`，新增 `opt_exec_units` / `opt_fuse` / `opt_normalize_consts` 三个 pass，编解码与指令集扩到 v14。 |
+| `008-compiler-tex` | NIR 增加 Panfrost 专用 tex 源与 `TEX_DUAL`，mediump 走 16-bit，Bifrost 常量排序/IDVS/repair-SSA 对齐本地，`bi_ra.c` 回到本地旧版求解器。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -207,6 +208,27 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 * **风险/注意**：kraid 是 Rust 组件，必须用 rustc + bindgen 环境验证；`meson.build` 里
   `isa_path` 由目录改为 `isa-v9-v14.xml` 文件名，若本地只保留 `isa-v15.xml` 会直接构建失败；
   该组是本系列最大的一组（约 5.7k 增 / 1.8k 删），回退时按整组反向应用。
+* **来源**：rc66 本地树（对齐本地行为）。
+
+#### `008-compiler-tex`（16 文件）
+
+* **机制**：NIR 侧新增 Panfrost 专用纹理源 `nir_tex_src_var_handle_pan` /
+  `nir_tex_src_var_buf_offset_pan` 与 `nir_texop_dual_pan`（`TEX_DUAL`），`nir_print.c`
+  补上打印；`pan_nir_lower_tex.c` 增加 TEX_DUAL 的双纹理合并且共享 sampler、cube 先降成
+  array、`VAR_*TEX*` 变体采样路径；`va_lower_constants.c` 让 FAU 常量提升按 64-bit LUT
+  预算记账；`pan_compiler.c` 把 `USE_KRAID_ALL` 扩到全部阶段、v11+ 的 kraid 不再
+  `lower_txp`，并加入寄存器/管线占用统计；`float16.rs` 增加 `F16::ONE`。
+  Bifrost 后端：`bifrost_compile.c` 常量排序改按数值降序比较（FAU 阈值才正确）、
+  `bifrost_nir.c` 调整 mem-vectorize / IDVS 特化 / lower 顺序、`bi_repair_ssa.c` 用稀疏
+  map 重写。PanVK 侧 `panvk_vX_shader.c` 默认开启 mediump 16-bit
+  （`PANVK_NO_MEDIUMP=1` 关闭）并写进 shader hash，`panvk_vX_meta_desc_copy.c` 与
+  `panvk_vX_nir_lower_descriptors.c` 改为带位置信息的返回码与无条件 `memcpy`。
+* **收益**：mediump 的 ALU/纹理结果/颜色输出真正跑在 16 bit（Mali-G57 上 mediump 纹理
+  填充快约 20%）；`TEX_DUAL` 让两张窄句柄纹理共用一次发射；常量排序修好了 FAU 容量阈值。
+* **风险/注意**：`bi_ra.c` 用本地**旧版**线性约束求解器（单 affinity、`spill_node` +
+  snapshot/restore + coalesce）覆盖仓库里**较新**的 lcra（forced/pending/failed 与 32/64
+  两次尝试），这是按“本地行为为准”的决定，上游后续修复将不会自动带入；mediump 16-bit 会
+  改变 shader 代码生成，遇到精度问题用 `PANVK_NO_MEDIUMP=1` 回退。
 * **来源**：rc66 本地树（对齐本地行为）。
 
 ---

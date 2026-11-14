@@ -4218,9 +4218,11 @@ bi_pack_clauses(bi_context *ctx, struct util_dynarray *binary, unsigned offset)
 static int
 compare_u32(const void* a, const void* b, void* _)
 {
-   const uint32_t va = (uintptr_t)a;
-   const uint32_t vb = (uintptr_t)b;
-   return va - vb;
+   /* Descending: the threshold below is the count of the last constant that
+    * still fits in the FAU. */
+   const uint32_t va = *(const uint32_t *)a;
+   const uint32_t vb = *(const uint32_t *)b;
+   return (va < vb) - (va > vb);
 }
 
 static bi_context *

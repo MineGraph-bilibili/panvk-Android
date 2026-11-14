@@ -291,6 +291,13 @@ nir_intrinsic_pan_bi_tex_flags(const nir_intrinsic_instr *instr)
    return flags;
 }
 
+enum pan_bi_sample_loc {
+   PAN_SAMPLE_LOC_CENTER,
+   PAN_SAMPLE_LOC_CENTROID,
+   PAN_SAMPLE_LOC_SAMPLE,
+   PAN_SAMPLE_LOC_EXPLICIT,
+};
+
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct pan_va_tex_flags {
@@ -299,22 +306,18 @@ struct pan_va_tex_flags {
    bool array_enable : 1;
    bool texel_offset : 1;
    bool compare_enable : 1;
+   bool projection_enable : 1;
    unsigned lod_mode : 3;
    bool derivative_enable : 1;
    bool force_delta_enable : 1;
    bool lod_bias_disable : 1;
    bool lod_clamp_disable : 1;
-   unsigned _pad : 20;
+   enum pan_bi_sample_loc var_sample_loc : 2;
+   bool var_buf_src_f16 : 1;
+   unsigned _pad : 16;
 };
 PRAGMA_DIAGNOSTIC_POP
 static_assert(sizeof(struct pan_va_tex_flags) == 4, "Must fit in uint32_t");
-
-enum pan_bi_sample_loc {
-   PAN_SAMPLE_LOC_CENTER,
-   PAN_SAMPLE_LOC_CENTROID,
-   PAN_SAMPLE_LOC_SAMPLE,
-   PAN_SAMPLE_LOC_EXPLICIT,
-};
 
 enum pan_bi_varying_name {
    PAN_VARYING_NAME_POINT = 0,
@@ -356,6 +359,8 @@ uint32_t pan_nir_collect_noperspective_varyings_fs(nir_shader *s);
 bool pan_nir_resize_varying_io(nir_shader *nir,
                                struct pan_varying_layout *varying_fmt,
                                const struct pan_varying_layout *varying_layout);
+
+bool pan_nir_opt_var_tex(nir_shader *nir, unsigned arch);
 
 bool pan_nir_fuse_io_cvt(nir_shader *nir, uint64_t gpu_id,
                          const struct pan_varying_layout *layout);

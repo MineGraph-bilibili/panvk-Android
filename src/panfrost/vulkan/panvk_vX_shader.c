@@ -31,6 +31,7 @@
 #include "util/memstream.h"
 #include "util/mesa-blake3.h"
 #include "util/shader_stats.h"
+#include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "util/u_hexdump.h"
 #include "util/u_memory.h"
@@ -431,12 +432,24 @@ panvk_get_nir_options(UNUSED struct vk_physical_device *vk_pdev,
    return pan_get_nir_shader_compiler_options(PAN_ARCH, stage, false);
 }
 
+/* RelaxedPrecision runs in 16 bits: ALU, texture results and fragment colour
+ * outputs, as the vendor driver does (Mali-G57: a mediump textured fill shader
+ * runs 20% faster there). PANVK_NO_MEDIUMP=1 keeps everything 32-bit. */
+DEBUG_GET_ONCE_BOOL_OPTION(panvk_no_mediump, "PANVK_NO_MEDIUMP", false)
+
+static bool
+panvk_mediump_16bit(void)
+{
+   return !debug_get_option_panvk_no_mediump();
+}
+
 static struct spirv_to_nir_options
 panvk_get_spirv_options(UNUSED struct vk_physical_device *vk_pdev,
                         UNUSED mesa_shader_stage stage,
                         const struct vk_pipeline_robustness_state *rs)
 {
    return (struct spirv_to_nir_options){
+      .mediump_16bit_alu = panvk_mediump_16bit(),
       .ubo_addr_format = panvk_buffer_ubo_addr_format(rs->uniform_buffers),
       .ssbo_addr_format = panvk_buffer_ssbo_addr_format(rs->storage_buffers),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
@@ -650,6 +663,18 @@ panvk_preprocess_nir(struct vk_physical_device *vk_pdev,
 {
    struct panvk_physical_device *pdev = to_panvk_physical_device(vk_pdev);
 
+   /* Lower mediump temporary vars before NIR has the chance to screw it up
+    * and delete the mediump information.  On the old back-end, this might be
+    * a performance regression because of all the extra f2f it may insert but
+    * Kraid is good enough at fusing float conversions into other ALU ops that
+    * it doesn't really matter.
+    */
+   if (pan_use_kraid(pdev->kmod.dev->props.gpu_id, nir->info.stage,
+                     nir->info.internal)) {
+      NIR_PASS(_, nir, nir_lower_mediump_vars,
+               nir_var_shader_temp | nir_var_function_temp);
+   }
+
    /* Ensure to regroup output variables at the same location */
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS(_, nir, nir_opt_vectorize_io_vars, nir_var_shader_out);
@@ -727,6 +752,22 @@ panvk_preprocess_nir(struct vk_physical_device *vk_pdev,
             core_max_id);
 
    pan_preprocess_nir(nir, pdev->kmod.dev->props.gpu_id);
+
+   /* A float texture result that is only used in 16 bits (RelaxedPrecision
+    * math) is returned in 16 bits: half the registers, and the texture unit's
+    * 16-bit path. */
+   if (panvk_mediump_16bit()) {
+      nir_opt_16bit_tex_image_options opt_16bit = {
+         .rounding_mode = nir_rounding_mode_undef,
+         .opt_tex_dest_types = nir_type_float,
+      };
+      bool progress = false;
+      NIR_PASS(progress, nir, nir_opt_16bit_tex_image, &opt_16bit);
+      if (progress) {
+         NIR_PASS(_, nir, nir_opt_algebraic);
+         NIR_PASS(_, nir, nir_opt_dce);
+      }
+   }
 }
 
 #if PAN_ARCH >= 9
@@ -2491,6 +2532,9 @@ panvk_hash_state(struct vk_physical_device *device,
 #endif
    }
 
+   const bool mediump_16bit = panvk_mediump_16bit();
+   _mesa_blake3_update(&blake3_ctx, &mediump_16bit, sizeof(mediump_16bit));
+
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
 
@@ -2865,11 +2909,7 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
        * then let nir_opt_non_uniform_access figure out which ones can really
        * be nonuniform based on divergence analysis */
       NIR_PASS(_, nir, nir_shader_instructions_pass,
-               mark_all_access_non_uniform,
-               nir_metadata_control_flow |
-                  nir_metadata_live_defs |
-                  nir_metadata_instr_index,
-               NULL);
+               mark_all_access_non_uniform, nir_metadata_all, NULL);
    }
 #endif
 
@@ -2959,6 +2999,12 @@ panvk_lower_nir_io(nir_shader *nir)
    NIR_PASS(_, nir, nir_opt_constant_folding);
 
    pan_nir_lower_mediump_io(nir);
+
+   /* RelaxedPrecision colour outputs reach the blend unit in 16 bits; the blend
+    * descriptor follows the type (fs_info->bifrost.blend[].type). Before
+    * pan_nir_lower_fs_outputs. */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && panvk_mediump_16bit())
+      NIR_PASS(_, nir, nir_lower_mediump_io, nir_var_shader_out, 0, false);
 }
 
 static bool
@@ -3965,16 +4011,15 @@ panvk_compile_shader(struct panvk_device *dev,
 
       nir_shader *nir = info->nir;
 
-      bool allow_merging_workgroups = false;
 #if PAN_ARCH >= 9
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-      allow_merging_workgroups =
+      variant->info.cs.allow_merging_workgroups =
          valhall_can_merge_workgroups(nir);
 
       /* With merged workgroups, we need to use different divergence analysis
        * options to take into account that threads from different workgroups
        * may be in the same subgroup */
-      if (allow_merging_workgroups) {
+      if (variant->info.cs.allow_merging_workgroups) {
          nir->options = pan_get_nir_shader_compiler_options(
             PAN_ARCH, MESA_SHADER_COMPUTE, true);
          /* Invalidate the old divergence analysis */
@@ -3985,7 +4030,7 @@ panvk_compile_shader(struct panvk_device *dev,
 
       panvk_lower_nir(dev, nir, info->set_layout_count, info->set_layouts,
                       info->robustness, state, &shader->desc_info,
-                      allow_merging_workgroups);
+                      variant->info.cs.allow_merging_workgroups);
 
       variant->own_bin = true;
 
@@ -3996,8 +4041,6 @@ panvk_compile_shader(struct panvk_device *dev,
          panvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
          return result;
       }
-      /* pan_postprocess_nir() zeroes info, so store the decision last. */
-      variant->info.cs.allow_merging_workgroups = allow_merging_workgroups;
       break;
    }
 
@@ -4011,6 +4054,29 @@ panvk_compile_shader(struct panvk_device *dev,
          panvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
          return result;
       }
+   }
+
+   /* [rc38] Report every successfully compiled shader. */
+   {
+      static unsigned rc38_n;
+
+      if (rc38_n < 64) {
+         const struct panvk_shader_variant *v = &shader->variants[0];
+         const unsigned nv = panvk_shader_num_variants(info->stage);
+
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] SHADER[%u]: stage=%u nvar=%u bin0=%u "
+                           "bin1=%u spd0=%d spd1=%d out=0x%llx wrmem=%u "
+                           "sets=0x%x\n",
+                           rc38_n, (unsigned)info->stage, nv, v[0].bin_size,
+                           nv > 1 ? v[1].bin_size : 0,
+                           (int)panvk_priv_mem_check_alloc(v[0].code_mem),
+                           nv > 1 ? (int)panvk_priv_mem_check_alloc(v[1].code_mem)
+                                  : -1,
+                           (unsigned long long)info->nir->info.outputs_written,
+                           (unsigned)info->nir->info.writes_memory,
+                           shader->desc_info.used_set_mask);
+      }
+      rc38_n++;
    }
 
    *shader_out = &shader->vk;
@@ -4069,6 +4135,20 @@ compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 {
    struct panvk_device *dev = to_panvk_device(vk_dev);
    bool use_static_noperspective = false;
+
+   /* [rc38] Is the shader compiler called at all? */
+   {
+      static unsigned rc38_n;
+      uint32_t rc38_mask = 0;
+
+      for (uint32_t rc38_k = 0; rc38_k < shader_count; rc38_k++)
+         rc38_mask |= 1u << (uint32_t)infos[rc38_k].stage;
+
+      if (rc38_n < 64)
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] PIPECOMPILE[%u]: nstages=%u "
+                           "stages=0x%x\n", rc38_n, shader_count, rc38_mask);
+      rc38_n++;
+   }
    uint32_t noperspective_varyings = 0;
    VkResult result;
    int32_t i;
@@ -4144,6 +4224,8 @@ compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    return VK_SUCCESS;
 
 err_cleanup:
+   PANVK_DIAG_PRINTF("[PANVK-DIAG] PIPECOMPILE FAIL: stage=%u result=%d\n",
+                     (unsigned)infos[i].stage, (int)result);
    /* Clean up all the shaders before this point */
    for (int32_t j = 0; j < i; j++)
       panvk_shader_destroy(&dev->vk, shaders_out[j], pAllocator);
@@ -4774,7 +4856,7 @@ emit_varying_attrs(struct panvk_pool *desc_pool,
 
    *mem = panvk_pool_alloc_desc_array(desc_pool, varying_count, ATTRIBUTE);
    if (!panvk_priv_mem_check_alloc(*mem))
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    panvk_priv_mem_write_array(*mem, 0, struct mali_attribute_packed,
                               varying_count, attrs) {
@@ -4843,8 +4925,12 @@ panvk_per_arch(link_shaders)(struct panvk_pool *desc_pool,
    const struct pan_varying_slot *vs_psiz_slot =
       pan_varying_layout_find_slot(vs_layout, VARYING_SLOT_PSIZ);
 
+   /* The position buffer exists even when the vertex shader writes no gl_Position, which is how
+    * DXVK compiles a D3D vertex shader without SV_Position (one that feeds a hull or geometry
+    * shader, or stream output only): the vertex job accesses it regardless, and a NULL buffer
+    * page-faults, which kills every job of the context. */
+   buf_strides[PANVK_VARY_BUF_POSITION] = sizeof(uint32_t) * 4;
    if (vs_pos_slot) {
-      buf_strides[PANVK_VARY_BUF_POSITION] = sizeof(uint32_t) * 4;
       buf_sizes[VARYING_SLOT_POS] =
          nir_alu_type_get_type_size(vs_pos_slot->alu_type);
    }

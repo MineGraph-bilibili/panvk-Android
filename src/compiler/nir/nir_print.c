@@ -2020,6 +2020,9 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
    case nir_texop_sample_pos_nv:
       fprintf(fp, "sample_pos_nv ");
       break;
+   case nir_texop_dual_pan:
+      fprintf(fp, "dual_pan ");
+      break;
    case nir_texop_gradient_pan:
       fprintf(fp, "gradient_pan ");
       break;
@@ -2161,6 +2164,12 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
          break;
       case nir_tex_src_plane:
          fprintf(fp, "(plane)");
+         break;
+      case nir_tex_src_var_handle_pan:
+         fprintf(fp, "(var_handle_pan)");
+         break;
+      case nir_tex_src_var_buf_offset_pan:
+         fprintf(fp, "(var_buf_offset_pan)");
          break;
 
       default:

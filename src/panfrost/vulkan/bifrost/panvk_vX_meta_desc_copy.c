@@ -435,19 +435,19 @@ panvk_per_arch(meta_get_copy_desc_job)(
 
    uint64_t desc_copy_rsd = panvk_meta_desc_copy_rsd(dev);
    if (!desc_copy_rsd)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct pan_ptr push_uniforms =
       panvk_cmd_alloc_dev_mem(cmdbuf, desc, sizeof(copy_info), 16);
 
    if (!push_uniforms.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    memcpy(push_uniforms.cpu, &copy_info, sizeof(copy_info));
 
    *job_desc = panvk_cmd_alloc_desc(cmdbuf, COMPUTE_JOB);
    if (!job_desc->gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    /* Given the per-stage max descriptors limit, we should never
     * reach the workgroup dimension limit. */
@@ -469,7 +469,7 @@ panvk_per_arch(meta_get_copy_desc_job)(
    struct pan_tls_info tlsinfo = {0};
    struct pan_ptr tls = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
    if (!tls.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    GENX(pan_emit_tls)(&tlsinfo, tls.cpu);
 

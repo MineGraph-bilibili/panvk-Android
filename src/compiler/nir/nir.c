@@ -3543,6 +3543,9 @@ nir_tex_instr_result_size(const nir_tex_instr *instr)
    case nir_texop_sample_pos_nv:
       return 4;
 
+   case nir_texop_dual_pan:
+      return (instr->is_shadow && instr->is_new_style_shadow) ? 2 : 8;
+
    case nir_texop_gradient_pan:
       return 2;
 
@@ -3694,6 +3697,8 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
    case nir_tex_src_block_size:
    case nir_tex_src_texture_heap_offset:
    case nir_tex_src_sampler_heap_offset:
+   case nir_tex_src_var_handle_pan:
+   case nir_tex_src_var_buf_offset_pan:
       return nir_type_uint;
 
    case nir_num_tex_src_types:
