@@ -635,6 +635,11 @@ struct panvk_cmd_buffer {
     * segments; the builders hold the last one, with gfx.render.vmr_samples.
     */
    struct util_dynarray vmr_segs;
+
+   /* csf-v11 227: device TLS BOs (struct panvk_priv_bo *) this command
+    * buffer's TLS descriptors point at, released when it is reset or
+    * freed, so outgrown device TLS BOs can go. */
+   struct util_dynarray dev_tls_refs;
 };
 
 struct panvk_vmr_segment {
@@ -1173,6 +1178,11 @@ cs_emit_layer_fragment_state(struct cs_builder *b, struct cs_index fbd_ptr)
                 offsetof(struct panvk_fb_layer_state, dcd_pointer));
 }
 #endif /* PAN_ARCH >= 14 */
+
+/* csf-v11 232: copy the command buffer's TLS pointer (and stack size) into a
+ * per-job TSD on the GPU. */
+void panvk_per_arch(cmd_copy_tls_to_tsd)(struct panvk_cmd_buffer *cmdbuf,
+                                         struct cs_builder *b, uint64_t tsd);
 
 void panvk_per_arch(collect_crc_invalidation_deps)(const VkDependencyInfo *info,
                                                    struct panvk_cs_deps *deps,

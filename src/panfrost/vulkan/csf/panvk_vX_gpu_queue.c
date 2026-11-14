@@ -22,12 +22,14 @@
 
 #include "util/bitscan.h"
 #include "util/os_time.h"
+#include "util/u_debug.h"
 #include "vk_drm_syncobj.h"
 #include "vk_log.h"
 #include "vk_sync.h"
 
 #ifdef HAVE_PAN_KMOD_KBASE
 #include <inttypes.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include "drm-uapi/mali_kbase_ioctl.h"
 #include "kmod/kbase_kmod.h"
@@ -122,11 +124,36 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                           uint64_t target_seqno, uint32_t rekick_mask,
                           bool allow_ring_drain, uint64_t abs_timeout_ns);
 
+static VkResult
+kbase_wait_sync_targets(
+   void *data, const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
+   uint64_t abs_timeout_ns);
+
 static bool
 gpu_queue_uses_kbase(const struct panvk_device *dev)
 {
    return to_panvk_physical_device(dev->vk.physical)->kbase_node_path[0] !=
           '\0';
+}
+
+/* Conservative submission mode for A/B diagnosis, enabled with
+ * PANVK_KBASE_SAFE_SUBMIT=1:
+ * - emit the 0x233 cache clean/invalidate before every job instead of once
+ *   per subqueue and batch;
+ * - never treat "the firmware consumed the ring entry" as job completion;
+ * - drain the graphics subqueues before replacing the tiler heap, and destroy
+ *   retired heaps inline rather than handing them to the heap worker.
+ * This restores the serialization the aggressive submit/recycling paths
+ * removed, so a fault that disappears in this mode is caused by them. */
+static bool
+kbase_safe_submit(void)
+{
+   static int safe = -1;
+
+   if (safe < 0)
+      safe = debug_get_bool_option("PANVK_KBASE_SAFE_SUBMIT", false) ? 1 : 0;
+
+   return safe;
 }
 
 static uint32_t
@@ -482,6 +509,86 @@ kbase_tiler_heap_max_chunks(const struct panvk_physical_device *phys_dev)
    return MAX2(phys_dev->csf.tiler.max_chunks,
                DIV_ROUND_UP(200u << 20, phys_dev->csf.tiler.chunk_size));
 }
+/* Heap geometry used by the kbase backend, overridable with
+ * PANVK_KBASE_HEAP_CHUNKS=<initial>[,<max>].  The panthor defaults were sized
+ * for a much larger heap and leave several MiB resident per context; the
+ * initial chunk count is what matters for memory while idle. */
+static void
+kbase_heap_chunks(const struct panvk_physical_device *phys_dev,
+                  uint32_t *initial_chunks, uint32_t *max_chunks)
+{
+   static uint32_t initial, max;
+
+   if (!initial) {
+      uint32_t initial_opt = MIN2(phys_dev->csf.tiler.initial_chunks, 4);
+      uint32_t max_opt = kbase_tiler_heap_max_chunks(phys_dev);
+      const char *str = debug_get_option("PANVK_KBASE_HEAP_CHUNKS", NULL);
+
+      if (str && str[0]) {
+         char *end = NULL;
+         long v = strtol(str, &end, 0);
+
+         if (end != str && v > 0 && v <= UINT32_MAX)
+            initial_opt = v;
+         if (end && *end == ',') {
+            const char *p = end + 1;
+
+            v = strtol(p, &end, 0);
+            if (end != p && v > 0 && v <= UINT32_MAX)
+               max_opt = MAX2(max_opt, (uint32_t)v);
+         }
+      }
+
+      initial = initial_opt;
+      max = max_opt;
+      mesa_logi("kbase: tiler heaps %u initial / %u max chunks of %u KiB",
+                initial, max, phys_dev->csf.tiler.chunk_size / 1024);
+   }
+
+   *initial_chunks = initial;
+   *max_chunks = max;
+}
+
+/* Descriptor slots in use (PANVK_KBASE_HEAP_SLOTS, default 4): fewer slots
+ * means fewer live heap contexts. */
+static uint32_t
+kbase_heap_slots(void)
+{
+   static int slots = -1;
+
+   if (slots < 0)
+      slots = CLAMP((int)debug_get_num_option("PANVK_KBASE_HEAP_SLOTS",
+                                              PANVK_KBASE_HEAP_SLOTS),
+                    2, PANVK_KBASE_HEAP_SLOTS);
+
+   return slots;
+}
+
+/* How many heap TERMs the panvk_heap worker may have outstanding; beyond it
+ * the caller destroys inline (PANVK_KBASE_HEAP_TERM_MAX, default 2). */
+static uint32_t
+kbase_heap_destroy_max(void)
+{
+   static int max = -1;
+
+   if (max < 0)
+      max = CLAMP((int)debug_get_num_option("PANVK_KBASE_HEAP_TERM_MAX", 2),
+                  0, PANVK_KBASE_DESTROY_RING);
+
+   return max;
+}
+
+static bool
+kbase_heap_eager_term(void)
+{
+   static int eager = -1;
+
+   if (eager < 0)
+      eager = debug_get_bool_option("PANVK_KBASE_HEAP_EAGER_TERM", true) ? 1 : 0;
+
+   return eager;
+}
+
 static_assert(PANVK_KBASE_HEAP_SLOTS * KBASE_HEAP_DESC_SLOT_STRIDE <= 4096,
               "heap descriptor slots overlap the geometry buffer");
 
@@ -789,6 +896,46 @@ kbase_subqueue_publish(struct panvk_gpu_queue *queue, uint32_t subqueue)
    kbase_kmod_csf_queue_kick(dev->kmod.dev, subq->kbase.ringbuf_dev);
 }
 
+/* Decode the command stream the GPU is stopped in for one subqueue.
+ * CS_EXTRACT points at the pending job's CALL: the two instructions right
+ * before it hold the callee stream address (MOVE48, opcode 1, address in
+ * bits 47:0) and its byte size (MOVE32, opcode 2, size in bits 31:0). */
+static void
+kbase_decode_pending_job(struct panvk_gpu_queue *queue, uint32_t subqueue)
+{
+   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+   struct panvk_subqueue *subq = &queue->subqueues[subqueue];
+
+   if (!dev->debug.decode_ctx)
+      return;
+
+   const uint8_t *output_page = (uint8_t *)subq->kbase.user_io + 8192;
+   uint64_t extract =
+      *(volatile uint64_t *)(output_page + CS_USER_IO_OUTPUT_CS_EXTRACT);
+   uint64_t call_addr_q =
+      kbase_ring_qword(subq,
+         (extract + KBASE_RINGBUF_SIZE - 16) % KBASE_RINGBUF_SIZE);
+   uint64_t call_size_q =
+      kbase_ring_qword(subq,
+         (extract + KBASE_RINGBUF_SIZE - 8) % KBASE_RINGBUF_SIZE);
+   uint64_t call_addr = call_addr_q & 0x0000ffffffffffffULL;
+   uint32_t call_size = (uint32_t)(call_size_q & 0xffffffffULL);
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(dev->vk.physical);
+
+   mesa_loge("kbase: pending call subqueue %u: stream 0x%" PRIx64
+             "/%u (opcodes 0x%" PRIx64 "/0x%" PRIx64 ")",
+             subqueue, call_addr, call_size,
+             call_addr_q >> 56, call_size_q >> 56);
+
+   if ((call_addr_q >> 56) != 0x1 || (call_size_q >> 56) != 0x2 ||
+       call_size < 8 || call_size > (1u << 20))
+      return;
+
+   pandecode_cs_binary(dev->debug.decode_ctx, call_addr, call_size,
+                       phys_dev->kmod.dev->props.gpu_id);
+}
+
 static VkResult
 kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                           uint64_t target_seqno, uint32_t rekick_mask,
@@ -851,7 +998,8 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
       kbase_cache_invalidate_range((const void *)cell, kbase_seqno_stride());
       if (cell->seqno >= target_seqno ||
           (PANVK_DEBUG(KBASE_DIAG) && *ls_copy >= target_seqno) ||
-          (allow_ring_drain && extract >= target_insert && !active))
+          (!kbase_safe_submit() && allow_ring_drain &&
+           extract >= target_insert && !active))
          break;
 
       if (cell->error) {
@@ -970,9 +1118,13 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                last_job_offset, subq->kbase.ringbuf_dev + last_job_offset,
                last_last_job_offset, subq->kbase.ringbuf_dev + last_last_job_offset);
             struct panvk_physical_device *phys_dev = to_panvk_physical_device(dev->vk.physical);
+            uint32_t ring_off = (uint32_t)(extract % KBASE_RINGBUF_SIZE);
+            uint32_t ring_pending = (uint32_t)(insert - extract);
+            if (ring_pending > KBASE_RINGBUF_SIZE - ring_off)
+               ring_pending = KBASE_RINGBUF_SIZE - ring_off;
             pandecode_cs_binary(dev->debug.decode_ctx,
-                                 subq->kbase.ringbuf_dev + last_last_job_offset,
-                                 insert - last_last_job_offset,
+                                 subq->kbase.ringbuf_dev + ring_off,
+                                 ring_pending,
                                  phys_dev->kmod.dev->props.gpu_id);
          }
 
@@ -999,6 +1151,13 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
       if (cqs_ret < 0) {
          int error_type = kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
 
+         if (error_type && prev_error_type != error_type) {
+            for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
+               kbase_log_subqueue_state(queue, i, "error snapshot");
+
+            kbase_log_queue_syncobjs(queue);
+         }
+
          if (dev->debug.decode_ctx && insert > extract && error_type) {
             // pandecode_user_msg(dev->debug.decode_ctx,
             //    "\nSubqueue %d Ringbuffer Trampoline [job %lu, gpu_va: %lx, cpu=%p, Size %u bytes, to %lx]:\n",
@@ -1010,11 +1169,13 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                extract, subq->kbase.ringbuf_dev + extract,
                last_job_offset, subq->kbase.ringbuf_dev + last_job_offset,
                last_last_job_offset, subq->kbase.ringbuf_dev + last_last_job_offset);
-            struct panvk_physical_device *phys_dev = to_panvk_physical_device(dev->vk.physical);
-            pandecode_cs_binary(dev->debug.decode_ctx,
-                                 subq->kbase.ringbuf_dev + extract,
-                                 insert - extract,
-                                 phys_dev->kmod.dev->props.gpu_id);
+            /* Decode all three pending job streams right away: each
+             * subqueue is stopped at its own CALL, and the pending streams
+             * are the interesting ones (the ring decode is huge and slowed
+             * the previous run down).  Skip the ring decode here; the
+             * watchdog branch still emits it. */
+            for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
+               kbase_decode_pending_job(queue, i);
          }
          prev_error_type = error_type;
       }
@@ -1057,20 +1218,8 @@ kbase_queue_wait_current(struct panvk_gpu_queue *queue,
       }
    }
 
-   mesa_logi("%s: wait completed successfully", __func__);
    return VK_SUCCESS;
 }
-
-/* All subqueues in one kbase queue group (CS i = subqueue i, the panthor
- * layout), created with the tiler OOM exception flag.  At max_chunks kbase
- * then answers with a NULL chunk instead of terminating the group, and the
- * firmware runs the TILER_OOM handler (incremental rendering) on a CS of that
- * group -- the fragment CS; with one group per subqueue the handler is
- * unreachable and every heap exhaustion ends in DEVICE_LOST.  On by default
- * only where verified: on v14 the first submit hangs (subqueue 1 timeout,
- * DEVICE_LOST).  PANVK_KBASE_TILER_IR=0/1 forces it. */
-DEBUG_GET_ONCE_BOOL_OPTION(kbase_one_group, "PANVK_KBASE_TILER_IR",
-                           PAN_ARCH == 11 || PAN_ARCH == 13)
 
 static void
 kbase_destroy_group(struct panvk_gpu_queue *queue)
@@ -1087,18 +1236,11 @@ kbase_destroy_group(struct panvk_gpu_queue *queue)
       pan_kmod_bo_put(subq->kbase.ringbuf_bo);
       subq->kbase.ringbuf_bo = NULL;
       subq->kbase.user_io = NULL;
-   }
 
-   /* In the one-group layout every subqueue holds the same handle. */
-   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
-      const uint32_t handle = queue->subqueues[i].kbase.group_handle;
-
-      if (handle == UINT32_MAX)
-         continue;
-      kbase_kmod_csf_group_destroy(dev->kmod.dev, handle);
-      for (uint32_t j = i; j < PANVK_SUBQUEUE_COUNT; j++) {
-         if (queue->subqueues[j].kbase.group_handle == handle)
-            queue->subqueues[j].kbase.group_handle = UINT32_MAX;
+      if (subq->kbase.group_handle != UINT32_MAX) {
+         kbase_kmod_csf_group_destroy(dev->kmod.dev,
+                                      subq->kbase.group_handle);
+         subq->kbase.group_handle = UINT32_MAX;
       }
    }
 }
@@ -1114,16 +1256,11 @@ kbase_create_group(struct panvk_gpu_queue *queue)
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
       queue->subqueues[i].kbase.group_handle = UINT32_MAX;
 
-   const bool one_group = debug_get_option_kbase_one_group();
-
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
       struct panvk_subqueue *subq = &queue->subqueues[i];
 
-      if (one_group && i > 0) {
-         subq->kbase.group_handle = queue->subqueues[0].kbase.group_handle;
-      } else if (kbase_kmod_csf_group_create(
-                    dev->kmod.dev, one_group ? PANVK_SUBQUEUE_COUNT : 1,
-                    one_group, &subq->kbase.group_handle)) {
+      if (kbase_kmod_csf_group_create(dev->kmod.dev, 1,
+                                      &subq->kbase.group_handle)) {
          result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                                "Failed to create a kbase queue group");
          goto err_destroy_group;
@@ -1173,7 +1310,7 @@ kbase_create_group(struct panvk_gpu_queue *queue)
       }
 
       subq->kbase.user_io = kbase_kmod_csf_queue_bind(
-         dev->kmod.dev, subq->kbase.group_handle, one_group ? i : 0,
+         dev->kmod.dev, subq->kbase.group_handle, 0,
          subq->kbase.ringbuf_dev,
          KBASE_RINGBUF_SIZE);
       if (!subq->kbase.user_io) {
@@ -2115,11 +2252,14 @@ kbase_spare_heap_job(void *job, void *gdata, int thread_index)
    const struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(dev->vk.physical);
 
+   uint32_t initial_chunks, max_chunks;
+
+   kbase_heap_chunks(phys_dev, &initial_chunks, &max_chunks);
+
    /* On failure ctx stays 0 and the renewal creates the heap itself. */
    if (kbase_kmod_csf_tiler_heap_create(
           dev->kmod.dev, queue->tiler_heap.chunk_size,
-          phys_dev->csf.tiler.initial_chunks,
-          kbase_tiler_heap_max_chunks(phys_dev), 65535, 0,
+          initial_chunks, max_chunks, 65535, 0,
           &queue->kbase_spare_heap.ctx, &queue->kbase_spare_heap.first_chunk))
       queue->kbase_spare_heap.ctx = 0;
 }
@@ -2203,17 +2343,26 @@ kbase_destroy_heaps_kick(struct panvk_gpu_queue *queue)
 }
 
 /* Hands a retired heap context to the worker thread, or destroys it inline if
- * no worker exists or the ring is full (neither happens in practice). */
+ * no worker exists or the backlog is full (PANVK_KBASE_HEAP_TERM_MAX, default
+ * 2: a deep backlog keeps the chunk allocator lagging behind the GPU). */
 static void
 kbase_queue_heap_destroy(struct panvk_gpu_queue *queue, uint64_t ctx)
 {
+   /* PANVK_KBASE_SAFE_SUBMIT keeps the TERM on the submitting thread: the
+    * worker defers chunk/VA release, which is exactly the window under test. */
+   if (kbase_safe_submit()) {
+      struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
+      return;
+   }
+
    uint32_t head =
       __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_RELAXED);
    uint32_t tail =
       __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_ACQUIRE);
 
    if (!queue->kbase_spare_heap.enabled ||
-       head - tail >= PANVK_KBASE_DESTROY_RING) {
+       head - tail >= kbase_heap_destroy_max()) {
       struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
       kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
       return;
@@ -2235,6 +2384,8 @@ kbase_spare_heap_init(struct panvk_gpu_queue *queue)
    queue->kbase_destroy.head = 0;
    queue->kbase_destroy.tail = 0;
    queue->kbase_destroy.job_pending = false;
+   queue->kbase_heap_slots = kbase_heap_slots();
+   queue->kbase_heap_eager_term = kbase_heap_eager_term();
    kbase_spare_heap_kick(queue);
 }
 
@@ -2321,12 +2472,15 @@ init_tiler(struct panvk_gpu_queue *queue)
       /* Match the Valhall G610/G710 kbase reference.  The panthor-derived
        * limit of 64 can strand large geometry workloads on the tiler iterator;
        * larger multi-GiB limits can trigger Android's global OOM killer. */
-      const uint32_t tiler_heap_max_chunks =
+      uint32_t tiler_heap_max_chunks =
          kbase_tiler_heap_max_chunks(phys_dev);
 
+      uint32_t initial_chunks;
+
+      kbase_heap_chunks(phys_dev, &initial_chunks, &tiler_heap_max_chunks);
       if (kbase_kmod_csf_tiler_heap_create(
              dev->kmod.dev, tiler_heap->chunk_size,
-             phys_dev->csf.tiler.initial_chunks, tiler_heap_max_chunks,
+             initial_chunks, tiler_heap_max_chunks,
              65535, tiler_heap_mem_group, &heap_ctx_va, &first_chunk_va)) {
          result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                                "Failed to create a tiler heap context");
@@ -2471,8 +2625,7 @@ kbase_try_destroy_retired_heap(struct panvk_gpu_queue *queue)
            queue->kbase_retired_heap_count *
               sizeof(queue->kbase_retired_heaps[0]));
 
-   return queue->kbase_retired_heap_count <
-          ARRAY_SIZE(queue->kbase_retired_heaps);
+   return queue->kbase_retired_heap_count < queue->kbase_heap_slots - 1;
 }
 
 static VkResult
@@ -2482,31 +2635,50 @@ kbase_renew_tiler_heap(struct panvk_gpu_queue *queue)
    const struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(dev->vk.physical);
    struct panvk_tiler_heap *tiler_heap = &queue->tiler_heap;
-   const uint32_t max_chunks = kbase_tiler_heap_max_chunks(phys_dev);
+   uint32_t max_chunks = kbase_tiler_heap_max_chunks(phys_dev);
    uint64_t new_ctx, first_chunk;
 
-   /* Hold at most PANVK_KBASE_HEAP_SLOTS - 1 retired contexts: if they are
-    * all still firmware-visible, skip this renewal (VK_INCOMPLETE) and retry
-    * on a later graphics submission.  The next descriptor slot belonged to
-    * the oldest heap, which is destroyed by now. */
+   /* SAFE mode: let every job already handed to the graphics subqueues retire
+    * before the tiler heap it references is replaced and freed. */
+   if (kbase_safe_submit()) {
+      uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
+
+      targets[PANVK_SUBQUEUE_VERTEX_TILER] =
+         queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs;
+      targets[PANVK_SUBQUEUE_FRAGMENT] =
+         queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs;
+
+      VkResult result = kbase_wait_sync_targets(queue, targets, UINT64_MAX);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
+   /* Hold at most kbase_heap_slots - 1 retired contexts: if they are all
+    * still firmware-visible, skip this renewal (VK_INCOMPLETE) and retry on a
+    * later graphics submission.  The next descriptor slot belonged to the
+    * oldest heap, which is destroyed by now. */
    if (!kbase_try_destroy_retired_heap(queue))
       return VK_INCOMPLETE;
 
    new_ctx = kbase_spare_heap_take(queue, &first_chunk);
-   if (!new_ctx &&
-       kbase_kmod_csf_tiler_heap_create(
-          dev->kmod.dev, tiler_heap->chunk_size,
-          phys_dev->csf.tiler.initial_chunks, max_chunks, 65535, 0,
-          &new_ctx, &first_chunk)) {
-      return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                          "Failed to renew the kbase tiler heap");
+   if (!new_ctx) {
+      uint32_t initial_chunks;
+
+      kbase_heap_chunks(phys_dev, &initial_chunks, &max_chunks);
+      if (kbase_kmod_csf_tiler_heap_create(
+             dev->kmod.dev, tiler_heap->chunk_size,
+             initial_chunks, max_chunks, 65535, 0,
+             &new_ctx, &first_chunk)) {
+         return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                             "Failed to renew the kbase tiler heap");
+      }
    }
    kbase_spare_heap_kick(queue);
 
    uint64_t old_ctx = tiler_heap->context.dev_addr;
    tiler_heap->context.dev_addr = new_ctx;
 
-   const uint32_t slot = (queue->kbase_heap_slot + 1) % PANVK_KBASE_HEAP_SLOTS;
+   const uint32_t slot = (queue->kbase_heap_slot + 1) % queue->kbase_heap_slots;
    const uint32_t slot_offset = slot * KBASE_HEAP_DESC_SLOT_STRIDE;
    panvk_priv_mem_write_desc(tiler_heap->desc, slot_offset, TILER_HEAP, cfg) {
       cfg.size = tiler_heap->chunk_size;
@@ -3105,6 +3277,7 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
                                        qsubmit->latest_flush,
                                        submit->phys_dev->kmod.dev->props.gpu_id,
                                        queue->kbase_gpu_waits[qsubmit->queue_index],
+                                       kbase_safe_submit() ||
                                        !(flushed & BITFIELD_BIT(qsubmit->queue_index)));
       if (result != VK_SUCCESS)
          return vk_queue_set_lost(&queue->vk, "kbase: ring emission failed");
@@ -3145,6 +3318,13 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
       else
          queue->kbase_tiler_work_count += submit->tiler_work_estimate;
    }
+
+   /* Reclaim retired heaps as soon as their graphics work completed instead
+    * of waiting for the next renewal, so a retired heap and its chunks stay
+    * resident for at most one submission. */
+   if (touched && queue->kbase_heap_eager_term &&
+       queue->kbase_retired_heap_count)
+      kbase_try_destroy_retired_heap(queue);
 
    uint64_t renew_work = kbase_tiler_heap_renew_work();
    if (submit->tiler_work_estimate &&
@@ -3365,6 +3545,8 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
 
    if (vk_queue_is_lost(vk_queue))
       return VK_ERROR_DEVICE_LOST;
+
+   panvk_import_probe_tick();
 
    if (vk_queue_submit_has_bind(vk_submit)) {
       struct panvk_gpu_queue *queue = container_of(vk_queue, struct panvk_gpu_queue, vk);

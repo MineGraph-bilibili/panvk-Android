@@ -23,7 +23,7 @@ panvk_cmd_alloc_from_pool(struct panvk_cmd_buffer *cmdbuf,
 
    if (!ptr.gpu) {
       VkResult error =
-         panvk_catch_indirect_alloc_failure(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         panvk_catch_indirect_alloc_failure(panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__));
       vk_command_buffer_set_error(&cmdbuf->vk, error);
    }
 

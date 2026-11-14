@@ -182,6 +182,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `005-driver-identity` | `VK_KHR_driver_properties` 上报的身份从 `panvk` / `PanVK-kbase beta.18-rc2 (Mesa 26.3.0-devel …)` 改为 `Panvk` / `Mesa 26.3.0-devel`，即 DXVK HUD、DXVKHUB 里显示的驱动名与版本。仅改字符串，不影响 GPU 行为。 |
 | `007-kraid-rc-upgrade` | kraid 编译器整体对齐本地 rc66：ISA 描述切到 `isa-v9-v14.xml`，新增 `opt_exec_units` / `opt_fuse` / `opt_normalize_consts` 三个 pass，编解码与指令集扩到 v14。 |
 | `008-compiler-tex` | NIR 增加 Panfrost 专用 tex 源与 `TEX_DUAL`，mediump 走 16-bit，Bifrost 常量排序/IDVS/repair-SSA 对齐本地，`bi_ra.c` 回到本地旧版求解器。 |
+| `009-perf-lifecycle` | 命令池自动裁剪窗口、TLS 稀疏化/收缩、kbase 稀疏缓冲与回读镜像、tiler heap 槽位与终止策略对齐本地。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -230,6 +231,34 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
   两次尝试），这是按“本地行为为准”的决定，上游后续修复将不会自动带入；mediump 16-bit 会
   改变 shader 代码生成，遇到精度问题用 `PANVK_NO_MEDIUMP=1` 回退。
 * **来源**：rc66 本地树（对齐本地行为）。
+
+#### `009-perf-lifecycle`（13 文件）
+
+* **机制**：
+  * `panvk_cmd_pool.c/h`：命令池按两次 reset 窗口（`PANVK_CMD_POOL_AUTOTRIM_WINDOW`，
+    默认 64）统计各 free list 的最大回收量并留 25% 余量做自动裁剪
+    （`PANVK_CMD_POOL_AUTOTRIM=0` 关闭），避免 DXVK 每帧 reset 后池无限增长。
+  * `csf/panvk_vX_cmd_buffer.c`：设备 TLS 改为按存在核数稀疏化
+    （`PANVK_TLS_SPARSE`，kbase 默认开）、超龄 BO 可释放（`PANVK_TLS_FREE_OLD`）、
+    空闲超过 `PANVK_TLS_SHRINK_MS`（默认 10 s）收缩；新增 `cmd_copy_tls_to_tsd()` 统一
+    把 TLS 指针与栈大小写进 per-job TSD；`BeginCommandBuffer` 顺手预热 BC 转码管线。
+  * `panvk_buffer.c/h`：kbase 没有原生 sparse VM，稀疏 Buffer 用一块可增长的
+    `sparse_backing` BO 承载（`sparse_backing_full` 记录是否已全部提交并可 CPU 映射）。
+  * `panvk_async_bind.c`：kbase 路径上的稀疏绑定改为“CPU 镜像 → 后备 BO 上传 + GPU 结果
+    回读”，并在 `panvk_queue_vm_bind` 处补 sparse sync/统计。
+  * `csf/panvk_vX_gpu_queue.c` + `csf/panvk_queue.h`：tiler heap 槽位数
+    （`PANVK_KBASE_HEAP_SLOTS`）、异步 TERM 并发上限（`PANVK_KBASE_HEAP_TERM_MAX`）、
+    每提交检测退休堆（`PANVK_KBASE_HEAP_EAGER_TERM`）与 `PANVK_KBASE_HEAP_CHUNKS`
+    几何参数均可配；等待 seqno 时解码三路 command stream；SAFE_SUBMIT 前向声明在此。
+  * `panvk_priv_bo.c/h`：新增 `alias_size`，kbase `MEM_ALIAS` 稀疏 TLS 别名区在
+    destroy 时按 SAME_VA 语义 `munmap`。
+* **收益**：长时间运行时命令池/私有 BO 不再无界增长；TLS 只按实际存在的核占地址空间；
+  稀疏 Buffer 在 kbase 上可用；退休 tiler heap 更早回收。
+* **风险/注意**：这一组是行为最多的改动，依赖 kbase BO 语义（`MEM_ALIAS`、SAME_VA）与
+  多线程 worker；`PANVK_TLS_SPARSE=0` / `PANVK_TLS_FREE_OLD=0` / `PANVK_TLS_SHRINK_MS=0`
+  / `PANVK_KBASE_SAFE_SUBMIT=1` 是逐项回退开关。稀疏镜像目前只是 CPU 侧影子拷贝，
+  真实 sparse 语义仍需在 kbase 上验证。
+* **来源**：rc66 本地树（对齐本地行为；部分条目源自 csf-v11 226–232）。
 
 ---
 

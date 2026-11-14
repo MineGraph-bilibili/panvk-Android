@@ -4,6 +4,7 @@
  */
 
 #include <assert.h>
+#include <sys/mman.h>
 
 #include "vk_alloc.h"
 #include "vk_log.h"
@@ -22,6 +23,11 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
 {
    VkResult result;
    int ret;
+
+   if (size >= (8ull << 20))
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo_create size=%llu MiB flags=0x%x\n",
+              (unsigned long long)(size >> 20), flags);
+
    struct panvk_priv_bo *priv_bo =
       vk_zalloc(&dev->vk.alloc, sizeof(*priv_bo), 8, scope);
 
@@ -42,6 +48,9 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
       priv_bo->addr.host =
          pan_kmod_bo_mmap(bo, PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
       if (priv_bo->addr.host == MAP_FAILED) {
+         if (size >= (8ull << 20))
+            PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo mmap FAIL size=%llu MiB "
+                    "errno=%d\n", (unsigned long long)(size >> 20), errno);
          result = panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
          goto err_put_bo;
       }
@@ -71,11 +80,20 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
 
    ret = pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
    if (ret) {
+      if (size >= (8ull << 20))
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo vm_bind FAIL size=%llu MiB "
+                 "ret=%d errno=%d\n", (unsigned long long)(size >> 20), ret,
+                 errno);
       result = panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       goto err_return_va;
    }
 
    priv_bo->addr.dev = op.va.start;
+
+   if (size >= (8ull << 20))
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo ok size=%llu MiB flags=0x%x "
+              "va=0x%llx host=%p\n", (unsigned long long)(size >> 20), flags,
+              (unsigned long long)priv_bo->addr.dev, priv_bo->addr.host);
 
    panvk_address_binding_report(dev, NULL, priv_bo->addr.dev,
                                 pan_kmod_bo_size(priv_bo->bo),
@@ -163,6 +181,11 @@ panvk_priv_bo_destroy(struct panvk_priv_bo *priv_bo)
                                pan_kmod_bo_size(priv_bo->bo));
       assert(!ret);
    }
+
+   /* csf-v11 230: a kbase alias region is a SAME_VA region; munmap()
+    * tears it down (and drops its reference on the BO pages). */
+   if (priv_bo->alias_size)
+      munmap((void *)(uintptr_t)priv_bo->addr.dev, priv_bo->alias_size);
 
    pan_kmod_bo_put(priv_bo->bo);
    vk_free(&dev->vk.alloc, priv_bo);

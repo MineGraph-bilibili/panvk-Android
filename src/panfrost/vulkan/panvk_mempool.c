@@ -41,6 +41,12 @@ panvk_pool_alloc_backing(struct panvk_pool *pool, size_t sz)
                             panvk_get_gpu_page_size(pool->dev));
    struct panvk_priv_bo *bo = NULL;
 
+   if (bo_sz >= (8ull << 20))
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] pool backing slab=%zu req=%zu "
+              "bo_sz=%llu MiB flags=0x%x owns=%d pool=%p\n",
+              pool->base.slab_size, sz, (unsigned long long)(bo_sz >> 20),
+              pool->props.create_flags, (int)pool->props.owns_bos, pool);
+
    /* If there's a free BO in our BO pool, let's pick it. */
    if (pool->bo_pool && bo_sz == pool->base.slab_size &&
        !list_is_empty(&pool->bo_pool->free_bos)) {
@@ -153,6 +159,15 @@ panvk_pool_alloc_mem(struct panvk_pool *pool, struct panvk_pool_alloc_info info)
          panvk_priv_bo_ref(bo);
    }
 
+   if (!bo) {
+      /* Pool allocations are indirect; make failures visible before the
+       * caller turns them into a VkResult (which may be lost on abort). */
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] pool alloc FAIL size=%zu align=%u "
+              "slab=%zu flags=0x%x owns=%d pool=%p errno=%d\n",
+              info.size, info.alignment, pool->base.slab_size,
+              pool->props.create_flags, (int)pool->props.owns_bos, pool, errno);
+   }
+
    /* Track how far allocations have reached so panvk_pool_flush_maps() can
     * flush only the written prefix.  Only pool-owned BOs are flushed through
     * the pool lists. */
@@ -187,6 +202,13 @@ panvk_pool_alloc_aligned(struct panvk_pool *pool, size_t sz, unsigned alignment)
    /* We just return the host/dev address, so callers can't
     * release the BO ref they acquired. */
    assert(pool->props.owns_bos);
+
+   if (sz >= (8ull << 20))
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] pool alloc_aligned size=%llu MiB "
+              "align=%u slab=%zu flags=0x%x pool=%p caller=%p self=%p\n",
+              (unsigned long long)(sz >> 20), alignment,
+              pool->base.slab_size, pool->props.create_flags, pool,
+              __builtin_return_address(0), (void *)panvk_pool_alloc_aligned);
 
    struct panvk_pool_alloc_info info = {
       .size = sz,

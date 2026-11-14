@@ -10,6 +10,174 @@
 #include "panvk_device_memory.h"
 #include "panvk_image.h"
 #include "panvk_macros.h"
+#include <sys/mman.h>
+
+/* --- kbase sparse readback mirror -------------------------------------
+ * kbase cannot remap pages into a sparse buffer's GPU VA, so GPU writes to
+ * a sparse buffer land in the backing BO while the app reads the bound
+ * memory through its own CPU mapping. Keep a bind table and periodically
+ * copy the backing windows back into the bound memory so CPU readback of
+ * GPU-finished data sees the real pixels.
+ */
+struct sparse_mirror_rec {
+   VkBuffer buf;
+   VkDeviceMemory mem;
+   uint64_t res_off;
+   uint64_t mem_off;
+   uint64_t size;
+};
+
+#define SPARSE_MIRROR_MAX 8192
+static struct sparse_mirror_rec sparse_mirror_recs[SPARSE_MIRROR_MAX];
+static uint32_t sparse_mirror_rec_count;
+static uint32_t sparse_mirror_cursor;
+static uint64_t sparse_mirror_bytes;
+static uint32_t sparse_mirror_submits;
+static uint64_t sparse_mirror_up_bytes;
+static uint64_t sparse_mirror_down_bytes;
+static uint32_t sparse_mirror_syncs;
+
+static void sparse_mirror_sync_bind(VkBuffer buf, VkDeviceMemory mem,
+                                    uint64_t res_off, uint64_t mem_off,
+                                    uint64_t size);
+
+void
+panvk_sparse_mirror_forget(VkBuffer buf, VkDeviceMemory mem)
+{
+   for (uint32_t i = 0; i < sparse_mirror_rec_count;) {
+      if ((buf != VK_NULL_HANDLE && sparse_mirror_recs[i].buf == buf) ||
+          (mem != VK_NULL_HANDLE && sparse_mirror_recs[i].mem == mem))
+         sparse_mirror_recs[i] = sparse_mirror_recs[--sparse_mirror_rec_count];
+      else
+         i++;
+   }
+}
+
+static void
+sparse_mirror_record(VkBuffer buf, VkDeviceMemory mem, uint64_t res_off,
+                     uint64_t mem_off, uint64_t size)
+{
+   uint32_t i;
+   for (i = 0; i < sparse_mirror_rec_count; i++) {
+      if (sparse_mirror_recs[i].buf == buf &&
+          sparse_mirror_recs[i].res_off == res_off) {
+         sparse_mirror_recs[i].mem = mem;
+         sparse_mirror_recs[i].mem_off = mem_off;
+         sparse_mirror_recs[i].size = size;
+         return;
+      }
+   }
+   if (sparse_mirror_rec_count >= SPARSE_MIRROR_MAX)
+      return;
+   sparse_mirror_recs[i] = (struct sparse_mirror_rec) {
+      .buf = buf, .mem = mem, .res_off = res_off,
+      .mem_off = mem_off, .size = size,
+   };
+   sparse_mirror_rec_count++;
+}
+
+static uint64_t
+sparse_mirror_run(uint64_t budget)
+{
+   uint64_t copied = 0;
+
+   if (sparse_mirror_rec_count == 0)
+      return 0;
+
+   for (uint32_t n = 0; n < sparse_mirror_rec_count && copied < budget; n++) {
+      struct sparse_mirror_rec *r =
+         &sparse_mirror_recs[sparse_mirror_cursor++ % sparse_mirror_rec_count];
+      VK_FROM_HANDLE(panvk_buffer, b, r->buf);
+      VK_FROM_HANDLE(panvk_device_memory, m, r->mem);
+
+      if (b->sparse_backing == NULL || !b->sparse_backing_full)
+         continue;
+      if (m->addr.host == NULL)
+         continue;
+
+      void *bhost = pan_kmod_bo_mmap(b->sparse_backing, PROT_READ,
+                                     MAP_SHARED, NULL);
+      if (bhost == NULL || bhost == MAP_FAILED)
+         continue;
+
+      uint64_t nbytes = MIN2(r->size, budget - copied);
+      memcpy((char *)m->addr.host + r->mem_off,
+             (char *)bhost + r->res_off, nbytes);
+      pan_kmod_bo_munmap(b->sparse_backing, bhost, 0);
+      copied += nbytes;
+   }
+   sparse_mirror_bytes += copied;
+   return copied;
+}
+
+/* --- CPU -> backing upload ---------------------------------------------
+ * The app writes guest memory through its CPU mapping and expects the GPU
+ * to see it.  kbase cannot alias those pages into the sparse buffer, so
+ * refresh the backing windows right before every GPU submission.
+ */
+static void
+sparse_mirror_cache_clean(const void *start, size_t size)
+{
+#if defined(__aarch64__)
+   uintptr_t ptr = (uintptr_t)start & ~(uintptr_t)63;
+   uintptr_t end = ((uintptr_t)start + size + 63) & ~(uintptr_t)63;
+
+   for (; ptr < end; ptr += 64)
+      __asm__ volatile("dc cvac, %0" : : "r"(ptr) : "memory");
+   __asm__ volatile("dsb sy" ::: "memory");
+#else
+   (void)start;
+   (void)size;
+#endif
+}
+
+void
+panvk_sparse_mirror_upload(void)
+{
+   static uint32_t upload_cursor;
+   static uint64_t upload_submits;
+   static uint64_t upload_bytes;
+   const uint64_t budget = 64ull << 20;
+   uint64_t copied = 0;
+   uint64_t rec_bytes = 0;
+
+   if (sparse_mirror_rec_count == 0)
+      return;
+
+   for (uint32_t n = 0; n < sparse_mirror_rec_count && copied < budget; n++) {
+      struct sparse_mirror_rec *r =
+         &sparse_mirror_recs[upload_cursor++ % sparse_mirror_rec_count];
+      VK_FROM_HANDLE(panvk_buffer, b, r->buf);
+      VK_FROM_HANDLE(panvk_device_memory, m, r->mem);
+
+      rec_bytes += r->size;
+
+      if (b->sparse_backing == NULL || !b->sparse_backing_full)
+         continue;
+      if (m->addr.host == NULL)
+         continue;
+
+      void *bhost = pan_kmod_bo_mmap(b->sparse_backing,
+                                     PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+      if (bhost == NULL || bhost == MAP_FAILED)
+         continue;
+
+      uint64_t nbytes = MIN2(r->size, budget - copied);
+      memcpy((char *)bhost + r->res_off,
+             (const char *)m->addr.host + r->mem_off, nbytes);
+      sparse_mirror_cache_clean((char *)bhost + r->res_off, nbytes);
+      copied += nbytes;
+   }
+
+   upload_bytes += copied;
+   if ((++upload_submits % 64) == 0)
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] upload stats: submits=%llu recs=%u "
+              "rec_bytes=%llu MiB up_total=%llu MiB\n",
+              (unsigned long long)upload_submits, sparse_mirror_rec_count,
+              (unsigned long long)(rec_bytes >> 20),
+              (unsigned long long)(upload_bytes >> 20));
+}
+#include <string.h>
 #include "pan_layout.h"
 
 #include "vk_drm_syncobj.h"
@@ -408,6 +576,143 @@ panvk_async_bind_do(struct panvk_async_bind *submit,
    return panvk_async_bind_process_signals(submit);
 }
 
+/* kbase has no DRM syncobjs, no explicit-VA vm_bind and no async VM ops, so a
+ * sparse bind submit cannot be executed as a real GPU-side bind.  Sparse
+ * buffers are fully backed by a real BO at creation time (see panvk_buffer.c),
+ * which makes the binds themselves no-ops; only the sync chain has to be
+ * honoured.  Do that synchronously on the CPU.
+ */
+static VkResult
+panvk_queue_vm_bind_kbase(struct vk_queue *vk_queue,
+                          struct vk_queue_submit *vk_submit)
+{
+   struct panvk_device *device = to_panvk_device(vk_queue->base.device);
+   VkResult result;
+
+   for (uint32_t i = 0; i < vk_submit->wait_count; i++) {
+      const struct vk_sync_wait *wait = &vk_submit->waits[i];
+
+      result = vk_sync_wait(&device->vk, wait->sync, wait->wait_value,
+                            VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
+      if (result != VK_SUCCESS)
+         return vk_queue_set_lost(vk_queue, "kbase sparse bind wait: %m");
+   }
+
+   uint32_t buffer_bind_count = 0, image_opaque_bind_count = 0,
+            image_bind_count = 0;
+   for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++)
+      buffer_bind_count += vk_submit->buffer_binds[i].bindCount;
+   for (uint32_t i = 0; i < vk_submit->image_opaque_bind_count; i++)
+      image_opaque_bind_count += vk_submit->image_opaque_binds[i].bindCount;
+   for (uint32_t i = 0; i < vk_submit->image_bind_count; i++)
+      image_bind_count += vk_submit->image_binds[i].bindCount;
+
+   static uint32_t bind_submit_log_count;
+   if (bind_submit_log_count++ < 16) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] kbase sparse bind submit: buffers=%u/%u "
+              "image_opaque=%u/%u images=%u/%u waits=%u signals=%u\n",
+              vk_submit->buffer_bind_count, buffer_bind_count,
+              vk_submit->image_opaque_bind_count, image_opaque_bind_count,
+              vk_submit->image_bind_count, image_bind_count,
+              vk_submit->wait_count, vk_submit->signal_count);
+   }
+
+   static uint32_t detail_count;
+   static uint32_t submit_seq;
+   uint64_t total_bytes = 0, min_off = UINT64_MAX, max_end = 0;
+   uint32_t mem_count = 0;
+   struct panvk_device_memory *seen_mems[8];
+   bool log_this = submit_seq < 4 || (submit_seq % 16) == 0;
+
+   submit_seq++;
+
+   for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++) {
+      VK_FROM_HANDLE(panvk_buffer, dbuf, vk_submit->buffer_binds[i].buffer);
+      for (uint32_t j = 0; j < vk_submit->buffer_binds[i].bindCount; j++) {
+         const VkSparseMemoryBind *mbind = &vk_submit->buffer_binds[i].pBinds[j];
+         struct panvk_device_memory *dmem = NULL;
+         uint64_t mem_va = 0;
+         void *mem_host = NULL;
+         uint32_t mem_word = 0;
+
+         if (mbind->memory != VK_NULL_HANDLE) {
+            VK_FROM_HANDLE(panvk_device_memory, dmem_i, mbind->memory);
+            dmem = dmem_i;
+            mem_va = dmem->addr.dev + mbind->memoryOffset;
+            if (dmem->addr.host != NULL)
+               mem_host = (char *)dmem->addr.host + mbind->memoryOffset;
+            if (mem_host != NULL)
+               memcpy(&mem_word, mem_host, sizeof(mem_word));
+         }
+
+         total_bytes += mbind->size;
+         min_off = MIN2(min_off, mbind->resourceOffset);
+         max_end = MAX2(max_end, mbind->resourceOffset + mbind->size);
+
+         if (dmem != NULL && mem_count < ARRAY_SIZE(seen_mems)) {
+            bool dup = false;
+            for (uint32_t k = 0; k < mem_count; k++)
+               dup |= seen_mems[k] == dmem;
+            if (!dup)
+               seen_mems[mem_count++] = dmem;
+         }
+
+         if (log_this && detail_count < 8) {
+            PANVK_DIAG_PRINTF("[PANVK-DIAG] bind[%u] buf_va=0x%llx off=0x%llx "
+                    "size=0x%llx mem_va=0x%llx mem_host=%p mem_word=0x%08x "
+                    "full=%d\n",
+                    detail_count, (unsigned long long)dbuf->vk.device_address,
+                    (unsigned long long)mbind->resourceOffset,
+                    (unsigned long long)mbind->size,
+                    (unsigned long long)mem_va, mem_host, mem_word,
+                    (int)dbuf->sparse_backing_full);
+            detail_count++;
+         }
+      }
+   }
+
+   if (log_this) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] bind submit#%u: total=0x%llx "
+              "min_off=0x%llx max_end=0x%llx distinct_mem=%u recs=%u "
+              "mirror_total=%llu MiB\n",
+              submit_seq, (unsigned long long)total_bytes,
+              (unsigned long long)(min_off == UINT64_MAX ? 0 : min_off),
+              (unsigned long long)max_end, mem_count,
+              sparse_mirror_rec_count,
+              (unsigned long long)(sparse_mirror_bytes >> 20));
+   }
+
+   /* Publish GPU results of the previous binding, then upload the new
+    * contents, for exactly the ranges being (re)bound. */
+   for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++) {
+      VkBuffer vkbuf = vk_submit->buffer_binds[i].buffer;
+      for (uint32_t j = 0; j < vk_submit->buffer_binds[i].bindCount; j++) {
+         const VkSparseMemoryBind *mbind = &vk_submit->buffer_binds[i].pBinds[j];
+         if (mbind->memory != VK_NULL_HANDLE && mbind->size > 0)
+            sparse_mirror_sync_bind(vkbuf, mbind->memory, mbind->resourceOffset,
+                                    mbind->memoryOffset, mbind->size);
+      }
+   }
+
+   if ((++sparse_mirror_submits % 64) == 0) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] mirror stats: submits=%u recs=%u "
+              "total=%llu MiB\n",
+              sparse_mirror_submits, sparse_mirror_rec_count,
+              (unsigned long long)(sparse_mirror_bytes >> 20));
+   }
+
+   for (uint32_t i = 0; i < vk_submit->signal_count; i++) {
+      const struct vk_sync_signal *signal = &vk_submit->signals[i];
+
+      result = vk_sync_signal(&device->vk, signal->sync,
+                              signal->signal_value);
+      if (result != VK_SUCCESS)
+         return vk_queue_set_lost(vk_queue, "kbase sparse bind signal: %m");
+   }
+
+   return VK_SUCCESS;
+}
+
 VkResult
 panvk_queue_vm_bind(struct vk_queue *vk_queue,
                     struct vk_queue_submit *vk_submit, uint32_t syncobj_handle)
@@ -415,6 +720,11 @@ panvk_queue_vm_bind(struct vk_queue *vk_queue,
    struct panvk_device *device = to_panvk_device(vk_queue->base.device);
    struct panvk_async_bind submit;
    VkResult result = VK_SUCCESS;
+
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(device->vk.physical);
+   if (phys_dev->kbase_node_path[0] != '\0')
+      return panvk_queue_vm_bind_kbase(vk_queue, vk_submit);
 
    panvk_async_bind_init(&submit, device, syncobj_handle, vk_submit);
 
@@ -425,4 +735,189 @@ panvk_queue_vm_bind(struct vk_queue *vk_queue,
    panvk_async_bind_cleanup(&submit);
 
    return result;
+}
+
+#if defined(__aarch64__)
+static void
+sparse_mirror_cache_inval(const void *start, size_t size)
+{
+   uintptr_t ptr = (uintptr_t)start & ~(uintptr_t)63;
+   uintptr_t end = ((uintptr_t)start + size + 63) & ~(uintptr_t)63;
+
+   for (; ptr < end; ptr += 64)
+      __asm__ volatile("dc civac, %0" : : "r"(ptr) : "memory");
+   __asm__ volatile("dsb sy" ::: "memory");
+}
+#else
+static void
+sparse_mirror_cache_inval(const void *start, size_t size)
+{
+   (void)start;
+   (void)size;
+}
+#endif
+
+static void
+sparse_mirror_copy_range(VkBuffer buf, VkDeviceMemory mem, uint64_t res_off,
+                         uint64_t mem_off, uint64_t size, bool to_backing)
+{
+   VK_FROM_HANDLE(panvk_buffer, b, buf);
+   VK_FROM_HANDLE(panvk_device_memory, m, mem);
+
+   if (b == NULL || m == NULL || size == 0 ||
+       b->sparse_backing == NULL || !b->sparse_backing_full ||
+       m->addr.host == NULL)
+      return;
+
+   void *bhost = pan_kmod_bo_mmap(b->sparse_backing, PROT_READ | PROT_WRITE,
+                                  MAP_SHARED, NULL);
+   if (bhost == NULL || bhost == MAP_FAILED)
+      return;
+
+   char *ahost = (char *)bhost + res_off;
+   char *mhost = (char *)m->addr.host + mem_off;
+
+   if (to_backing) {
+      memcpy(ahost, mhost, size);
+      sparse_mirror_cache_clean(ahost, size);
+      sparse_mirror_up_bytes += size;
+   } else {
+      sparse_mirror_cache_inval(ahost, size);
+      memcpy(mhost, ahost, size);
+      sparse_mirror_down_bytes += size;
+   }
+
+   pan_kmod_bo_munmap(b->sparse_backing, bhost, 0);
+}
+
+static void
+sparse_mirror_sync_bind(VkBuffer buf, VkDeviceMemory mem, uint64_t res_off,
+                        uint64_t mem_off, uint64_t size)
+{
+   /* The GPU may have written the previously bound window: publish it back
+    * to that memory before its contents are replaced. */
+   for (uint32_t i = 0; i < sparse_mirror_rec_count; i++) {
+      struct sparse_mirror_rec *r = &sparse_mirror_recs[i];
+
+      if (r->buf == buf && r->res_off == res_off && r->mem != mem)
+         sparse_mirror_copy_range(buf, r->mem, res_off, r->mem_off,
+                                  MIN2(r->size, size), false);
+   }
+
+   sparse_mirror_record(buf, mem, res_off, mem_off, size);
+   sparse_mirror_copy_range(buf, mem, res_off, mem_off, size, true);
+
+   if ((++sparse_mirror_syncs % 256) == 0)
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] sparse sync: binds=%u up=%llu MiB "
+                        "down=%llu MiB recs=%u\n",
+                        sparse_mirror_syncs,
+                        (unsigned long long)(sparse_mirror_up_bytes >> 20),
+                        (unsigned long long)(sparse_mirror_down_bytes >> 20),
+                        sparse_mirror_rec_count);
+}
+
+static void
+sparse_probe_words(const void *base, uint64_t offset, uint64_t size,
+                   uint64_t *nz, uint64_t *hash)
+{
+   const uint32_t *p = (const uint32_t *)((const char *)base + offset);
+   const uint64_t nwords = MIN2(size, (uint64_t)16384);
+
+   *nz = 0;
+   *hash = 1469598103934665603ull;
+   for (uint64_t i = 0; i < nwords; i++) {
+      *nz += (p[i] != 0);
+      *hash = (*hash ^ p[i]) * 1099511628211ull;
+   }
+}
+
+void
+panvk_sparse_mirror_probe(void)
+{
+   static uint32_t probe_ticks;
+
+   if ((probe_ticks++ % 8) != 0 || sparse_mirror_rec_count == 0)
+      return;
+
+   /* Scan the first 4 KiB of every bound range and report whether any of it
+    * ever receives data. */
+   {
+      VkBuffer cur_buf = VK_NULL_HANDLE;
+      struct pan_kmod_bo *cur_bo = NULL;
+      void *cur_host = NULL;
+      uint64_t recs_seen = 0, bytes_seen = 0, total_nz = 0;
+
+      for (uint32_t i = 0; i < sparse_mirror_rec_count; i++) {
+         struct sparse_mirror_rec *r = &sparse_mirror_recs[i];
+
+         if (r->buf != cur_buf) {
+            if (cur_bo != NULL)
+               pan_kmod_bo_munmap(cur_bo, cur_host, 0);
+            cur_bo = NULL;
+            cur_host = NULL;
+            cur_buf = r->buf;
+
+            VK_FROM_HANDLE(panvk_buffer, b, cur_buf);
+            if (b != NULL && b->sparse_backing != NULL) {
+               cur_bo = b->sparse_backing;
+               cur_host = pan_kmod_bo_mmap(cur_bo, PROT_READ, MAP_SHARED, NULL);
+               if (cur_host == MAP_FAILED)
+                  cur_host = NULL;
+            }
+         }
+         if (cur_host == NULL)
+            continue;
+
+         uint64_t nz, hash;
+         sparse_mirror_cache_inval((char *)cur_host + r->res_off,
+                                   MIN2(r->size, (uint64_t)4096));
+         sparse_probe_words(cur_host, r->res_off, MIN2(r->size, (uint64_t)4096),
+                            &nz, &hash);
+         recs_seen++;
+         bytes_seen += MIN2(r->size, (uint64_t)4096);
+         total_nz += nz;
+      }
+      if (cur_bo != NULL)
+         pan_kmod_bo_munmap(cur_bo, cur_host, 0);
+
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] SPARSE ALL: recs=%llu sampled=%llu KiB "
+                        "nz=%llu words\n",
+                        (unsigned long long)recs_seen,
+                        (unsigned long long)(bytes_seen >> 10),
+                        (unsigned long long)total_nz);
+   }
+
+   for (uint32_t i = (sparse_mirror_rec_count > 4 ? sparse_mirror_rec_count - 4 : 0);
+        i < sparse_mirror_rec_count; i++) {
+      struct sparse_mirror_rec *r = &sparse_mirror_recs[i];
+      VK_FROM_HANDLE(panvk_buffer, b, r->buf);
+      VK_FROM_HANDLE(panvk_device_memory, m, r->mem);
+
+      if (b == NULL || m == NULL || m->addr.host == NULL ||
+          b->sparse_backing == NULL)
+         continue;
+
+      void *bhost = pan_kmod_bo_mmap(b->sparse_backing, PROT_READ,
+                                     MAP_SHARED, NULL);
+      if (bhost == NULL || bhost == MAP_FAILED)
+         continue;
+
+      sparse_mirror_cache_inval((char *)bhost + r->res_off,
+                                MIN2(r->size, (uint64_t)65536));
+      sparse_mirror_cache_inval((char *)m->addr.host + r->mem_off,
+                                MIN2(r->size, (uint64_t)65536));
+
+      uint64_t mnz, mhash, anz, ahash;
+      sparse_probe_words(m->addr.host, r->mem_off, r->size, &mnz, &mhash);
+      sparse_probe_words(bhost, r->res_off, r->size, &anz, &ahash);
+
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] SPARSE[%u]: off=0x%llx size=0x%llx "
+                        "mem nz=%llu hash=%016llx | arena nz=%llu hash=%016llx\n",
+                        i, (unsigned long long)r->res_off,
+                        (unsigned long long)r->size,
+                        (unsigned long long)mnz, (unsigned long long)mhash,
+                        (unsigned long long)anz, (unsigned long long)ahash);
+
+      pan_kmod_bo_munmap(b->sparse_backing, bhost, 0);
+   }
 }

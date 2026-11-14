@@ -1,0 +1,2024 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_cmd_buffer.h b/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
+index 9c680ae..7270b07 100644
+--- a/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
++++ b/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
+@@ -635,6 +635,11 @@ struct panvk_cmd_buffer {
+     * segments; the builders hold the last one, with gfx.render.vmr_samples.
+     */
+    struct util_dynarray vmr_segs;
++
++   /* csf-v11 227: device TLS BOs (struct panvk_priv_bo *) this command
++    * buffer's TLS descriptors point at, released when it is reset or
++    * freed, so outgrown device TLS BOs can go. */
++   struct util_dynarray dev_tls_refs;
+ };
+ 
+ struct panvk_vmr_segment {
+@@ -1174,6 +1179,11 @@ cs_emit_layer_fragment_state(struct cs_builder *b, struct cs_index fbd_ptr)
+ }
+ #endif /* PAN_ARCH >= 14 */
+ 
++/* csf-v11 232: copy the command buffer's TLS pointer (and stack size) into a
++ * per-job TSD on the GPU. */
++void panvk_per_arch(cmd_copy_tls_to_tsd)(struct panvk_cmd_buffer *cmdbuf,
++                                         struct cs_builder *b, uint64_t tsd);
++
+ void panvk_per_arch(collect_crc_invalidation_deps)(const VkDependencyInfo *info,
+                                                    struct panvk_cs_deps *deps,
+                                                    uint64_t *crc_addrs);
+diff --git a/src/panfrost/vulkan/csf/panvk_queue.h b/src/panfrost/vulkan/csf/panvk_queue.h
+index 9657173..dc60e5d 100644
+--- a/src/panfrost/vulkan/csf/panvk_queue.h
++++ b/src/panfrost/vulkan/csf/panvk_queue.h
+@@ -160,6 +160,12 @@ struct panvk_gpu_queue {
+       uint64_t frag_jobs;
+    } kbase_retired_heaps[PANVK_KBASE_HEAP_SLOTS - 1];
+    uint32_t kbase_retired_heap_count;
++   /* Descriptor slots in use, 2 to PANVK_KBASE_HEAP_SLOTS
++    * (PANVK_KBASE_HEAP_SLOTS): at most kbase_heap_slots - 1 retired heaps. */
++   uint32_t kbase_heap_slots;
++   /* Test the retired heaps on every submission instead of only on renewal
++    * (PANVK_KBASE_HEAP_EAGER_TERM). */
++   bool kbase_heap_eager_term;
+    /* Heap context pre-created on a worker thread for the next renewal:
+     * KBASE_IOCTL_CS_TILER_HEAP_INIT commits and zeroes the initial chunks,
+     * which took ~7 ms per renewal on the submitting thread. */
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c
+index 0b537fa..0a70f7e 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_buffer.c
+@@ -12,6 +12,15 @@
+ 
+ #include "drm-uapi/panthor_drm.h"
+ 
++#ifdef HAVE_PAN_KMOD_KBASE
++#include <errno.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include "drm-uapi/mali_kbase_ioctl.h"
++#endif
++
+ #include "genxml/gen_macros.h"
+ 
+ #include "panvk_buffer.h"
+@@ -19,6 +28,7 @@
+ #include <inttypes.h>
+ #include "util/u_atomic.h"
+ #include "util/os_time.h"
++#include "util/u_debug.h"
+ #include <unistd.h>
+ #include "panvk_cmd_buffer.h"
+ #include "panvk_cmd_desc_state.h"
+@@ -89,35 +99,269 @@ panvk_per_arch(kbase_mark_progress)(
+  * stack, exactly like the subqueues of one command buffer already do.
+  * Per-command-buffer TLS kept ~84 MiB per DXVK command list alive in Need
+  * for Speed Most Wanted (1.7 GiB, then Android killed apps).
+- * ponytail: outgrown BOs live until device destroy (<= 2x the peak size);
+- * refcount them per command buffer if that ever matters. */
++ * csf-v11 227: PANVK_TLS_FREE_OLD=0 keeps every outgrown device TLS BO
++ * until device destroy (old). By default each command buffer holds a
++ * reference on the device TLS BO it uses, and the device keeps only the
++ * largest one, so an outgrown BO goes when the last command buffer that
++ * used it is reset or freed (it can no longer be pending then).
++ *
++ * The reference is taken under dev->tls.lock, so a command buffer can
++ * never observe a BO that the device already dropped. Reset and destroy
++ * release the references; the BO itself is freed once both the device
++ * and every command buffer that used it have let go, which bounds the
++ * lifetime without having to track the GPU's pending jobs. */
++static bool
++dev_tls_free_old(void)
++{
++   return debug_get_bool_option("PANVK_TLS_FREE_OLD", true);
++}
++
++static void
++dev_tls_release(struct panvk_cmd_buffer *cmdbuf)
++{
++   util_dynarray_foreach(&cmdbuf->dev_tls_refs, struct panvk_priv_bo *, bo)
++      panvk_priv_bo_unref(*bo);
++   util_dynarray_clear(&cmdbuf->dev_tls_refs);
++}
++
++/* csf-v11 230: device TLS sized for the cores that exist.
++ *
++ * The TLS size is pow2(stack per thread) x THREAD_TLS_ALLOC x core-ID
++ * range, because a thread's stack is found from its raw core ID: core c
++ * owns the slab [c, c + 1) x pow2(stack) x THREAD_TLS_ALLOC (the layout the
++ * core_id_range sizing already assumes). Valhall CSF parts have sparse core
++ * masks: the 336 MiB device TLS of Fallout 4 on the G615 MC6 is 21 x 16 MiB,
++ * a 21-ID range for 6 cores, so 15 of 21 slabs belong to cores that do not
++ * exist, and kbase commits and zeroes all of them. The "device TLS" log
++ * line prints the real numbers.
++ *
++ * PANVK_TLS_SPARSE=1 (default on kbase): one BO holds a slab per present
++ * core, and a KBASE_IOCTL_MEM_ALIAS region spans the whole core-ID range
++ * with each present core's slot mapped to its own slab. The slots of absent
++ * cores alias the first slab (no extra pages; nothing runs there), so the
++ * GPU address layout is exactly the old one and no address faults. Any
++ * failure falls back to the full BO. PANVK_TLS_SPARSE=0 = old.
++ *
++ * PANVK_TLS_SHRINK_MS=<ms> (default 10000, 0 = old): when no command buffer
++ * needed more than half of the current device TLS for that long, a command
++ * buffer that needs a quarter or less gets a new, smaller BO and the device
++ * drops its reference on the big one (command buffers still holding it keep
++ * it alive, 227). Needs PANVK_TLS_FREE_OLD (default on). */
++static int
++dev_tls_knob(int *v, const char *name, int def)
++{
++   if (p_atomic_read(v) < 0)
++      p_atomic_set(v, (int)debug_get_num_option(name, def));
++   return p_atomic_read(v);
++}
++
++static bool
++dev_tls_sparse(void)
++{
++   static int v = -1;
++   return dev_tls_knob(&v, "PANVK_TLS_SPARSE", 1) != 0;
++}
++
++static uint64_t
++dev_tls_shrink_ns(void)
++{
++   static int v = -1;
++   return (uint64_t)MAX2(dev_tls_knob(&v, "PANVK_TLS_SHRINK_MS", 10000), 0) *
++          1000000ull;
++}
++
++/* Bytes of GPU address space a device TLS BO covers. */
++static uint64_t
++dev_tls_span(const struct panvk_priv_bo *bo)
++{
++   return bo->alias_size ? bo->alias_size : pan_kmod_bo_size(bo->bo);
++}
++
++struct dev_tls_layout {
++   uint64_t span;      /* pan_get_total_stack_size() */
++   uint64_t per_core;  /* bytes per core-ID slot */
++   uint64_t present;   /* shader_present */
++   unsigned range;     /* core-ID range */
++   unsigned thread_size, threads;
++};
++
++#ifdef HAVE_PAN_KMOD_KBASE
++static uint64_t
++dev_tls_page(void)
++{
++   const long p = sysconf(_SC_PAGESIZE);
++   return p > 0 ? (uint64_t)p : 4096;
++}
++
++/* Returns the alias region VA, or 0. */
++static uint64_t
++dev_tls_alias(struct panvk_device *dev, const struct panvk_priv_bo *backing,
++              const struct dev_tls_layout *l)
++{
++   const uint64_t page = dev_tls_page();
++   const uint64_t stride = l->per_core / page;
++   struct base_mem_aliasing_info ai[64];
++   unsigned idx = 0;
++
++   for (unsigned c = 0; c < l->range; c++) {
++      const bool present = (l->present >> c) & 1;
++      ai[c] = (struct base_mem_aliasing_info){
++         .handle = backing->addr.dev,
++         .offset = present ? (uint64_t)idx * stride : 0,
++         .length = stride,
++      };
++      if (present)
++         idx++;
++   }
++
++   union kbase_ioctl_mem_alias req = {
++      .in = {
++         .flags = BASE_MEM_PROT_GPU_RD | BASE_MEM_PROT_GPU_WR |
++                  BASE_MEM_PROT_CPU_RD,
++         .stride = stride,
++         .nents = l->range,
++         .aliasing_info = (uintptr_t)ai,
++      },
++   };
++
++   if (ioctl(dev->kmod.dev->fd, KBASE_IOCTL_MEM_ALIAS, &req)) {
++      mesa_logw("panvk: device TLS: KBASE_IOCTL_MEM_ALIAS failed (%s), "
++                "using a full BO", strerror(errno));
++      return 0;
++   }
++
++   /* 64-bit clients get a SAME_VA cookie; mmap() places the region, and
++    * the address is both the CPU and the GPU VA (as for the ring buffer). */
++   void *ptr = mmap(NULL, l->span, PROT_READ, MAP_SHARED, dev->kmod.dev->fd,
++                    req.out.gpu_va);
++   if (ptr == MAP_FAILED) {
++      mesa_logw("panvk: device TLS: alias mmap failed (%s), using a full BO",
++                strerror(errno));
++      struct kbase_ioctl_mem_free free_req = {.gpu_addr = req.out.gpu_va};
++      ioctl(dev->kmod.dev->fd, KBASE_IOCTL_MEM_FREE, &free_req);
++      return 0;
++   }
++
++   return (uintptr_t)ptr;
++}
++#endif
++
++static struct panvk_priv_bo *
++dev_tls_create(struct panvk_device *dev, const struct dev_tls_layout *l)
++{
++   const uint32_t flags =
++      panvk_device_adjust_bo_flags(dev, PAN_KMOD_BO_FLAG_NO_MMAP);
++   struct panvk_priv_bo *bo = NULL;
++
++#ifdef HAVE_PAN_KMOD_KBASE
++   static int sparse_broken;
++   const struct panvk_physical_device *pdev =
++      to_panvk_physical_device(dev->vk.physical);
++   const unsigned cores = util_bitcount64(l->present);
++
++   if (pdev->kbase_node_path[0] && dev_tls_sparse() &&
++       !p_atomic_read(&sparse_broken) && !dev->debug.decode_ctx &&
++       cores && cores < l->range && l->range <= 64 &&
++       l->per_core * l->range == l->span && !(l->per_core % dev_tls_page()) &&
++       !(flags & PAN_KMOD_BO_FLAG_GPU_UNCACHED)) {
++      if (panvk_priv_bo_create(dev, l->per_core * cores, flags,
++                               VK_SYSTEM_ALLOCATION_SCOPE_DEVICE,
++                               &bo) == VK_SUCCESS) {
++         const uint64_t va = dev_tls_alias(dev, bo, l);
++         if (va) {
++            bo->addr.dev = va;
++            bo->alias_size = l->span;
++            mesa_logi("panvk: device TLS %u B/thread x %u threads x %u core "
++                      "IDs (%u cores, mask 0x%" PRIx64 ") = %" PRIu64
++                      " MiB of VA, %" PRIu64 " MiB backed",
++                      l->thread_size, l->threads, l->range, cores, l->present,
++                      l->span >> 20, pan_kmod_bo_size(bo->bo) >> 20);
++            return bo;
++         }
++         panvk_priv_bo_unref(bo);
++         bo = NULL;
++         p_atomic_set(&sparse_broken, 1);
++      }
++   }
++#endif
++
++   if (panvk_priv_bo_create(dev, l->span, flags,
++                            VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &bo) !=
++       VK_SUCCESS)
++      return NULL;
++
++   mesa_logi("panvk: device TLS %u B/thread x %u threads x %u core IDs "
++             "(mask 0x%" PRIx64 ") = %" PRIu64 " MiB",
++             l->thread_size, l->threads, l->range, l->present,
++             pan_kmod_bo_size(bo->bo) >> 20);
++   return bo;
++}
++
+ static uint64_t
+-get_device_tls(struct panvk_cmd_buffer *cmdbuf, uint64_t size)
++get_device_tls(struct panvk_cmd_buffer *cmdbuf, const struct dev_tls_layout *l,
++               unsigned *sparse_thread_size)
+ {
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
++   const bool free_old = dev_tls_free_old();
++   const uint64_t size = l->span;
+    uint64_t addr = 0;
+ 
++   /* csf-v11 230: last time a command buffer needed more than half of the
++    * current device TLS. Process-wide; a stale value only delays or
++    * advances a shrink, which is always safe. */
++   static uint64_t last_big_ns;
++   const uint64_t shrink_ns = free_old ? dev_tls_shrink_ns() : 0;
++   const uint64_t now = shrink_ns ? os_time_get_nano() : 0;
++
+    simple_mtx_lock(&dev->tls.lock);
+    struct panvk_priv_bo *cur =
+       util_dynarray_num_elements(&dev->tls.bos, struct panvk_priv_bo *)
+          ? util_dynarray_top(&dev->tls.bos, struct panvk_priv_bo *)
+          : NULL;
+ 
+-   if (!cur || pan_kmod_bo_size(cur->bo) < size) {
+-      struct panvk_priv_bo *bo;
+-      if (panvk_priv_bo_create(
+-             dev, size,
+-             panvk_device_adjust_bo_flags(dev, PAN_KMOD_BO_FLAG_NO_MMAP),
+-             VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &bo) == VK_SUCCESS) {
++   bool replace = !cur || dev_tls_span(cur) < size;
++   if (cur && !replace && shrink_ns) {
++      if (size > dev_tls_span(cur) / 2 || !last_big_ns)
++         last_big_ns = now;
++      else if (size <= dev_tls_span(cur) / 4 &&
++               now - last_big_ns > shrink_ns)
++         replace = true;
++   }
++
++   if (replace) {
++      struct panvk_priv_bo *bo = dev_tls_create(dev, l);
++      if (bo) {
++         if (free_old) {
++            /* Drop the device's references on the outgrown BOs; command
++             * buffers that use them hold their own. */
++            util_dynarray_foreach(&dev->tls.bos, struct panvk_priv_bo *, old)
++               panvk_priv_bo_unref(*old);
++            util_dynarray_clear(&dev->tls.bos);
++         }
+          util_dynarray_append(&dev->tls.bos, bo);
+          cur = bo;
+-      } else {
++         last_big_ns = now;
++      } else if (cur && dev_tls_span(cur) < size) {
+          cur = NULL;
+       }
+    }
+ 
+-   if (cur)
++   if (cur) {
+       addr = cur->addr.dev;
++      /* csf-v11 232: the stride the alias slots of a sparse BO assume. */
++      if (cur->alias_size)
++         *sparse_thread_size =
++            cur->alias_size / ((uint64_t)l->threads * MAX2(l->range, 1));
++      if (free_old) {
++         bool held = false;
++         util_dynarray_foreach(&cmdbuf->dev_tls_refs, struct panvk_priv_bo *,
++                               r)
++            held = held || *r == cur;
++         if (!held)
++            util_dynarray_append(&cmdbuf->dev_tls_refs,
++                                 panvk_priv_bo_ref(cur));
++      }
++   }
+    simple_mtx_unlock(&dev->tls.lock);
+ 
+    if (!addr)
+@@ -133,23 +377,72 @@ emit_tls(struct panvk_cmd_buffer *cmdbuf)
+    struct panvk_physical_device *phys_dev =
+       to_panvk_physical_device(dev->vk.physical);
+    unsigned core_id_range = pan_query_core_id_range(&phys_dev->kmod.dev->props);
++   unsigned sparse_thread_size = 0;
+ 
+    if (cmdbuf->state.tls.info.tls.size) {
+       unsigned thread_tls_alloc =
+          pan_query_thread_tls_alloc(&phys_dev->kmod.dev->props);
+       unsigned size = pan_get_total_stack_size(cmdbuf->state.tls.info.tls.size,
+                                                thread_tls_alloc, core_id_range);
++      const struct dev_tls_layout layout = {
++         .span = size,
++         .per_core = size / MAX2(core_id_range, 1),
++         .present = phys_dev->kmod.dev->props.shader_present,
++         .range = core_id_range,
++         .thread_size = size / MAX2(thread_tls_alloc * core_id_range, 1),
++         .threads = thread_tls_alloc,
++      };
++
++      static unsigned diag_tls_last_size;
++      if (size >= (8ull << 20) && size != diag_tls_last_size) {
++         diag_tls_last_size = size;
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] TLS total=%llu MiB tls.size=%u "
++                 "thread_alloc=%u cores=%u\n",
++                 (unsigned long long)(size >> 20),
++                 cmdbuf->state.tls.info.tls.size, thread_tls_alloc,
++                 core_id_range);
++      }
+ 
+-      cmdbuf->state.tls.info.tls.ptr = get_device_tls(cmdbuf, size);
++      cmdbuf->state.tls.info.tls.ptr =
++         get_device_tls(cmdbuf, &layout, &sparse_thread_size);
+    }
+ 
+    assert(!cmdbuf->state.tls.info.wls.size);
+ 
+    if (cmdbuf->state.tls.desc.cpu) {
+-      GENX(pan_emit_tls)(&cmdbuf->state.tls.info, cmdbuf->state.tls.desc.cpu);
++      /* csf-v11 232: a sparse BO's alias slots are THREAD_TLS_ALLOC x its own
++       * per-thread size apart, and the hardware places core c's stacks at
++       * c x THREAD_TLS_ALLOC x (stack size in the TSD). A smaller stack size
++       * in the TSD puts present cores in the slots of absent ones, which all
++       * alias slab 0, so their threads share stacks (113: gs_tess_primitive_id
++       * chunk cases on v10/v11). Program the BO's per-thread size. */
++      struct pan_tls_info info = cmdbuf->state.tls.info;
++      if (sparse_thread_size > info.tls.size)
++         info.tls.size = sparse_thread_size;
++      GENX(pan_emit_tls)(&info, cmdbuf->state.tls.desc.cpu);
+    }
+ }
+ 
++/* csf-v11 232: copy the command buffer's TLS pointer and stack size into a
++ * per-job TSD on the GPU. Our tree already programmed the stack size for
++ * dispatch and precomp, so word 0 is copied unconditionally; that also fixes
++ * the gpu_prerast compute jobs, which only took the pointer before. With
++ * PANVK_TLS_SPARSE the size comes from the command buffer descriptor, which
++ * emit_tls() raised to the sparse BO's per-thread size when larger. */
++void
++panvk_per_arch(cmd_copy_tls_to_tsd)(struct panvk_cmd_buffer *cmdbuf,
++                                    struct cs_builder *b, uint64_t tsd)
++{
++   cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
++   cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
++   cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
++   cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
++   cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
++   cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
++   cs_flush_stores(b);
++}
++
++/* Sync point updates are flushed in one go before a job is submitted. */
+ /**
+  * Write all sync point updates to seqno registers and reset the relative sync
+  * points to 0.
+@@ -161,8 +454,8 @@ flush_sync_points(struct panvk_cmd_buffer *cmdbuf)
+       struct cs_builder *b = panvk_get_cs_builder(cmdbuf, i);
+ 
+       if (!cs_is_valid(b)) {
+-         vk_command_buffer_set_error(&cmdbuf->vk,
+-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
++vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          return;
+       }
+ 
+@@ -353,8 +646,8 @@ panvk_per_arch(EndCommandBuffer)(VkCommandBuffer commandBuffer)
+       struct cs_builder *b = &cmdbuf->state.cs[i].builder;
+ 
+       if (!cs_is_valid(b)) {
+-         vk_command_buffer_set_error(&cmdbuf->vk,
+-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
++vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       } else if (!cs_is_empty(b)) {
+          /* An empty stream is never submitted (see
+           * gpu_queue_submit_init_storage()), so there is nothing to wait for
+@@ -368,7 +661,11 @@ panvk_per_arch(EndCommandBuffer)(VkCommandBuffer commandBuffer)
+    panvk_pool_flush_maps(&cmdbuf->cs_pool);
+    panvk_pool_flush_maps(&cmdbuf->desc_pool);
+ 
+-   return vk_command_buffer_end(&cmdbuf->vk);
++   VkResult end_result = vk_command_buffer_end(&cmdbuf->vk);
++   if (end_result != VK_SUCCESS)
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] EndCommandBuffer FAIL result=%d\n",
++              end_result);
++   return end_result;
+ }
+ 
+ /* The conditional rendering predicate is only read by the vertex/tiler
+@@ -1476,8 +1773,8 @@ panvk_per_arch(cmd_cut_vmr_segment)(struct panvk_cmd_buffer *cmdbuf)
+       cs_wait_slots(b, dev->csf.sb.all_mask);
+       cs_end(b);
+       if (!cs_is_valid(b)) {
+-         vk_command_buffer_set_error(&cmdbuf->vk,
+-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
++vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          return;
+       }
+ 
+@@ -1507,6 +1804,9 @@ panvk_reset_cmdbuf(struct vk_command_buffer *vk_cmdbuf,
+ 
+    vk_command_buffer_reset(&cmdbuf->vk);
+ 
++   /* Not pending any more: outgrown device TLS BOs can go. */
++   dev_tls_release(cmdbuf);
++
+    panvk_pool_reset(&cmdbuf->cs_pool);
+    panvk_pool_reset(&cmdbuf->desc_pool);
+    panvk_pool_reset(&cmdbuf->tls_pool);
+@@ -1542,6 +1842,8 @@ panvk_destroy_cmdbuf(struct vk_command_buffer *vk_cmdbuf)
+    for (uint32_t i = 0; i < ARRAY_SIZE(cmdbuf->state.cs); i++)
+       cs_builder_fini(&cmdbuf->state.cs[i].builder);
+ 
++   dev_tls_release(cmdbuf);
++   util_dynarray_fini(&cmdbuf->dev_tls_refs);
+    util_dynarray_fini(&cmdbuf->vmr_segs);
+    panvk_pool_cleanup(&cmdbuf->cs_pool);
+    panvk_pool_cleanup(&cmdbuf->desc_pool);
+@@ -1636,6 +1938,9 @@ panvk_per_arch(BeginCommandBuffer)(VkCommandBuffer commandBuffer,
+    vk_command_buffer_begin(&cmdbuf->vk, pBeginInfo);
+    cmdbuf->flags = pBeginInfo->flags;
+ 
++   /* Warm the BC transcode pipelines off-thread before the first upload. */
++   panvk_per_arch(bc_prewarm)(to_panvk_device(cmdbuf->vk.base.device));
++
+    /* Detect the engine (and log the barrier write rule) once, up front. */
+    (void)panvk_per_arch(cmd_d3d12_semantics)(cmdbuf);
+ 
+@@ -1880,7 +2185,12 @@ static bool
+ image_barrier_invalidates_crc(const VkImageMemoryBarrier2 *barrier,
+                               const struct panvk_image *image)
+ {
+-   if (barrier->oldLayout == VK_IMAGE_LAYOUT_PREINITIALIZED)
++   /* UNDEFINED means the memory may have been written through an alias (a
++    * buffer or another image bound to it), so the transaction-elimination CRCs
++    * describe contents that are gone; keep the stores of the next render.
++    * See invalidate_initial_attachment_crcs as well. */
++   if (barrier->oldLayout == VK_IMAGE_LAYOUT_PREINITIALIZED ||
++       barrier->oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+       return true;
+ 
+    const bool external_acquire =
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+index 88f3a0f..286c258 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -22,12 +22,14 @@
+ 
+ #include "util/bitscan.h"
+ #include "util/os_time.h"
++#include "util/u_debug.h"
+ #include "vk_drm_syncobj.h"
+ #include "vk_log.h"
+ #include "vk_sync.h"
+ 
+ #ifdef HAVE_PAN_KMOD_KBASE
+ #include <inttypes.h>
++#include <stdlib.h>
+ #include <unistd.h>
+ #include "drm-uapi/mali_kbase_ioctl.h"
+ #include "kmod/kbase_kmod.h"
+@@ -122,6 +124,11 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+                           uint64_t target_seqno, uint32_t rekick_mask,
+                           bool allow_ring_drain, uint64_t abs_timeout_ns);
+ 
++static VkResult
++kbase_wait_sync_targets(
++   void *data, const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
++   uint64_t abs_timeout_ns);
++
+ static bool
+ gpu_queue_uses_kbase(const struct panvk_device *dev)
+ {
+@@ -129,6 +136,26 @@ gpu_queue_uses_kbase(const struct panvk_device *dev)
+           '\0';
+ }
+ 
++/* Conservative submission mode for A/B diagnosis, enabled with
++ * PANVK_KBASE_SAFE_SUBMIT=1:
++ * - emit the 0x233 cache clean/invalidate before every job instead of once
++ *   per subqueue and batch;
++ * - never treat "the firmware consumed the ring entry" as job completion;
++ * - drain the graphics subqueues before replacing the tiler heap, and destroy
++ *   retired heaps inline rather than handing them to the heap worker.
++ * This restores the serialization the aggressive submit/recycling paths
++ * removed, so a fault that disappears in this mode is caused by them. */
++static bool
++kbase_safe_submit(void)
++{
++   static int safe = -1;
++
++   if (safe < 0)
++      safe = debug_get_bool_option("PANVK_KBASE_SAFE_SUBMIT", false) ? 1 : 0;
++
++   return safe;
++}
++
+ static uint32_t
+ kbase_resource_mask(enum panvk_subqueue_id subqueue)
+ {
+@@ -482,6 +509,86 @@ kbase_tiler_heap_max_chunks(const struct panvk_physical_device *phys_dev)
+    return MAX2(phys_dev->csf.tiler.max_chunks,
+                DIV_ROUND_UP(200u << 20, phys_dev->csf.tiler.chunk_size));
+ }
++/* Heap geometry used by the kbase backend, overridable with
++ * PANVK_KBASE_HEAP_CHUNKS=<initial>[,<max>].  The panthor defaults were sized
++ * for a much larger heap and leave several MiB resident per context; the
++ * initial chunk count is what matters for memory while idle. */
++static void
++kbase_heap_chunks(const struct panvk_physical_device *phys_dev,
++                  uint32_t *initial_chunks, uint32_t *max_chunks)
++{
++   static uint32_t initial, max;
++
++   if (!initial) {
++      uint32_t initial_opt = MIN2(phys_dev->csf.tiler.initial_chunks, 4);
++      uint32_t max_opt = kbase_tiler_heap_max_chunks(phys_dev);
++      const char *str = debug_get_option("PANVK_KBASE_HEAP_CHUNKS", NULL);
++
++      if (str && str[0]) {
++         char *end = NULL;
++         long v = strtol(str, &end, 0);
++
++         if (end != str && v > 0 && v <= UINT32_MAX)
++            initial_opt = v;
++         if (end && *end == ',') {
++            const char *p = end + 1;
++
++            v = strtol(p, &end, 0);
++            if (end != p && v > 0 && v <= UINT32_MAX)
++               max_opt = MAX2(max_opt, (uint32_t)v);
++         }
++      }
++
++      initial = initial_opt;
++      max = max_opt;
++      mesa_logi("kbase: tiler heaps %u initial / %u max chunks of %u KiB",
++                initial, max, phys_dev->csf.tiler.chunk_size / 1024);
++   }
++
++   *initial_chunks = initial;
++   *max_chunks = max;
++}
++
++/* Descriptor slots in use (PANVK_KBASE_HEAP_SLOTS, default 4): fewer slots
++ * means fewer live heap contexts. */
++static uint32_t
++kbase_heap_slots(void)
++{
++   static int slots = -1;
++
++   if (slots < 0)
++      slots = CLAMP((int)debug_get_num_option("PANVK_KBASE_HEAP_SLOTS",
++                                              PANVK_KBASE_HEAP_SLOTS),
++                    2, PANVK_KBASE_HEAP_SLOTS);
++
++   return slots;
++}
++
++/* How many heap TERMs the panvk_heap worker may have outstanding; beyond it
++ * the caller destroys inline (PANVK_KBASE_HEAP_TERM_MAX, default 2). */
++static uint32_t
++kbase_heap_destroy_max(void)
++{
++   static int max = -1;
++
++   if (max < 0)
++      max = CLAMP((int)debug_get_num_option("PANVK_KBASE_HEAP_TERM_MAX", 2),
++                  0, PANVK_KBASE_DESTROY_RING);
++
++   return max;
++}
++
++static bool
++kbase_heap_eager_term(void)
++{
++   static int eager = -1;
++
++   if (eager < 0)
++      eager = debug_get_bool_option("PANVK_KBASE_HEAP_EAGER_TERM", true) ? 1 : 0;
++
++   return eager;
++}
++
+ static_assert(PANVK_KBASE_HEAP_SLOTS * KBASE_HEAP_DESC_SLOT_STRIDE <= 4096,
+               "heap descriptor slots overlap the geometry buffer");
+ 
+@@ -789,6 +896,46 @@ kbase_subqueue_publish(struct panvk_gpu_queue *queue, uint32_t subqueue)
+    kbase_kmod_csf_queue_kick(dev->kmod.dev, subq->kbase.ringbuf_dev);
+ }
+ 
++/* Decode the command stream the GPU is stopped in for one subqueue.
++ * CS_EXTRACT points at the pending job's CALL: the two instructions right
++ * before it hold the callee stream address (MOVE48, opcode 1, address in
++ * bits 47:0) and its byte size (MOVE32, opcode 2, size in bits 31:0). */
++static void
++kbase_decode_pending_job(struct panvk_gpu_queue *queue, uint32_t subqueue)
++{
++   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
++   struct panvk_subqueue *subq = &queue->subqueues[subqueue];
++
++   if (!dev->debug.decode_ctx)
++      return;
++
++   const uint8_t *output_page = (uint8_t *)subq->kbase.user_io + 8192;
++   uint64_t extract =
++      *(volatile uint64_t *)(output_page + CS_USER_IO_OUTPUT_CS_EXTRACT);
++   uint64_t call_addr_q =
++      kbase_ring_qword(subq,
++         (extract + KBASE_RINGBUF_SIZE - 16) % KBASE_RINGBUF_SIZE);
++   uint64_t call_size_q =
++      kbase_ring_qword(subq,
++         (extract + KBASE_RINGBUF_SIZE - 8) % KBASE_RINGBUF_SIZE);
++   uint64_t call_addr = call_addr_q & 0x0000ffffffffffffULL;
++   uint32_t call_size = (uint32_t)(call_size_q & 0xffffffffULL);
++   struct panvk_physical_device *phys_dev =
++      to_panvk_physical_device(dev->vk.physical);
++
++   mesa_loge("kbase: pending call subqueue %u: stream 0x%" PRIx64
++             "/%u (opcodes 0x%" PRIx64 "/0x%" PRIx64 ")",
++             subqueue, call_addr, call_size,
++             call_addr_q >> 56, call_size_q >> 56);
++
++   if ((call_addr_q >> 56) != 0x1 || (call_size_q >> 56) != 0x2 ||
++       call_size < 8 || call_size > (1u << 20))
++      return;
++
++   pandecode_cs_binary(dev->debug.decode_ctx, call_addr, call_size,
++                       phys_dev->kmod.dev->props.gpu_id);
++}
++
+ static VkResult
+ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+                           uint64_t target_seqno, uint32_t rekick_mask,
+@@ -851,7 +998,8 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+       kbase_cache_invalidate_range((const void *)cell, kbase_seqno_stride());
+       if (cell->seqno >= target_seqno ||
+           (PANVK_DEBUG(KBASE_DIAG) && *ls_copy >= target_seqno) ||
+-          (allow_ring_drain && extract >= target_insert && !active))
++          (!kbase_safe_submit() && allow_ring_drain &&
++           extract >= target_insert && !active))
+          break;
+ 
+       if (cell->error) {
+@@ -970,9 +1118,13 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+                last_job_offset, subq->kbase.ringbuf_dev + last_job_offset,
+                last_last_job_offset, subq->kbase.ringbuf_dev + last_last_job_offset);
+             struct panvk_physical_device *phys_dev = to_panvk_physical_device(dev->vk.physical);
++            uint32_t ring_off = (uint32_t)(extract % KBASE_RINGBUF_SIZE);
++            uint32_t ring_pending = (uint32_t)(insert - extract);
++            if (ring_pending > KBASE_RINGBUF_SIZE - ring_off)
++               ring_pending = KBASE_RINGBUF_SIZE - ring_off;
+             pandecode_cs_binary(dev->debug.decode_ctx,
+-                                 subq->kbase.ringbuf_dev + last_last_job_offset,
+-                                 insert - last_last_job_offset,
++                                 subq->kbase.ringbuf_dev + ring_off,
++                                 ring_pending,
+                                  phys_dev->kmod.dev->props.gpu_id);
+          }
+ 
+@@ -999,6 +1151,13 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+       if (cqs_ret < 0) {
+          int error_type = kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
+ 
++         if (error_type && prev_error_type != error_type) {
++            for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
++               kbase_log_subqueue_state(queue, i, "error snapshot");
++
++            kbase_log_queue_syncobjs(queue);
++         }
++
+          if (dev->debug.decode_ctx && insert > extract && error_type) {
+             // pandecode_user_msg(dev->debug.decode_ctx,
+             //    "\nSubqueue %d Ringbuffer Trampoline [job %lu, gpu_va: %lx, cpu=%p, Size %u bytes, to %lx]:\n",
+@@ -1010,11 +1169,13 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+                extract, subq->kbase.ringbuf_dev + extract,
+                last_job_offset, subq->kbase.ringbuf_dev + last_job_offset,
+                last_last_job_offset, subq->kbase.ringbuf_dev + last_last_job_offset);
+-            struct panvk_physical_device *phys_dev = to_panvk_physical_device(dev->vk.physical);
+-            pandecode_cs_binary(dev->debug.decode_ctx,
+-                                 subq->kbase.ringbuf_dev + extract,
+-                                 insert - extract,
+-                                 phys_dev->kmod.dev->props.gpu_id);
++            /* Decode all three pending job streams right away: each
++             * subqueue is stopped at its own CALL, and the pending streams
++             * are the interesting ones (the ring decode is huge and slowed
++             * the previous run down).  Skip the ring decode here; the
++             * watchdog branch still emits it. */
++            for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
++               kbase_decode_pending_job(queue, i);
+          }
+          prev_error_type = error_type;
+       }
+@@ -1057,21 +1218,9 @@ kbase_queue_wait_current(struct panvk_gpu_queue *queue,
+       }
+    }
+ 
+-   mesa_logi("%s: wait completed successfully", __func__);
+    return VK_SUCCESS;
+ }
+ 
+-/* All subqueues in one kbase queue group (CS i = subqueue i, the panthor
+- * layout), created with the tiler OOM exception flag.  At max_chunks kbase
+- * then answers with a NULL chunk instead of terminating the group, and the
+- * firmware runs the TILER_OOM handler (incremental rendering) on a CS of that
+- * group -- the fragment CS; with one group per subqueue the handler is
+- * unreachable and every heap exhaustion ends in DEVICE_LOST.  On by default
+- * only where verified: on v14 the first submit hangs (subqueue 1 timeout,
+- * DEVICE_LOST).  PANVK_KBASE_TILER_IR=0/1 forces it. */
+-DEBUG_GET_ONCE_BOOL_OPTION(kbase_one_group, "PANVK_KBASE_TILER_IR",
+-                           PAN_ARCH == 11 || PAN_ARCH == 13)
+-
+ static void
+ kbase_destroy_group(struct panvk_gpu_queue *queue)
+ {
+@@ -1087,18 +1236,11 @@ kbase_destroy_group(struct panvk_gpu_queue *queue)
+       pan_kmod_bo_put(subq->kbase.ringbuf_bo);
+       subq->kbase.ringbuf_bo = NULL;
+       subq->kbase.user_io = NULL;
+-   }
+ 
+-   /* In the one-group layout every subqueue holds the same handle. */
+-   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
+-      const uint32_t handle = queue->subqueues[i].kbase.group_handle;
+-
+-      if (handle == UINT32_MAX)
+-         continue;
+-      kbase_kmod_csf_group_destroy(dev->kmod.dev, handle);
+-      for (uint32_t j = i; j < PANVK_SUBQUEUE_COUNT; j++) {
+-         if (queue->subqueues[j].kbase.group_handle == handle)
+-            queue->subqueues[j].kbase.group_handle = UINT32_MAX;
++      if (subq->kbase.group_handle != UINT32_MAX) {
++         kbase_kmod_csf_group_destroy(dev->kmod.dev,
++                                      subq->kbase.group_handle);
++         subq->kbase.group_handle = UINT32_MAX;
+       }
+    }
+ }
+@@ -1114,16 +1256,11 @@ kbase_create_group(struct panvk_gpu_queue *queue)
+    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
+       queue->subqueues[i].kbase.group_handle = UINT32_MAX;
+ 
+-   const bool one_group = debug_get_option_kbase_one_group();
+-
+    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
+       struct panvk_subqueue *subq = &queue->subqueues[i];
+ 
+-      if (one_group && i > 0) {
+-         subq->kbase.group_handle = queue->subqueues[0].kbase.group_handle;
+-      } else if (kbase_kmod_csf_group_create(
+-                    dev->kmod.dev, one_group ? PANVK_SUBQUEUE_COUNT : 1,
+-                    one_group, &subq->kbase.group_handle)) {
++      if (kbase_kmod_csf_group_create(dev->kmod.dev, 1,
++                                      &subq->kbase.group_handle)) {
+          result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                                "Failed to create a kbase queue group");
+          goto err_destroy_group;
+@@ -1173,7 +1310,7 @@ kbase_create_group(struct panvk_gpu_queue *queue)
+       }
+ 
+       subq->kbase.user_io = kbase_kmod_csf_queue_bind(
+-         dev->kmod.dev, subq->kbase.group_handle, one_group ? i : 0,
++         dev->kmod.dev, subq->kbase.group_handle, 0,
+          subq->kbase.ringbuf_dev,
+          KBASE_RINGBUF_SIZE);
+       if (!subq->kbase.user_io) {
+@@ -2115,11 +2252,14 @@ kbase_spare_heap_job(void *job, void *gdata, int thread_index)
+    const struct panvk_physical_device *phys_dev =
+       to_panvk_physical_device(dev->vk.physical);
+ 
++   uint32_t initial_chunks, max_chunks;
++
++   kbase_heap_chunks(phys_dev, &initial_chunks, &max_chunks);
++
+    /* On failure ctx stays 0 and the renewal creates the heap itself. */
+    if (kbase_kmod_csf_tiler_heap_create(
+           dev->kmod.dev, queue->tiler_heap.chunk_size,
+-          phys_dev->csf.tiler.initial_chunks,
+-          kbase_tiler_heap_max_chunks(phys_dev), 65535, 0,
++          initial_chunks, max_chunks, 65535, 0,
+           &queue->kbase_spare_heap.ctx, &queue->kbase_spare_heap.first_chunk))
+       queue->kbase_spare_heap.ctx = 0;
+ }
+@@ -2203,17 +2343,26 @@ kbase_destroy_heaps_kick(struct panvk_gpu_queue *queue)
+ }
+ 
+ /* Hands a retired heap context to the worker thread, or destroys it inline if
+- * no worker exists or the ring is full (neither happens in practice). */
++ * no worker exists or the backlog is full (PANVK_KBASE_HEAP_TERM_MAX, default
++ * 2: a deep backlog keeps the chunk allocator lagging behind the GPU). */
+ static void
+ kbase_queue_heap_destroy(struct panvk_gpu_queue *queue, uint64_t ctx)
+ {
++   /* PANVK_KBASE_SAFE_SUBMIT keeps the TERM on the submitting thread: the
++    * worker defers chunk/VA release, which is exactly the window under test. */
++   if (kbase_safe_submit()) {
++      struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
++      kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
++      return;
++   }
++
+    uint32_t head =
+       __atomic_load_n(&queue->kbase_destroy.head, __ATOMIC_RELAXED);
+    uint32_t tail =
+       __atomic_load_n(&queue->kbase_destroy.tail, __ATOMIC_ACQUIRE);
+ 
+    if (!queue->kbase_spare_heap.enabled ||
+-       head - tail >= PANVK_KBASE_DESTROY_RING) {
++       head - tail >= kbase_heap_destroy_max()) {
+       struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+       kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, ctx);
+       return;
+@@ -2235,6 +2384,8 @@ kbase_spare_heap_init(struct panvk_gpu_queue *queue)
+    queue->kbase_destroy.head = 0;
+    queue->kbase_destroy.tail = 0;
+    queue->kbase_destroy.job_pending = false;
++   queue->kbase_heap_slots = kbase_heap_slots();
++   queue->kbase_heap_eager_term = kbase_heap_eager_term();
+    kbase_spare_heap_kick(queue);
+ }
+ 
+@@ -2321,12 +2472,15 @@ init_tiler(struct panvk_gpu_queue *queue)
+       /* Match the Valhall G610/G710 kbase reference.  The panthor-derived
+        * limit of 64 can strand large geometry workloads on the tiler iterator;
+        * larger multi-GiB limits can trigger Android's global OOM killer. */
+-      const uint32_t tiler_heap_max_chunks =
++      uint32_t tiler_heap_max_chunks =
+          kbase_tiler_heap_max_chunks(phys_dev);
+ 
++      uint32_t initial_chunks;
++
++      kbase_heap_chunks(phys_dev, &initial_chunks, &tiler_heap_max_chunks);
+       if (kbase_kmod_csf_tiler_heap_create(
+              dev->kmod.dev, tiler_heap->chunk_size,
+-             phys_dev->csf.tiler.initial_chunks, tiler_heap_max_chunks,
++             initial_chunks, tiler_heap_max_chunks,
+              65535, tiler_heap_mem_group, &heap_ctx_va, &first_chunk_va)) {
+          result = panvk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                                "Failed to create a tiler heap context");
+@@ -2471,8 +2625,7 @@ kbase_try_destroy_retired_heap(struct panvk_gpu_queue *queue)
+            queue->kbase_retired_heap_count *
+               sizeof(queue->kbase_retired_heaps[0]));
+ 
+-   return queue->kbase_retired_heap_count <
+-          ARRAY_SIZE(queue->kbase_retired_heaps);
++   return queue->kbase_retired_heap_count < queue->kbase_heap_slots - 1;
+ }
+ 
+ static VkResult
+@@ -2482,31 +2635,50 @@ kbase_renew_tiler_heap(struct panvk_gpu_queue *queue)
+    const struct panvk_physical_device *phys_dev =
+       to_panvk_physical_device(dev->vk.physical);
+    struct panvk_tiler_heap *tiler_heap = &queue->tiler_heap;
+-   const uint32_t max_chunks = kbase_tiler_heap_max_chunks(phys_dev);
++   uint32_t max_chunks = kbase_tiler_heap_max_chunks(phys_dev);
+    uint64_t new_ctx, first_chunk;
+ 
+-   /* Hold at most PANVK_KBASE_HEAP_SLOTS - 1 retired contexts: if they are
+-    * all still firmware-visible, skip this renewal (VK_INCOMPLETE) and retry
+-    * on a later graphics submission.  The next descriptor slot belonged to
+-    * the oldest heap, which is destroyed by now. */
++   /* SAFE mode: let every job already handed to the graphics subqueues retire
++    * before the tiler heap it references is replaced and freed. */
++   if (kbase_safe_submit()) {
++      uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
++
++      targets[PANVK_SUBQUEUE_VERTEX_TILER] =
++         queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs;
++      targets[PANVK_SUBQUEUE_FRAGMENT] =
++         queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs;
++
++      VkResult result = kbase_wait_sync_targets(queue, targets, UINT64_MAX);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++
++   /* Hold at most kbase_heap_slots - 1 retired contexts: if they are all
++    * still firmware-visible, skip this renewal (VK_INCOMPLETE) and retry on a
++    * later graphics submission.  The next descriptor slot belonged to the
++    * oldest heap, which is destroyed by now. */
+    if (!kbase_try_destroy_retired_heap(queue))
+       return VK_INCOMPLETE;
+ 
+    new_ctx = kbase_spare_heap_take(queue, &first_chunk);
+-   if (!new_ctx &&
+-       kbase_kmod_csf_tiler_heap_create(
+-          dev->kmod.dev, tiler_heap->chunk_size,
+-          phys_dev->csf.tiler.initial_chunks, max_chunks, 65535, 0,
+-          &new_ctx, &first_chunk)) {
+-      return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                          "Failed to renew the kbase tiler heap");
++   if (!new_ctx) {
++      uint32_t initial_chunks;
++
++      kbase_heap_chunks(phys_dev, &initial_chunks, &max_chunks);
++      if (kbase_kmod_csf_tiler_heap_create(
++             dev->kmod.dev, tiler_heap->chunk_size,
++             initial_chunks, max_chunks, 65535, 0,
++             &new_ctx, &first_chunk)) {
++         return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                             "Failed to renew the kbase tiler heap");
++      }
+    }
+    kbase_spare_heap_kick(queue);
+ 
+    uint64_t old_ctx = tiler_heap->context.dev_addr;
+    tiler_heap->context.dev_addr = new_ctx;
+ 
+-   const uint32_t slot = (queue->kbase_heap_slot + 1) % PANVK_KBASE_HEAP_SLOTS;
++   const uint32_t slot = (queue->kbase_heap_slot + 1) % queue->kbase_heap_slots;
+    const uint32_t slot_offset = slot * KBASE_HEAP_DESC_SLOT_STRIDE;
+    panvk_priv_mem_write_desc(tiler_heap->desc, slot_offset, TILER_HEAP, cfg) {
+       cfg.size = tiler_heap->chunk_size;
+@@ -3105,6 +3277,7 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
+                                        qsubmit->latest_flush,
+                                        submit->phys_dev->kmod.dev->props.gpu_id,
+                                        queue->kbase_gpu_waits[qsubmit->queue_index],
++                                       kbase_safe_submit() ||
+                                        !(flushed & BITFIELD_BIT(qsubmit->queue_index)));
+       if (result != VK_SUCCESS)
+          return vk_queue_set_lost(&queue->vk, "kbase: ring emission failed");
+@@ -3146,6 +3319,13 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
+          queue->kbase_tiler_work_count += submit->tiler_work_estimate;
+    }
+ 
++   /* Reclaim retired heaps as soon as their graphics work completed instead
++    * of waiting for the next renewal, so a retired heap and its chunks stay
++    * resident for at most one submission. */
++   if (touched && queue->kbase_heap_eager_term &&
++       queue->kbase_retired_heap_count)
++      kbase_try_destroy_retired_heap(queue);
++
+    uint64_t renew_work = kbase_tiler_heap_renew_work();
+    if (submit->tiler_work_estimate &&
+        (queue->kbase_tiler_submit_count >=
+@@ -3366,6 +3546,8 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
+    if (vk_queue_is_lost(vk_queue))
+       return VK_ERROR_DEVICE_LOST;
+ 
++   panvk_import_probe_tick();
++
+    if (vk_queue_submit_has_bind(vk_submit)) {
+       struct panvk_gpu_queue *queue = container_of(vk_queue, struct panvk_gpu_queue, vk);
+       return panvk_queue_vm_bind(vk_queue, vk_submit, queue->syncobj_handle);
+diff --git a/src/panfrost/vulkan/panvk_async_bind.c b/src/panfrost/vulkan/panvk_async_bind.c
+index 06deb2c..43c34f5 100644
+--- a/src/panfrost/vulkan/panvk_async_bind.c
++++ b/src/panfrost/vulkan/panvk_async_bind.c
+@@ -10,6 +10,174 @@
+ #include "panvk_device_memory.h"
+ #include "panvk_image.h"
+ #include "panvk_macros.h"
++#include <sys/mman.h>
++
++/* --- kbase sparse readback mirror -------------------------------------
++ * kbase cannot remap pages into a sparse buffer's GPU VA, so GPU writes to
++ * a sparse buffer land in the backing BO while the app reads the bound
++ * memory through its own CPU mapping. Keep a bind table and periodically
++ * copy the backing windows back into the bound memory so CPU readback of
++ * GPU-finished data sees the real pixels.
++ */
++struct sparse_mirror_rec {
++   VkBuffer buf;
++   VkDeviceMemory mem;
++   uint64_t res_off;
++   uint64_t mem_off;
++   uint64_t size;
++};
++
++#define SPARSE_MIRROR_MAX 8192
++static struct sparse_mirror_rec sparse_mirror_recs[SPARSE_MIRROR_MAX];
++static uint32_t sparse_mirror_rec_count;
++static uint32_t sparse_mirror_cursor;
++static uint64_t sparse_mirror_bytes;
++static uint32_t sparse_mirror_submits;
++static uint64_t sparse_mirror_up_bytes;
++static uint64_t sparse_mirror_down_bytes;
++static uint32_t sparse_mirror_syncs;
++
++static void sparse_mirror_sync_bind(VkBuffer buf, VkDeviceMemory mem,
++                                    uint64_t res_off, uint64_t mem_off,
++                                    uint64_t size);
++
++void
++panvk_sparse_mirror_forget(VkBuffer buf, VkDeviceMemory mem)
++{
++   for (uint32_t i = 0; i < sparse_mirror_rec_count;) {
++      if ((buf != VK_NULL_HANDLE && sparse_mirror_recs[i].buf == buf) ||
++          (mem != VK_NULL_HANDLE && sparse_mirror_recs[i].mem == mem))
++         sparse_mirror_recs[i] = sparse_mirror_recs[--sparse_mirror_rec_count];
++      else
++         i++;
++   }
++}
++
++static void
++sparse_mirror_record(VkBuffer buf, VkDeviceMemory mem, uint64_t res_off,
++                     uint64_t mem_off, uint64_t size)
++{
++   uint32_t i;
++   for (i = 0; i < sparse_mirror_rec_count; i++) {
++      if (sparse_mirror_recs[i].buf == buf &&
++          sparse_mirror_recs[i].res_off == res_off) {
++         sparse_mirror_recs[i].mem = mem;
++         sparse_mirror_recs[i].mem_off = mem_off;
++         sparse_mirror_recs[i].size = size;
++         return;
++      }
++   }
++   if (sparse_mirror_rec_count >= SPARSE_MIRROR_MAX)
++      return;
++   sparse_mirror_recs[i] = (struct sparse_mirror_rec) {
++      .buf = buf, .mem = mem, .res_off = res_off,
++      .mem_off = mem_off, .size = size,
++   };
++   sparse_mirror_rec_count++;
++}
++
++static uint64_t
++sparse_mirror_run(uint64_t budget)
++{
++   uint64_t copied = 0;
++
++   if (sparse_mirror_rec_count == 0)
++      return 0;
++
++   for (uint32_t n = 0; n < sparse_mirror_rec_count && copied < budget; n++) {
++      struct sparse_mirror_rec *r =
++         &sparse_mirror_recs[sparse_mirror_cursor++ % sparse_mirror_rec_count];
++      VK_FROM_HANDLE(panvk_buffer, b, r->buf);
++      VK_FROM_HANDLE(panvk_device_memory, m, r->mem);
++
++      if (b->sparse_backing == NULL || !b->sparse_backing_full)
++         continue;
++      if (m->addr.host == NULL)
++         continue;
++
++      void *bhost = pan_kmod_bo_mmap(b->sparse_backing, PROT_READ,
++                                     MAP_SHARED, NULL);
++      if (bhost == NULL || bhost == MAP_FAILED)
++         continue;
++
++      uint64_t nbytes = MIN2(r->size, budget - copied);
++      memcpy((char *)m->addr.host + r->mem_off,
++             (char *)bhost + r->res_off, nbytes);
++      pan_kmod_bo_munmap(b->sparse_backing, bhost, 0);
++      copied += nbytes;
++   }
++   sparse_mirror_bytes += copied;
++   return copied;
++}
++
++/* --- CPU -> backing upload ---------------------------------------------
++ * The app writes guest memory through its CPU mapping and expects the GPU
++ * to see it.  kbase cannot alias those pages into the sparse buffer, so
++ * refresh the backing windows right before every GPU submission.
++ */
++static void
++sparse_mirror_cache_clean(const void *start, size_t size)
++{
++#if defined(__aarch64__)
++   uintptr_t ptr = (uintptr_t)start & ~(uintptr_t)63;
++   uintptr_t end = ((uintptr_t)start + size + 63) & ~(uintptr_t)63;
++
++   for (; ptr < end; ptr += 64)
++      __asm__ volatile("dc cvac, %0" : : "r"(ptr) : "memory");
++   __asm__ volatile("dsb sy" ::: "memory");
++#else
++   (void)start;
++   (void)size;
++#endif
++}
++
++void
++panvk_sparse_mirror_upload(void)
++{
++   static uint32_t upload_cursor;
++   static uint64_t upload_submits;
++   static uint64_t upload_bytes;
++   const uint64_t budget = 64ull << 20;
++   uint64_t copied = 0;
++   uint64_t rec_bytes = 0;
++
++   if (sparse_mirror_rec_count == 0)
++      return;
++
++   for (uint32_t n = 0; n < sparse_mirror_rec_count && copied < budget; n++) {
++      struct sparse_mirror_rec *r =
++         &sparse_mirror_recs[upload_cursor++ % sparse_mirror_rec_count];
++      VK_FROM_HANDLE(panvk_buffer, b, r->buf);
++      VK_FROM_HANDLE(panvk_device_memory, m, r->mem);
++
++      rec_bytes += r->size;
++
++      if (b->sparse_backing == NULL || !b->sparse_backing_full)
++         continue;
++      if (m->addr.host == NULL)
++         continue;
++
++      void *bhost = pan_kmod_bo_mmap(b->sparse_backing,
++                                     PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
++      if (bhost == NULL || bhost == MAP_FAILED)
++         continue;
++
++      uint64_t nbytes = MIN2(r->size, budget - copied);
++      memcpy((char *)bhost + r->res_off,
++             (const char *)m->addr.host + r->mem_off, nbytes);
++      sparse_mirror_cache_clean((char *)bhost + r->res_off, nbytes);
++      copied += nbytes;
++   }
++
++   upload_bytes += copied;
++   if ((++upload_submits % 64) == 0)
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] upload stats: submits=%llu recs=%u "
++              "rec_bytes=%llu MiB up_total=%llu MiB\n",
++              (unsigned long long)upload_submits, sparse_mirror_rec_count,
++              (unsigned long long)(rec_bytes >> 20),
++              (unsigned long long)(upload_bytes >> 20));
++}
++#include <string.h>
+ #include "pan_layout.h"
+ 
+ #include "vk_drm_syncobj.h"
+@@ -408,6 +576,143 @@ panvk_async_bind_do(struct panvk_async_bind *submit,
+    return panvk_async_bind_process_signals(submit);
+ }
+ 
++/* kbase has no DRM syncobjs, no explicit-VA vm_bind and no async VM ops, so a
++ * sparse bind submit cannot be executed as a real GPU-side bind.  Sparse
++ * buffers are fully backed by a real BO at creation time (see panvk_buffer.c),
++ * which makes the binds themselves no-ops; only the sync chain has to be
++ * honoured.  Do that synchronously on the CPU.
++ */
++static VkResult
++panvk_queue_vm_bind_kbase(struct vk_queue *vk_queue,
++                          struct vk_queue_submit *vk_submit)
++{
++   struct panvk_device *device = to_panvk_device(vk_queue->base.device);
++   VkResult result;
++
++   for (uint32_t i = 0; i < vk_submit->wait_count; i++) {
++      const struct vk_sync_wait *wait = &vk_submit->waits[i];
++
++      result = vk_sync_wait(&device->vk, wait->sync, wait->wait_value,
++                            VK_SYNC_WAIT_COMPLETE, UINT64_MAX);
++      if (result != VK_SUCCESS)
++         return vk_queue_set_lost(vk_queue, "kbase sparse bind wait: %m");
++   }
++
++   uint32_t buffer_bind_count = 0, image_opaque_bind_count = 0,
++            image_bind_count = 0;
++   for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++)
++      buffer_bind_count += vk_submit->buffer_binds[i].bindCount;
++   for (uint32_t i = 0; i < vk_submit->image_opaque_bind_count; i++)
++      image_opaque_bind_count += vk_submit->image_opaque_binds[i].bindCount;
++   for (uint32_t i = 0; i < vk_submit->image_bind_count; i++)
++      image_bind_count += vk_submit->image_binds[i].bindCount;
++
++   static uint32_t bind_submit_log_count;
++   if (bind_submit_log_count++ < 16) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] kbase sparse bind submit: buffers=%u/%u "
++              "image_opaque=%u/%u images=%u/%u waits=%u signals=%u\n",
++              vk_submit->buffer_bind_count, buffer_bind_count,
++              vk_submit->image_opaque_bind_count, image_opaque_bind_count,
++              vk_submit->image_bind_count, image_bind_count,
++              vk_submit->wait_count, vk_submit->signal_count);
++   }
++
++   static uint32_t detail_count;
++   static uint32_t submit_seq;
++   uint64_t total_bytes = 0, min_off = UINT64_MAX, max_end = 0;
++   uint32_t mem_count = 0;
++   struct panvk_device_memory *seen_mems[8];
++   bool log_this = submit_seq < 4 || (submit_seq % 16) == 0;
++
++   submit_seq++;
++
++   for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++) {
++      VK_FROM_HANDLE(panvk_buffer, dbuf, vk_submit->buffer_binds[i].buffer);
++      for (uint32_t j = 0; j < vk_submit->buffer_binds[i].bindCount; j++) {
++         const VkSparseMemoryBind *mbind = &vk_submit->buffer_binds[i].pBinds[j];
++         struct panvk_device_memory *dmem = NULL;
++         uint64_t mem_va = 0;
++         void *mem_host = NULL;
++         uint32_t mem_word = 0;
++
++         if (mbind->memory != VK_NULL_HANDLE) {
++            VK_FROM_HANDLE(panvk_device_memory, dmem_i, mbind->memory);
++            dmem = dmem_i;
++            mem_va = dmem->addr.dev + mbind->memoryOffset;
++            if (dmem->addr.host != NULL)
++               mem_host = (char *)dmem->addr.host + mbind->memoryOffset;
++            if (mem_host != NULL)
++               memcpy(&mem_word, mem_host, sizeof(mem_word));
++         }
++
++         total_bytes += mbind->size;
++         min_off = MIN2(min_off, mbind->resourceOffset);
++         max_end = MAX2(max_end, mbind->resourceOffset + mbind->size);
++
++         if (dmem != NULL && mem_count < ARRAY_SIZE(seen_mems)) {
++            bool dup = false;
++            for (uint32_t k = 0; k < mem_count; k++)
++               dup |= seen_mems[k] == dmem;
++            if (!dup)
++               seen_mems[mem_count++] = dmem;
++         }
++
++         if (log_this && detail_count < 8) {
++            PANVK_DIAG_PRINTF("[PANVK-DIAG] bind[%u] buf_va=0x%llx off=0x%llx "
++                    "size=0x%llx mem_va=0x%llx mem_host=%p mem_word=0x%08x "
++                    "full=%d\n",
++                    detail_count, (unsigned long long)dbuf->vk.device_address,
++                    (unsigned long long)mbind->resourceOffset,
++                    (unsigned long long)mbind->size,
++                    (unsigned long long)mem_va, mem_host, mem_word,
++                    (int)dbuf->sparse_backing_full);
++            detail_count++;
++         }
++      }
++   }
++
++   if (log_this) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] bind submit#%u: total=0x%llx "
++              "min_off=0x%llx max_end=0x%llx distinct_mem=%u recs=%u "
++              "mirror_total=%llu MiB\n",
++              submit_seq, (unsigned long long)total_bytes,
++              (unsigned long long)(min_off == UINT64_MAX ? 0 : min_off),
++              (unsigned long long)max_end, mem_count,
++              sparse_mirror_rec_count,
++              (unsigned long long)(sparse_mirror_bytes >> 20));
++   }
++
++   /* Publish GPU results of the previous binding, then upload the new
++    * contents, for exactly the ranges being (re)bound. */
++   for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++) {
++      VkBuffer vkbuf = vk_submit->buffer_binds[i].buffer;
++      for (uint32_t j = 0; j < vk_submit->buffer_binds[i].bindCount; j++) {
++         const VkSparseMemoryBind *mbind = &vk_submit->buffer_binds[i].pBinds[j];
++         if (mbind->memory != VK_NULL_HANDLE && mbind->size > 0)
++            sparse_mirror_sync_bind(vkbuf, mbind->memory, mbind->resourceOffset,
++                                    mbind->memoryOffset, mbind->size);
++      }
++   }
++
++   if ((++sparse_mirror_submits % 64) == 0) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] mirror stats: submits=%u recs=%u "
++              "total=%llu MiB\n",
++              sparse_mirror_submits, sparse_mirror_rec_count,
++              (unsigned long long)(sparse_mirror_bytes >> 20));
++   }
++
++   for (uint32_t i = 0; i < vk_submit->signal_count; i++) {
++      const struct vk_sync_signal *signal = &vk_submit->signals[i];
++
++      result = vk_sync_signal(&device->vk, signal->sync,
++                              signal->signal_value);
++      if (result != VK_SUCCESS)
++         return vk_queue_set_lost(vk_queue, "kbase sparse bind signal: %m");
++   }
++
++   return VK_SUCCESS;
++}
++
+ VkResult
+ panvk_queue_vm_bind(struct vk_queue *vk_queue,
+                     struct vk_queue_submit *vk_submit, uint32_t syncobj_handle)
+@@ -416,6 +721,11 @@ panvk_queue_vm_bind(struct vk_queue *vk_queue,
+    struct panvk_async_bind submit;
+    VkResult result = VK_SUCCESS;
+ 
++   struct panvk_physical_device *phys_dev =
++      to_panvk_physical_device(device->vk.physical);
++   if (phys_dev->kbase_node_path[0] != '\0')
++      return panvk_queue_vm_bind_kbase(vk_queue, vk_submit);
++
+    panvk_async_bind_init(&submit, device, syncobj_handle, vk_submit);
+ 
+    int ret = panvk_async_bind_do(&submit, vk_submit);
+@@ -426,3 +736,188 @@ panvk_queue_vm_bind(struct vk_queue *vk_queue,
+ 
+    return result;
+ }
++
++#if defined(__aarch64__)
++static void
++sparse_mirror_cache_inval(const void *start, size_t size)
++{
++   uintptr_t ptr = (uintptr_t)start & ~(uintptr_t)63;
++   uintptr_t end = ((uintptr_t)start + size + 63) & ~(uintptr_t)63;
++
++   for (; ptr < end; ptr += 64)
++      __asm__ volatile("dc civac, %0" : : "r"(ptr) : "memory");
++   __asm__ volatile("dsb sy" ::: "memory");
++}
++#else
++static void
++sparse_mirror_cache_inval(const void *start, size_t size)
++{
++   (void)start;
++   (void)size;
++}
++#endif
++
++static void
++sparse_mirror_copy_range(VkBuffer buf, VkDeviceMemory mem, uint64_t res_off,
++                         uint64_t mem_off, uint64_t size, bool to_backing)
++{
++   VK_FROM_HANDLE(panvk_buffer, b, buf);
++   VK_FROM_HANDLE(panvk_device_memory, m, mem);
++
++   if (b == NULL || m == NULL || size == 0 ||
++       b->sparse_backing == NULL || !b->sparse_backing_full ||
++       m->addr.host == NULL)
++      return;
++
++   void *bhost = pan_kmod_bo_mmap(b->sparse_backing, PROT_READ | PROT_WRITE,
++                                  MAP_SHARED, NULL);
++   if (bhost == NULL || bhost == MAP_FAILED)
++      return;
++
++   char *ahost = (char *)bhost + res_off;
++   char *mhost = (char *)m->addr.host + mem_off;
++
++   if (to_backing) {
++      memcpy(ahost, mhost, size);
++      sparse_mirror_cache_clean(ahost, size);
++      sparse_mirror_up_bytes += size;
++   } else {
++      sparse_mirror_cache_inval(ahost, size);
++      memcpy(mhost, ahost, size);
++      sparse_mirror_down_bytes += size;
++   }
++
++   pan_kmod_bo_munmap(b->sparse_backing, bhost, 0);
++}
++
++static void
++sparse_mirror_sync_bind(VkBuffer buf, VkDeviceMemory mem, uint64_t res_off,
++                        uint64_t mem_off, uint64_t size)
++{
++   /* The GPU may have written the previously bound window: publish it back
++    * to that memory before its contents are replaced. */
++   for (uint32_t i = 0; i < sparse_mirror_rec_count; i++) {
++      struct sparse_mirror_rec *r = &sparse_mirror_recs[i];
++
++      if (r->buf == buf && r->res_off == res_off && r->mem != mem)
++         sparse_mirror_copy_range(buf, r->mem, res_off, r->mem_off,
++                                  MIN2(r->size, size), false);
++   }
++
++   sparse_mirror_record(buf, mem, res_off, mem_off, size);
++   sparse_mirror_copy_range(buf, mem, res_off, mem_off, size, true);
++
++   if ((++sparse_mirror_syncs % 256) == 0)
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] sparse sync: binds=%u up=%llu MiB "
++                        "down=%llu MiB recs=%u\n",
++                        sparse_mirror_syncs,
++                        (unsigned long long)(sparse_mirror_up_bytes >> 20),
++                        (unsigned long long)(sparse_mirror_down_bytes >> 20),
++                        sparse_mirror_rec_count);
++}
++
++static void
++sparse_probe_words(const void *base, uint64_t offset, uint64_t size,
++                   uint64_t *nz, uint64_t *hash)
++{
++   const uint32_t *p = (const uint32_t *)((const char *)base + offset);
++   const uint64_t nwords = MIN2(size, (uint64_t)16384);
++
++   *nz = 0;
++   *hash = 1469598103934665603ull;
++   for (uint64_t i = 0; i < nwords; i++) {
++      *nz += (p[i] != 0);
++      *hash = (*hash ^ p[i]) * 1099511628211ull;
++   }
++}
++
++void
++panvk_sparse_mirror_probe(void)
++{
++   static uint32_t probe_ticks;
++
++   if ((probe_ticks++ % 8) != 0 || sparse_mirror_rec_count == 0)
++      return;
++
++   /* Scan the first 4 KiB of every bound range and report whether any of it
++    * ever receives data. */
++   {
++      VkBuffer cur_buf = VK_NULL_HANDLE;
++      struct pan_kmod_bo *cur_bo = NULL;
++      void *cur_host = NULL;
++      uint64_t recs_seen = 0, bytes_seen = 0, total_nz = 0;
++
++      for (uint32_t i = 0; i < sparse_mirror_rec_count; i++) {
++         struct sparse_mirror_rec *r = &sparse_mirror_recs[i];
++
++         if (r->buf != cur_buf) {
++            if (cur_bo != NULL)
++               pan_kmod_bo_munmap(cur_bo, cur_host, 0);
++            cur_bo = NULL;
++            cur_host = NULL;
++            cur_buf = r->buf;
++
++            VK_FROM_HANDLE(panvk_buffer, b, cur_buf);
++            if (b != NULL && b->sparse_backing != NULL) {
++               cur_bo = b->sparse_backing;
++               cur_host = pan_kmod_bo_mmap(cur_bo, PROT_READ, MAP_SHARED, NULL);
++               if (cur_host == MAP_FAILED)
++                  cur_host = NULL;
++            }
++         }
++         if (cur_host == NULL)
++            continue;
++
++         uint64_t nz, hash;
++         sparse_mirror_cache_inval((char *)cur_host + r->res_off,
++                                   MIN2(r->size, (uint64_t)4096));
++         sparse_probe_words(cur_host, r->res_off, MIN2(r->size, (uint64_t)4096),
++                            &nz, &hash);
++         recs_seen++;
++         bytes_seen += MIN2(r->size, (uint64_t)4096);
++         total_nz += nz;
++      }
++      if (cur_bo != NULL)
++         pan_kmod_bo_munmap(cur_bo, cur_host, 0);
++
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] SPARSE ALL: recs=%llu sampled=%llu KiB "
++                        "nz=%llu words\n",
++                        (unsigned long long)recs_seen,
++                        (unsigned long long)(bytes_seen >> 10),
++                        (unsigned long long)total_nz);
++   }
++
++   for (uint32_t i = (sparse_mirror_rec_count > 4 ? sparse_mirror_rec_count - 4 : 0);
++        i < sparse_mirror_rec_count; i++) {
++      struct sparse_mirror_rec *r = &sparse_mirror_recs[i];
++      VK_FROM_HANDLE(panvk_buffer, b, r->buf);
++      VK_FROM_HANDLE(panvk_device_memory, m, r->mem);
++
++      if (b == NULL || m == NULL || m->addr.host == NULL ||
++          b->sparse_backing == NULL)
++         continue;
++
++      void *bhost = pan_kmod_bo_mmap(b->sparse_backing, PROT_READ,
++                                     MAP_SHARED, NULL);
++      if (bhost == NULL || bhost == MAP_FAILED)
++         continue;
++
++      sparse_mirror_cache_inval((char *)bhost + r->res_off,
++                                MIN2(r->size, (uint64_t)65536));
++      sparse_mirror_cache_inval((char *)m->addr.host + r->mem_off,
++                                MIN2(r->size, (uint64_t)65536));
++
++      uint64_t mnz, mhash, anz, ahash;
++      sparse_probe_words(m->addr.host, r->mem_off, r->size, &mnz, &mhash);
++      sparse_probe_words(bhost, r->res_off, r->size, &anz, &ahash);
++
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] SPARSE[%u]: off=0x%llx size=0x%llx "
++                        "mem nz=%llu hash=%016llx | arena nz=%llu hash=%016llx\n",
++                        i, (unsigned long long)r->res_off,
++                        (unsigned long long)r->size,
++                        (unsigned long long)mnz, (unsigned long long)mhash,
++                        (unsigned long long)anz, (unsigned long long)ahash);
++
++      pan_kmod_bo_munmap(b->sparse_backing, bhost, 0);
++   }
++}
+diff --git a/src/panfrost/vulkan/panvk_buffer.c b/src/panfrost/vulkan/panvk_buffer.c
+index 1a29470..652fa39 100644
+--- a/src/panfrost/vulkan/panvk_buffer.c
++++ b/src/panfrost/vulkan/panvk_buffer.c
+@@ -93,6 +93,11 @@ panvk_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
+       panvk_address_binding_report(device, &buffer->vk.base,
+                                    buffer->vk.device_address, buffer->vk.size,
+                                    VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
++
++      buffer->diag_bo = mem->bo;
++      buffer->diag_mem_off = pBindInfos[i].memoryOffset;
++
++      panvk_import_probe_track_buffer(pBindInfos[i].buffer, mem->bo);
+    }
+    return VK_SUCCESS;
+ }
+@@ -112,6 +117,11 @@ panvk_CreateBuffer(VkDevice _device, const VkBufferCreateInfo *pCreateInfo,
+    if (buffer == NULL)
+       return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
++   if (buffer->vk.size >= (32ull << 20))
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] CreateBuffer size=%llu MiB flags=0x%x usage=0x%x\n",
++              (unsigned long long)(buffer->vk.size >> 20),
++              (unsigned)buffer->vk.create_flags, (unsigned)buffer->vk.usage);
++
+    struct panvk_physical_device *phys_dev =
+       to_panvk_physical_device(device->vk.physical);
+    if (buffer->vk.size > panvk_get_max_buffer_size(phys_dev)) {
+@@ -122,6 +132,76 @@ panvk_CreateBuffer(VkDevice _device, const VkBufferCreateInfo *pCreateInfo,
+    if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
+       uint64_t va_range = panvk_buffer_get_sparse_size(buffer);
+ 
++      /* kbase assigns GPU VAs at BO allocation time and has no native sparse
++       * VM op, so the generic dummy-object emulation can never map the range
++       * at the caller-chosen VA.  Back the whole range with a real zeroed BO
++       * and use the kernel-assigned VA instead.  panvk does not implement
++       * vkQueueBindSparse, so sparse buffers are only ever used unbound.
++       */
++      if (!pan_kmod_vm_supports_native_sparse(device->kmod.vm)) {
++         /* A sparse buffer can be several GiB wide while the game only
++          * touches a small part of it.  Ask kbase to grow the region on GPU
++          * page faults (GROW_ON_GPF, 2 MiB steps) instead of pinning the
++          * whole range up front; otherwise a handful of these buffers
++          * exhausts system memory and the low-memory killer takes the app
++          * down.  The BO is never CPU-mapped (NO_MMAP), so only the GPU can
++          * commit pages.  Fall back to the fully committed BO if the kernel
++          * rejects growable regions. */
++         static uint64_t sparse_backing_total;
++         bool full_backing =
++            sparse_backing_total + va_range <= (3ull << 30);
++         if (full_backing)
++            sparse_backing_total += va_range;
++         struct pan_kmod_bo *bo =
++            pan_kmod_bo_alloc(device->kmod.dev, device->kmod.vm, va_range,
++                              full_backing ? 0 :
++                              PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT);
++         if (bo == NULL) {
++            PANVK_DIAG_PRINTF("[PANVK-DIAG] sparse buffer growable alloc "
++                    "failed for %llu MiB, falling back to full commit\n",
++                    (unsigned long long)(va_range >> 20));
++            bo = pan_kmod_bo_alloc(device->kmod.dev, device->kmod.vm, va_range,
++                                   PAN_KMOD_BO_FLAG_NO_MMAP);
++         }
++         int bind_ret = -1;
++
++         if (bo != NULL) {
++            struct pan_kmod_vm_op map = {
++               .type = PAN_KMOD_VM_OP_TYPE_MAP,
++               .va = {
++                  .start = PAN_KMOD_VM_MAP_AUTO_VA,
++                  .size = va_range,
++               },
++               .map = {
++                  .bo = bo,
++                  .bo_offset = 0,
++               },
++            };
++
++            bind_ret = pan_kmod_vm_bind(device->kmod.vm,
++                                        PAN_KMOD_VM_OP_MODE_IMMEDIATE, &map, 1);
++            if (bind_ret == 0) {
++               buffer->sparse_backing = bo;
++               buffer->sparse_backing_full = full_backing;
++               buffer->vk.device_address = map.va.start;
++            } else {
++               pan_kmod_bo_put(bo);
++            }
++         }
++
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] sparse buffer backing: size=%llu MiB "
++                 "flags=0x%x backed=%d full=%d va=0x%llx ret=%d\n",
++                 (unsigned long long)(va_range >> 20),
++                 (unsigned)buffer->vk.create_flags,
++                 buffer->sparse_backing != NULL,
++                 buffer->sparse_backing != NULL &&
++                 buffer->sparse_backing_full,
++                 (unsigned long long)buffer->vk.device_address, bind_ret);
++
++         if (buffer->sparse_backing != NULL)
++            goto address_ready;
++      }
++
+       buffer->vk.device_address =
+          panvk_as_alloc(device, &device->as.heap, va_range,
+                         pan_choose_gpu_va_alignment(device->kmod.vm, va_range));
+@@ -153,6 +233,8 @@ panvk_CreateBuffer(VkDevice _device, const VkBufferCreateInfo *pCreateInfo,
+       }
+    }
+ 
++address_ready:
++
+    if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+       panvk_address_binding_report(device, &buffer->vk.base,
+                                    buffer->vk.device_address,
+@@ -177,13 +259,17 @@ VKAPI_ATTR void VKAPI_CALL
+ panvk_DestroyBuffer(VkDevice _device, VkBuffer _buffer,
+                     const VkAllocationCallbacks *pAllocator)
+ {
++   panvk_sparse_mirror_forget(_buffer, VK_NULL_HANDLE);
++
+    VK_FROM_HANDLE(panvk_device, device, _device);
+    VK_FROM_HANDLE(panvk_buffer, buffer, _buffer);
+ 
+    if (!buffer)
+       return;
+ 
+-   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
++   if (buffer->sparse_backing != NULL) {
++      pan_kmod_bo_put(buffer->sparse_backing);
++   } else if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
+       uint64_t va_range = panvk_buffer_get_sparse_size(buffer);
+ 
+       panvk_address_binding_report(device, &buffer->vk.base,
+diff --git a/src/panfrost/vulkan/panvk_buffer.h b/src/panfrost/vulkan/panvk_buffer.h
+index 5b3b47f..d249924 100644
+--- a/src/panfrost/vulkan/panvk_buffer.h
++++ b/src/panfrost/vulkan/panvk_buffer.h
+@@ -11,14 +11,39 @@
+ #include "vk_buffer.h"
+ 
+ struct panvk_priv_bo;
++struct pan_kmod_bo;
+ 
+ struct panvk_buffer {
+    struct vk_buffer vk;
++
++   /* Real BO backing a sparse buffer on backends without native sparse VM
++    * ops (kbase).  NULL for non-sparse buffers and for backends that support
++    * PAN_KMOD_VM_OP_OP_MAP_SPARSE natively.
++    */
++   struct pan_kmod_bo *sparse_backing;
++
++   /* Whether sparse_backing was fully committed and CPU-mappable. */
++   bool sparse_backing_full;
++
++   /* Diagnostic: BO backing this buffer and the offset inside it. */
++   struct pan_kmod_bo *diag_bo;
++   uint64_t diag_mem_off;
+ };
+ 
+ VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_buffer, vk.base, VkBuffer,
+                                VK_OBJECT_TYPE_BUFFER)
+ 
++/* Drop sparse readback-mirror records referencing this buffer and/or memory. */
++void panvk_sparse_mirror_forget(VkBuffer buffer, VkDeviceMemory mem);
++void panvk_sparse_mirror_upload(void);
++void panvk_sparse_mirror_probe(void);
++void panvk_import_probe_tick(void);
++void panvk_diag_note_rt_draw(VkImage img);
++unsigned long long panvk_diag_rt_other_draws(void);
++void panvk_diag_note_vbo(VkBuffer buf);
++void panvk_diag_note_draw(uint64_t vb_addr, uint32_t base, uint32_t count,
++                          uint32_t instances);
++
+ static inline uint64_t
+ panvk_buffer_gpu_ptr(const struct panvk_buffer *buffer, uint64_t offset)
+ {
+diff --git a/src/panfrost/vulkan/panvk_cmd_alloc.h b/src/panfrost/vulkan/panvk_cmd_alloc.h
+index 947300f..770872d 100644
+--- a/src/panfrost/vulkan/panvk_cmd_alloc.h
++++ b/src/panfrost/vulkan/panvk_cmd_alloc.h
+@@ -23,7 +23,7 @@ panvk_cmd_alloc_from_pool(struct panvk_cmd_buffer *cmdbuf,
+ 
+    if (!ptr.gpu) {
+       VkResult error =
+-         panvk_catch_indirect_alloc_failure(VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         panvk_catch_indirect_alloc_failure(panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__));
+       vk_command_buffer_set_error(&cmdbuf->vk, error);
+    }
+ 
+diff --git a/src/panfrost/vulkan/panvk_cmd_pool.c b/src/panfrost/vulkan/panvk_cmd_pool.c
+index 358b5bf..dc5e938 100644
+--- a/src/panfrost/vulkan/panvk_cmd_pool.c
++++ b/src/panfrost/vulkan/panvk_cmd_pool.c
+@@ -14,6 +14,9 @@
+ #include "panvk_entrypoints.h"
+ #include "vk_common_entrypoints.h"
+ 
++#include "pan_props.h"
++
++#include "util/u_debug.h"
+ #include "vk_alloc.h"
+ #include "vk_log.h"
+ 
+@@ -26,8 +29,8 @@ panvk_CreateCommandPool(VkDevice _device,
+    VK_FROM_HANDLE(panvk_device, device, _device);
+    struct panvk_cmd_pool *pool;
+ 
+-   pool = vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*pool), 8,
+-                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++   pool = vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*pool), 8,
++                     VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+    if (pool == NULL)
+       return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
+@@ -75,11 +78,75 @@ panvk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
+    vk_free2(&device->vk.alloc, pAllocator, pool);
+ }
+ 
++/* csf-v11 226: DXVK resets its command pools with flags = 0 after every
++ * submission and never trims them, so 220 freed nothing there and each
++ * pool's free lists stayed at the largest command list it ever recorded
++ * (loading screens included). On a flags = 0 reset, keep what the command
++ * buffers just gave back plus a quarter (at least 2 slabs) for the next
++ * recording, and free older free-list BOs beyond that. v10+ only;
++ * PANVK_CMD_POOL_AUTOTRIM=0 (or PANVK_CMD_POOL_TRIM=0) is the old
++ * behaviour. */
++static bool
++panvk_cmd_pool_autotrim_enabled(struct panvk_device *dev)
++{
++   static int v = -1;
++   if (v < 0)
++      v = debug_get_bool_option("PANVK_CMD_POOL_AUTOTRIM", true);
++   const struct panvk_physical_device *pdev =
++      to_panvk_physical_device(dev->vk.physical);
++   return v && pan_arch(pdev->kmod.dev->props.gpu_id) >= 10;
++}
++
++#define PANVK_CMD_POOL_BO_POOLS 5
++
++/* csf-v11 231: 226 kept only what the last reset gave back (+25%), so a pool
++ * whose recordings vary in size freed BOs at a light reset and allocated
++ * them again at the next heavy one: 656k BOs / 41.9 GB in 6 min of
++ * Fallout 4, with cmd_cs flat. Now each free list keeps the largest count
++ * it got back at any reset in the current and the previous window of
++ * PANVK_CMD_POOL_AUTOTRIM_WINDOW resets (default 64), plus a quarter (at
++ * least 2); a spike is freed one to two windows after it ends.
++ * PANVK_CMD_POOL_AUTOTRIM_WINDOW=0 = the 226 behaviour. */
++static unsigned
++panvk_cmd_pool_autotrim_window(void)
++{
++   static int v = -1;
++   if (v < 0)
++      v = MAX2((int)debug_get_num_option("PANVK_CMD_POOL_AUTOTRIM_WINDOW", 64),
++               0);
++   return v;
++}
++
++static void
++panvk_cmd_pool_bo_pools(struct panvk_cmd_pool *pool,
++                        struct panvk_bo_pool *out[PANVK_CMD_POOL_BO_POOLS])
++{
++   out[0] = &pool->cs_bo_pool;
++   out[1] = &pool->desc_bo_pool;
++   out[2] = &pool->varying_bo_pool;
++   out[3] = &pool->tls_bo_pool;
++   out[4] = &pool->tls_big_bo_pool;
++}
++
++static void
++panvk_bo_pool_trim_to(struct panvk_bo_pool *bo_pool, unsigned have,
++                      unsigned keep)
++{
++   while (have > keep && !list_is_empty(&bo_pool->free_bos)) {
++      struct panvk_priv_bo *bo =
++         list_last_entry(&bo_pool->free_bos, struct panvk_priv_bo, node);
++      list_del(&bo->node);
++      panvk_priv_bo_unref(bo);
++      have--;
++   }
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ panvk_ResetCommandPool(VkDevice _device, VkCommandPool commandPool,
+                        VkCommandPoolResetFlags flags)
+ {
+    VK_FROM_HANDLE(panvk_cmd_pool, pool, commandPool);
++   VK_FROM_HANDLE(panvk_device, device, _device);
+ 
+    const bool release_resources =
+       (flags & VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) != 0;
+@@ -87,5 +154,40 @@ panvk_ResetCommandPool(VkDevice _device, VkCommandPool commandPool,
+       panvk_bo_pool_cleanup(&pool->tls_big_bo_pool);
+    }
+ 
+-   return vk_common_ResetCommandPool(_device, commandPool, flags);
++   struct panvk_bo_pool *bo_pools[PANVK_CMD_POOL_BO_POOLS];
++   unsigned before[PANVK_CMD_POOL_BO_POOLS] = {0};
++   const bool autotrim =
++      !release_resources && panvk_cmd_pool_autotrim_enabled(device);
++   if (autotrim) {
++      panvk_cmd_pool_bo_pools(pool, bo_pools);
++      for (unsigned i = 0; i < PANVK_CMD_POOL_BO_POOLS; i++)
++         before[i] = list_length(&bo_pools[i]->free_bos);
++   }
++
++   VkResult result = vk_common_ResetCommandPool(_device, commandPool, flags);
++
++   /* The command buffer resets above splice their BOs into the pool free
++    * lists. */
++   if (result == VK_SUCCESS && autotrim) {
++      const unsigned window = panvk_cmd_pool_autotrim_window();
++      for (unsigned i = 0; i < PANVK_CMD_POOL_BO_POOLS; i++) {
++         const unsigned after = list_length(&bo_pools[i]->free_bos);
++         const unsigned used = after > before[i] ? after - before[i] : 0;
++         unsigned base = used;
++         if (window) {
++            pool->autotrim.cur[i] = MAX2(pool->autotrim.cur[i], used);
++            base = MAX2(pool->autotrim.cur[i], pool->autotrim.prev[i]);
++         }
++         panvk_bo_pool_trim_to(bo_pools[i], after, base + MAX2(base / 4, 2));
++      }
++      if (window && ++pool->autotrim.resets >= window) {
++         pool->autotrim.resets = 0;
++         for (unsigned i = 0; i < PANVK_CMD_POOL_BO_POOLS; i++) {
++            pool->autotrim.prev[i] = pool->autotrim.cur[i];
++            pool->autotrim.cur[i] = 0;
++         }
++      }
++   }
++
++   return result;
+ }
+diff --git a/src/panfrost/vulkan/panvk_cmd_pool.h b/src/panfrost/vulkan/panvk_cmd_pool.h
+index 9c17320..1ee2384 100644
+--- a/src/panfrost/vulkan/panvk_cmd_pool.h
++++ b/src/panfrost/vulkan/panvk_cmd_pool.h
+@@ -18,6 +18,13 @@ struct panvk_cmd_pool {
+    struct panvk_bo_pool tls_bo_pool;
+    struct panvk_bo_pool tls_big_bo_pool;
+    struct list_head push_sets;
++   /* csf-v11 231: auto-trim hysteresis (226): the largest number of BOs
++    * each free list got back at one reset, in this window of resets and the
++    * previous one. */
++   struct {
++      uint32_t cur[5], prev[5];
++      uint32_t resets;
++   } autotrim;
+ };
+ 
+ VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_cmd_pool, vk.base, VkCommandPool,
+diff --git a/src/panfrost/vulkan/panvk_mempool.c b/src/panfrost/vulkan/panvk_mempool.c
+index 4c7d175..6f3a2c6 100644
+--- a/src/panfrost/vulkan/panvk_mempool.c
++++ b/src/panfrost/vulkan/panvk_mempool.c
+@@ -41,6 +41,12 @@ panvk_pool_alloc_backing(struct panvk_pool *pool, size_t sz)
+                             panvk_get_gpu_page_size(pool->dev));
+    struct panvk_priv_bo *bo = NULL;
+ 
++   if (bo_sz >= (8ull << 20))
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] pool backing slab=%zu req=%zu "
++              "bo_sz=%llu MiB flags=0x%x owns=%d pool=%p\n",
++              pool->base.slab_size, sz, (unsigned long long)(bo_sz >> 20),
++              pool->props.create_flags, (int)pool->props.owns_bos, pool);
++
+    /* If there's a free BO in our BO pool, let's pick it. */
+    if (pool->bo_pool && bo_sz == pool->base.slab_size &&
+        !list_is_empty(&pool->bo_pool->free_bos)) {
+@@ -153,6 +159,15 @@ panvk_pool_alloc_mem(struct panvk_pool *pool, struct panvk_pool_alloc_info info)
+          panvk_priv_bo_ref(bo);
+    }
+ 
++   if (!bo) {
++      /* Pool allocations are indirect; make failures visible before the
++       * caller turns them into a VkResult (which may be lost on abort). */
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] pool alloc FAIL size=%zu align=%u "
++              "slab=%zu flags=0x%x owns=%d pool=%p errno=%d\n",
++              info.size, info.alignment, pool->base.slab_size,
++              pool->props.create_flags, (int)pool->props.owns_bos, pool, errno);
++   }
++
+    /* Track how far allocations have reached so panvk_pool_flush_maps() can
+     * flush only the written prefix.  Only pool-owned BOs are flushed through
+     * the pool lists. */
+@@ -188,6 +203,13 @@ panvk_pool_alloc_aligned(struct panvk_pool *pool, size_t sz, unsigned alignment)
+     * release the BO ref they acquired. */
+    assert(pool->props.owns_bos);
+ 
++   if (sz >= (8ull << 20))
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] pool alloc_aligned size=%llu MiB "
++              "align=%u slab=%zu flags=0x%x pool=%p caller=%p self=%p\n",
++              (unsigned long long)(sz >> 20), alignment,
++              pool->base.slab_size, pool->props.create_flags, pool,
++              __builtin_return_address(0), (void *)panvk_pool_alloc_aligned);
++
+    struct panvk_pool_alloc_info info = {
+       .size = sz,
+       .alignment = alignment,
+diff --git a/src/panfrost/vulkan/panvk_priv_bo.c b/src/panfrost/vulkan/panvk_priv_bo.c
+index 9434efc..7a66238 100644
+--- a/src/panfrost/vulkan/panvk_priv_bo.c
++++ b/src/panfrost/vulkan/panvk_priv_bo.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <assert.h>
++#include <sys/mman.h>
+ 
+ #include "vk_alloc.h"
+ #include "vk_log.h"
+@@ -22,6 +23,11 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
+ {
+    VkResult result;
+    int ret;
++
++   if (size >= (8ull << 20))
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo_create size=%llu MiB flags=0x%x\n",
++              (unsigned long long)(size >> 20), flags);
++
+    struct panvk_priv_bo *priv_bo =
+       vk_zalloc(&dev->vk.alloc, sizeof(*priv_bo), 8, scope);
+ 
+@@ -42,6 +48,9 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
+       priv_bo->addr.host =
+          pan_kmod_bo_mmap(bo, PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+       if (priv_bo->addr.host == MAP_FAILED) {
++         if (size >= (8ull << 20))
++            PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo mmap FAIL size=%llu MiB "
++                    "errno=%d\n", (unsigned long long)(size >> 20), errno);
+          result = panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+          goto err_put_bo;
+       }
+@@ -71,12 +80,21 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
+ 
+    ret = pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
+    if (ret) {
++      if (size >= (8ull << 20))
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo vm_bind FAIL size=%llu MiB "
++                 "ret=%d errno=%d\n", (unsigned long long)(size >> 20), ret,
++                 errno);
+       result = panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       goto err_return_va;
+    }
+ 
+    priv_bo->addr.dev = op.va.start;
+ 
++   if (size >= (8ull << 20))
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo ok size=%llu MiB flags=0x%x "
++              "va=0x%llx host=%p\n", (unsigned long long)(size >> 20), flags,
++              (unsigned long long)priv_bo->addr.dev, priv_bo->addr.host);
++
+    panvk_address_binding_report(dev, NULL, priv_bo->addr.dev,
+                                 pan_kmod_bo_size(priv_bo->bo),
+                                 VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
+@@ -164,6 +182,11 @@ panvk_priv_bo_destroy(struct panvk_priv_bo *priv_bo)
+       assert(!ret);
+    }
+ 
++   /* csf-v11 230: a kbase alias region is a SAME_VA region; munmap()
++    * tears it down (and drops its reference on the BO pages). */
++   if (priv_bo->alias_size)
++      munmap((void *)(uintptr_t)priv_bo->addr.dev, priv_bo->alias_size);
++
+    pan_kmod_bo_put(priv_bo->bo);
+    vk_free(&dev->vk.alloc, priv_bo);
+ }
+diff --git a/src/panfrost/vulkan/panvk_priv_bo.h b/src/panfrost/vulkan/panvk_priv_bo.h
+index a14b520..b6e48be 100644
+--- a/src/panfrost/vulkan/panvk_priv_bo.h
++++ b/src/panfrost/vulkan/panvk_priv_bo.h
+@@ -27,6 +27,9 @@ struct panvk_priv_bo {
+     * recycled.  Used to flush only the populated prefix instead of the whole
+     * BO on command buffer end. */
+    size_t flush_end;
++   /* csf-v11 230: when non-zero, addr.dev is a kbase MEM_ALIAS region of
++    * this many bytes over the BO (sparse device TLS), unmapped on destroy. */
++   uint64_t alias_size;
+ };
+ 
+ VkResult panvk_priv_bo_create(struct panvk_device *dev, uint64_t size,

@@ -27,6 +27,9 @@ struct panvk_priv_bo {
     * recycled.  Used to flush only the populated prefix instead of the whole
     * BO on command buffer end. */
    size_t flush_end;
+   /* csf-v11 230: when non-zero, addr.dev is a kbase MEM_ALIAS region of
+    * this many bytes over the BO (sparse device TLS), unmapped on destroy. */
+   uint64_t alias_size;
 };
 
 VkResult panvk_priv_bo_create(struct panvk_device *dev, uint64_t size,
