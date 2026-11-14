@@ -36,6 +36,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
 #include <stdlib.h>
@@ -47,7 +48,9 @@
 #include <unistd.h>
 
 #include "util/macros.h"
+#include "util/os_misc.h"
 #include "util/os_time.h"
+#include "util/simple_mtx.h"
 #include "util/u_atomic.h"
 #include "util/u_math.h"
 #include "util/log.h"
@@ -651,7 +654,7 @@ kbase_kmod_get_flush_id(const struct pan_kmod_dev *dev)
 
 int
 kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
-                            bool tiler_oom_handler, uint32_t *group_handle)
+                            uint32_t *group_handle)
 {
    STATIC_ASSERT(sizeof(union kbase_ioctl_cs_queue_group_create_1_6) == 32);
    STATIC_ASSERT(sizeof(union kbase_ioctl_cs_queue_group_create_1_18) == 40);
@@ -659,17 +662,11 @@ kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
 
    /* Endpoint masks/maxes match what panfork uses on all CSF parts:
     * a single tiler unit, all fragment/compute endpoints.  Tiler heap growth
-    * is serviced by the kernel OOM path unless the group asks for
-    * BASE_CSF_TILER_OOM_EXCEPTION_FLAG (uAPI 1.12+): at max_chunks kbase then
-    * answers with a NULL chunk instead of terminating the group, and the
-    * firmware runs the TILER_OOM handler of a CS in this same group (the
-    * fragment CS).  The 1.6 compatibility layout has no csi_handlers field
-    * and drops the flag.  On uAPI 1.25+ the current ioctl layout also asks
-    * the kernel to report recoverable CS faults through read(). */
-   const uint8_t csi_handlers =
-      tiler_oom_handler && pan_kmod_driver_version_at_least(&dev->driver, 1, 12)
-         ? BASE_CSF_TILER_OOM_EXCEPTION_FLAG
-         : 0;
+    * is serviced by the kernel OOM path, so no application CSI exception
+    * handler is requested (BASE_CSF_TILER_OOM_EXCEPTION_FLAG was tried and
+    * confirmed ineffective on this kernel: the group is terminated on an
+    * unhandled OOM regardless).  On uAPI 1.25+ use the current ioctl layout
+    * to ask the kernel to report recoverable CS faults through read(). */
    if (pan_kmod_driver_version_at_least(&dev->driver, 1, 25)) {
       union kbase_ioctl_cs_queue_group_create req = {
          .in = {
@@ -683,16 +680,14 @@ kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
             .tiler_max = 1,
             .fragment_max = 64,
             .compute_max = 64,
-            .csi_handlers = csi_handlers,
             .cs_fault_report_enable = 1,
          },
       };
 
       if (ioctl(dev->fd, KBASE_IOCTL_CS_QUEUE_GROUP_CREATE, &req) == 0) {
          *group_handle = req.out.group_handle;
-         mesa_logi("kbase: created CSF group %u (layout 112, %u CS, "
-                   "csi_handlers 0x%x) with CS fault reporting",
-                   *group_handle, cs_queue_count, csi_handlers);
+         mesa_logd("kbase: created CSF group %u with CS fault reporting",
+                   *group_handle);
          return 0;
       }
 
@@ -714,15 +709,13 @@ kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
             .tiler_max = 1,
             .fragment_max = 64,
             .compute_max = 64,
-            .csi_handlers = csi_handlers,
          },
       };
 
       if (ioctl(dev->fd, KBASE_IOCTL_CS_QUEUE_GROUP_CREATE_1_18, &req_1_18) == 0) {
          *group_handle = req_1_18.out.group_handle;
-         mesa_logi("kbase: created CSF group %u (layout 40, %u CS, "
-                   "csi_handlers 0x%x) using 1.18 ABI",
-                   *group_handle, cs_queue_count, csi_handlers);
+         mesa_logd("kbase: created CSF group %u using 1.18 ABI",
+                   *group_handle);
          return 0;
       }
 
@@ -730,10 +723,6 @@ kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
                 "falling back to the 1.6 ABI",
                 strerror(errno));
    }
-
-   if (csi_handlers)
-      mesa_logw("kbase: tiler OOM handler requested, but the 1.6 group-create "
-                "layout has no csi_handlers field: dropping it");
 
    /* The legacy request remains the compatibility fallback and leaves tiler
     * OOM handling in the kernel, matching panfork's working CSF path. */
@@ -2428,6 +2417,7 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
 
    pan_kmod_bo_init(&kbase_bo->base, dev, exclusive_vm,
                     va_pages * page_size, kmod_flags, handle);
+
    return &kbase_bo->base;
 
 err_free_bo:

@@ -38,6 +38,24 @@
 #define RESERVED_UBO_COUNT                   6
 #define MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS (32 - RESERVED_UBO_COUNT)
 
+/* Diagnostic switch: robustImageAccess and robustImageAccess2 are hidden by
+ * default so that emulators picking their image robustness emulation mode
+ * from these features (shadPS4/Bachata uses a "restricted core" proof table
+ * in that case) fall back to another mode.  This is what we want to test
+ * when such a table rejects a format we can handle.  Set
+ * PANVK_NO_ROBUST_IMAGE=0 to restore the upstream advertisement.
+ * Shader lowering is unchanged. */
+static bool
+panvk_robust_image_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_NO_ROBUST_IMAGE", false) ? 0 : 1;
+
+   return enabled;
+}
+
 void
 panvk_per_arch(get_physical_device_extensions)(
    const struct panvk_physical_device *device,
@@ -455,7 +473,7 @@ panvk_per_arch(get_physical_device_features)(
       .subgroupBroadcastDynamicId = true,
 
       /* Vulkan 1.3 */
-      .robustImageAccess = true,
+      .robustImageAccess = panvk_robust_image_enabled(),
       .inlineUniformBlock = true,
       .descriptorBindingInlineUniformBlockUpdateAfterBind = true,
       .pipelineCreationCacheControl = true,
@@ -667,8 +685,8 @@ panvk_per_arch(get_physical_device_features)(
       .pipelineExecutableInfo = true,
 
       /* VK_KHR_robustness2 */
-      .robustBufferAccess2 = PAN_ARCH >= 11,
-      .robustImageAccess2 = PAN_ARCH >= 10,
+      .robustBufferAccess2 = PAN_ARCH >= 10,
+      .robustImageAccess2 = PAN_ARCH >= 10 && panvk_robust_image_enabled(),
       .nullDescriptor = PAN_ARCH >= 10,
 
       /* VK_EXT_shader_tile_image */

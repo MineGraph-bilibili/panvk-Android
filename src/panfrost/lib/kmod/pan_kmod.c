@@ -4,14 +4,38 @@
  */
 
 #include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <xf86drm.h>
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #include "util/cache_ops.h"
 #include "util/u_memory.h"
 #include "util/macros.h"
 #include "pan_kmod.h"
 #include "pan_kmod_backend.h"
+
+/* Mirror of panvk_diag_printf(): diagnostics must survive an abort that
+ * happens before the app drains its stderr pipe. */
+static void
+pan_kmod_diag_printf(const char *format, ...)
+{
+   char buf[512];
+   va_list va;
+
+   va_start(va, format);
+   vsnprintf(buf, sizeof(buf), format, va);
+   va_end(va);
+
+   fputs(buf, stderr);
+#ifdef __ANDROID__
+   __android_log_write(ANDROID_LOG_ERROR, "PANVK-DIAG", buf);
+#endif
+}
 
 #if defined(HAVE_PAN_KMOD_PANFROST)
 extern const struct pan_kmod_ops panfrost_kmod_ops;
@@ -137,8 +161,14 @@ pan_kmod_bo_alloc(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm,
    struct pan_kmod_bo *bo;
 
    bo = dev->ops->bo_alloc(dev, exclusive_vm, size, flags);
-   if (!bo)
+   if (!bo) {
+      pan_kmod_diag_printf("[PANVK-DIAG] kmod bo_alloc FAIL size=%llu errno=%d\n",
+              (unsigned long long)size, errno);
       return NULL;
+   }
+   if (size >= (64ull << 20))
+      pan_kmod_diag_printf("[PANVK-DIAG] kmod bo_alloc size=%llu MiB\n",
+              (unsigned long long)(size >> 20));
 
    /* We intentionally don't take the lock when filling the sparse array,
     * because we just created the BO, and haven't exported it yet, so

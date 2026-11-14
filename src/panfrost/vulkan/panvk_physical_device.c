@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
 #include <sys/stat.h>
 
 #if defined(HAVE_PAN_KMOD_KBASE)
@@ -39,6 +40,7 @@
 #include "vk_physical_device.h"
 #include "vk_util.h"
 
+#include "panvk_android.h"
 #include "panvk_device.h"
 #include "panvk_entrypoints.h"
 #include "panvk_image.h"
@@ -1490,6 +1492,11 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
 
    init_shader_caches(device, instance);
 
+   /* ARM's gralloc (kbase phones) allocates AFBC for GPU-only usage, in a layout we cannot
+    * import, so image AHardwareBuffers ask for a linear one. See panvk_android.c. */
+   device->vk.android_ahb_image_usage =
+      MALI_GRALLOC_USAGE_NO_AFBC | GRALLOC_USAGE_HW_COMPOSER;
+
    panvk_arch_dispatch(arch, get_physical_device_properties, instance, device,
                        &device->vk.properties);
 
@@ -1889,6 +1896,24 @@ panvk_bc_emul_enabled(const struct panvk_physical_device *physical_device)
    }
 
    return false;
+}
+
+/* Opt-in per-format native BC: some MediaTek v9/v10 GPUs decode BC1 in
+ * the texture unit (the format probe reports it), but emulating every BC
+ * format is still the safe default. PANVK_BC_NATIVE=1 lets the formats the
+ * GPU reports through natively; formats it does not report stay emulated. */
+bool
+panvk_bc_format_native(const struct panvk_physical_device *physical_device,
+                       VkFormat format)
+{
+   if (!debug_get_bool_option("PANVK_BC_NATIVE", false))
+      return false;
+
+   uint32_t supported_compr_fmts =
+      pan_query_compressed_formats(&physical_device->kmod.dev->props);
+   const struct pan_format fmt =
+      physical_device->formats.all[vk_format_to_pipe_format(format)];
+   return fmt.hw && (BITFIELD_BIT(fmt.texfeat_bit) & supported_compr_fmts);
 }
 
 static VkFormatFeatureFlags2

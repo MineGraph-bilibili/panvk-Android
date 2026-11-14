@@ -44,7 +44,7 @@ panvk_per_arch(gpu_prerast_validate_execution)(
                                         exec->record_stride, 64,
                                         &record_bytes) ||
        record_bytes > PANVK_GPU_PRERAST_MAX_EXECUTION_BYTES)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    return VK_SUCCESS;
 }

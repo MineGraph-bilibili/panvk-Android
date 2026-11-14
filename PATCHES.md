@@ -184,6 +184,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `008-compiler-tex` | NIR 增加 Panfrost 专用 tex 源与 `TEX_DUAL`，mediump 走 16-bit，Bifrost 常量排序/IDVS/repair-SSA 对齐本地，`bi_ra.c` 回到本地旧版求解器。 |
 | `009-perf-lifecycle` | 命令池自动裁剪窗口、TLS 稀疏化/收缩、kbase 稀疏缓冲与回读镜像、tiler heap 槽位与终止策略对齐本地。 |
 | `010-android-afbc-gralloc` | 绕过 ARM gralloc 对 GPU-only 缓冲区强制 AFBC 的布局，补 dma-buf fd 查找与 BGRA/RGBA 处理；`panvk_wsi.c` 改回本地同步 WSI（覆盖仓库 zero-copy 实现）。 |
+| `011-kbase-backend` | kbase 后端对齐本地：丢弃无效的 tiler OOM CSI handler、`pan_kmod` 增加直写 logcat 的诊断输出、物理设备设置 gralloc usage 位并放开 v10 `robustBufferAccess2`。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -288,6 +289,31 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
   延迟/带宽特性与仓库版本不同，这是按“本地行为为准”的决定；gralloc 布局解析依赖具体
   allocator 的 handle 约定（Exynos / MediaTek 已验证），其它厂商会走 `-ENOENT` 回退；
   `PANVK_AFRC` 为实验特性，默认关闭。
+* **来源**：rc66 本地树（对齐本地行为）。
+
+#### `011-kbase-backend`（7 文件）
+
+* **机制**：
+  * `kbase_kmod.c/h`：`kbase_kmod_csf_group_create()` 去掉 `tiler_oom_handler` 参数与
+    `BASE_CSF_TILER_OOM_EXCEPTION_FLAG`——本地实测该 handler 在本机内核上无效（未处理 OOM
+    仍会终止 group），因此不再申请 CSI 异常 handler，只保留 uAPI ≥1.25 的
+    `cs_fault_report_enable`；group 创建日志从 info 降到 debug。
+  * `pan_kmod.c`：新增 `pan_kmod_diag_printf()`（stderr + `__android_log_write`），让诊断
+    在被 abort 丢掉 stderr 管道前仍能落到 logcat。
+  * `panvk_gpu_prerast.c`：OOM 返回改走 `panvk_diag_result()`，带文件/行号。
+  * `panvk_physical_device.c/h`：kbase 初始化时设置
+    `vk.android_ahb_image_usage = MALI_GRALLOC_USAGE_NO_AFBC | GRALLOC_USAGE_HW_COMPOSER`；
+    新增 `panvk_bc_format_native()`，`PANVK_BC_NATIVE=1` 时只对 GPU 自报支持的 BC 格式走
+    原生解码，其余仍模拟。
+  * `panvk_vX_physical_device.c`：默认隐藏 `robustImageAccess` / `robustImageAccess2`
+    （`PANVK_NO_ROBUST_IMAGE=0` 恢复上游声明），用于排查按“restricted core”表选
+    robustness 模式的模拟器路径；同时把 `robustBufferAccess2` 下放到 v10。
+* **收益**：去掉一个实测无效的 tiler OOM 协商，少一次误导性日志与 uAPI 分支；关键 OOM
+  诊断在 logcat 里可见；ARM gralloc 机型图像 AHB 走线性格局；v10 多拿到
+  `robustBufferAccess2`。
+* **风险/注意**：去掉 `csi_handlers` 后 tiler 堆耗尽仍由内核直接终止 group（与 panfork 的
+  CSF 路径一致，但没有应用层兜底）；`robustImageAccess2` 在 v10 仍受开关控制，
+  `robustBufferAccess2` 放宽到 v10 属于能力声明变更，需按 GPU 实测。
 * **来源**：rc66 本地树（对齐本地行为）。
 
 ---
