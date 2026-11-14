@@ -1,0 +1,1130 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c
+index b22271a..dda5e1e 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c
+@@ -29,7 +29,6 @@
+ #include "pan_desc.h"
+ #include "pan_encoder.h"
+ #include "pan_props.h"
+-#include "pan_shader.h"
+ 
+ #include <vulkan/vulkan_core.h>
+ 
+@@ -120,7 +119,7 @@ prepare_driver_set(struct panvk_cmd_buffer *cmdbuf)
+    struct panvk_opaque_desc *descs = driver_set.cpu;
+ 
+    if (!driver_set.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    /* Dummy sampler always comes first. */
+    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {
+@@ -231,12 +230,9 @@ panvk_per_arch(cmd_dispatch_shader)(
+          cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_FAU), fau_ptr);
+       }
+ 
+-      if (compute_state_dirty(cmdbuf, CS)) {
+-         uint64_t spd_addr =
+-	    pan_shader_get_spd_addr(&cs->info,
+-	                            panvk_priv_mem_dev_addr(cs->spd));
+-         cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_SPD), spd_addr);
+-      }
++      if (compute_state_dirty(cmdbuf, CS))
++         cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_SPD),
++                      panvk_priv_mem_dev_addr(cs->spd));
+ 
+       cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_TSD), tsd);
+ 
+@@ -425,18 +421,9 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
+ 
+    struct cs_builder *b = panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
+ 
+-   /* Copy the global TLS pointer and size to the per-job TSD: with packed
+-    * TLS addressing the stack stride comes from the size word, so a job that
+-    * only copies the pointer races jobs with a different stack size. */
+-   if (cs->info.tls_size) {
+-      cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
+-      cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+-      cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+-      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
+-      cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+-      cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+-      cs_flush_stores(b);
+-   }
++   /* Copy the global TLS pointer and size to the per-job TSD. */
++   if (cs->info.tls_size)
++      panvk_per_arch(cmd_copy_tls_to_tsd)(cmdbuf, b, tsd);
+ 
+    panvk_per_arch(cmd_dispatch_shader)(cmdbuf, cs, cs_desc_state,
+                                        cmdbuf->state.compute.push_uniforms,
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_utrace.c b/src/panfrost/vulkan/csf/panvk_vX_utrace.c
+index cec767e..965cbc0 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_utrace.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_utrace.c
+@@ -171,10 +171,18 @@ panvk_utrace_capture_data(struct u_trace *ut, void *cs, void *dst_buffer,
+                     cs_info->capture_data_wait_for_ts);
+ }
+ 
++/* csf-v11 228: on kbase u_trace is never processed (the submit path clears
++ * process_utrace), so without MESA_GPU_TRACES the 10 MiB heap (u_trace
++ * timestamp and clone buffers) was committed for nothing. Then kbase gets
++ * 64 KiB, unless PANVK_UTRACE_CLONE_MEM_SIZE is set (0xa00000 = old). */
+ static uint32_t
+-get_utrace_clone_mem_size()
++get_utrace_clone_mem_size(const struct panvk_device *dev)
+ {
+-   return debug_get_num_option("PANVK_UTRACE_CLONE_MEM_SIZE", 0xa00000);
++   const bool small =
++      to_panvk_physical_device(dev->vk.physical)->kbase_node_path[0] != '\0' &&
++      !os_get_option("MESA_GPU_TRACES");
++   return debug_get_num_option("PANVK_UTRACE_CLONE_MEM_SIZE",
++                               small ? 0x10000 : 0xa00000);
+ }
+ 
+ VkResult
+@@ -187,8 +195,8 @@ panvk_per_arch(utrace_context_init)(struct panvk_device *dev)
+                         panvk_utrace_capture_data, panvk_utrace_get_data,
+                         panvk_utrace_delete_flush_data);
+ 
+-   VkResult result = panvk_priv_bo_create(dev, get_utrace_clone_mem_size(), 0,
+-                                          VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
++   VkResult result = panvk_priv_bo_create(dev, get_utrace_clone_mem_size(dev),
++                                          0, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
+                                           &dev->utrace.copy_buf_heap_bo);
+    if (result != VK_SUCCESS) {
+       u_trace_context_fini(&dev->utrace.utctx);
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+index b7845ed..0b73ff7 100644
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+@@ -54,7 +54,7 @@ panvk_cmd_prepare_fragment_job(struct panvk_cmd_buffer *cmdbuf, uint64_t fbd)
+    struct pan_ptr job_ptr = panvk_cmd_alloc_desc(cmdbuf, FRAGMENT_JOB);
+ 
+    if (!job_ptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    (void)0;
+    int minx = fb->tiling_area_px.min_x;
+@@ -278,7 +278,7 @@ panvk_per_arch(cmd_alloc_tls_desc)(struct panvk_cmd_buffer *cmdbuf, bool gfx)
+    if (!batch->tls.gpu) {
+       batch->tls = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
+       if (!batch->tls.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+    }
+ 
+    return VK_SUCCESS;
+@@ -319,7 +319,7 @@ panvk_per_arch(cmd_prepare_tiler_context)(struct panvk_cmd_buffer *cmdbuf,
+    batch->tiler.ctx_descs =
+       panvk_cmd_alloc_desc_array(cmdbuf, layer_count, TILER_CONTEXT);
+    if (!batch->tiler.heap_desc.gpu || !batch->tiler.ctx_descs.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    tiler_desc =
+       batch->tiler.ctx_descs.gpu + (pan_size(TILER_CONTEXT) * layer_idx);
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_dispatch.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_dispatch.c
+index 3040af4..bf8484e 100644
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_dispatch.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_dispatch.c
+@@ -84,7 +84,7 @@ prepare_driver_set(struct panvk_cmd_buffer *cmdbuf)
+    struct panvk_opaque_desc *descs = driver_set.cpu;
+ 
+    if (!driver_set.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    /* Dummy sampler always comes first. */
+    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+index 91c1e6b..8cd8e8b 100644
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -290,7 +290,7 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr ptr = panvk_cmd_alloc_desc_aggregate(
+       cmdbuf, PAN_DESC(RENDERER_STATE), PAN_DESC_ARRAY(bd_count, BLEND));
+    if (!ptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct mali_renderer_state_packed *rsd = ptr.cpu;
+    struct mali_blend_packed *bds = ptr.cpu + pan_size(RENDERER_STATE);
+@@ -443,7 +443,7 @@ panvk_draw_prepare_varyings(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr bufs = panvk_cmd_alloc_desc_array(
+       cmdbuf, PANVK_VARY_BUF_MAX + 1, ATTRIBUTE_BUFFER);
+    if (!bufs.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct mali_attribute_buffer_packed *buf_descs = bufs.cpu;
+    const struct vk_input_assembly_state *ia =
+@@ -459,7 +459,7 @@ panvk_draw_prepare_varyings(struct panvk_cmd_buffer *cmdbuf,
+          cmdbuf, desc, sizeof(struct libpan_draw_helper_varying_buf_info), 8);
+ 
+       if (!bufs_info_storage.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       cmdbuf->state.gfx.vs.indirect_varying_bufs_infos = bufs_info_storage.gpu;
+ 
+@@ -486,7 +486,7 @@ panvk_draw_prepare_varyings(struct panvk_cmd_buffer *cmdbuf,
+                : 0;
+ 
+          if (buf_size && !buf_addr)
+-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++            return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+       }
+ 
+       pan_pack(&buf_descs[i], ATTRIBUTE_BUFFER, cfg) {
+@@ -669,7 +669,7 @@ panvk_draw_prepare_vs_attribs(struct panvk_cmd_buffer *cmdbuf,
+    struct mali_attribute_packed *attrib_descs = attribs.cpu;
+ 
+    if (!bufs.gpu || (attrib_count && !attribs.gpu))
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct libpan_draw_helper_attrib_buf_info *bufs_infos = NULL;
+    struct libpan_draw_helper_attrib_info *attribs_infos = NULL;
+@@ -684,7 +684,7 @@ panvk_draw_prepare_vs_attribs(struct panvk_cmd_buffer *cmdbuf,
+ 
+       if (!bufs_infos_storage.gpu ||
+           (num_vs_attribs && !attribs_infos_storage.gpu))
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       cmdbuf->state.gfx.vs.indirect_attrib_bufs_infos = bufs_infos_storage.gpu;
+       cmdbuf->state.gfx.vs.indirect_attribs_infos = attribs_infos_storage.gpu;
+@@ -816,7 +816,7 @@ panvk_draw_prepare_viewport(struct panvk_cmd_buffer *cmdbuf,
+        dyn_gfx_state_dirty(cmdbuf, VP_DEPTH_CLAMP_RANGE)) {
+       struct pan_ptr vp = panvk_cmd_alloc_desc(cmdbuf, VIEWPORT);
+       if (!vp.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       panvk_emit_viewport(cmdbuf, vp.cpu);
+       cmdbuf->state.gfx.vpd = vp.gpu;
+@@ -865,7 +865,7 @@ panvk_draw_prepare_vertex_job(struct panvk_cmd_buffer *cmdbuf,
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+    struct pan_ptr ptr = panvk_cmd_alloc_desc(cmdbuf, COMPUTE_JOB);
+    if (!ptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    util_dynarray_append(&batch->jobs, ptr.cpu);
+    draw->jobs.vertex = ptr;
+@@ -1138,7 +1138,7 @@ panvk_draw_prepare_idvs_job(struct panvk_cmd_buffer *cmdbuf,
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+    struct pan_ptr ptr = panvk_cmd_alloc_desc(cmdbuf, INDEXED_VERTEX_JOB);
+    if (!ptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    util_dynarray_append(&batch->jobs, ptr.cpu);
+    draw->jobs.idvs = ptr;
+@@ -1455,10 +1455,18 @@ prepare_draw_layer(struct panvk_cmd_buffer *cmdbuf,
+       if (result != VK_SUCCESS)
+          return result;
+ 
++      /* Without a geometry or tessellation stage the tiler reads the vertex shader's positions.
++       * A vertex shader that writes none leaves them undefined, so nothing is rasterized, as on
++       * the vendor driver, rather than the tiler reading whatever the buffer held. */
++      const bool writes_pos =
++#if PAN_ARCH >= 9
++         cmdbuf->state.gfx.gs.shader ||
++#endif
++         pan_varying_layout_find_slot(&vs->info.varyings.formats, VARYING_SLOT_POS);
+       bool needs_tiling =
+-         !cmdbuf->vk.dynamic_graphics_state.rs.rasterizer_discard_enable ||
+-         cmdbuf->state.gfx.occlusion_query.mode !=
+-            MALI_OCCLUSION_MODE_DISABLED;
++         writes_pos &&
++         (!cmdbuf->vk.dynamic_graphics_state.rs.rasterizer_discard_enable ||
++          cmdbuf->state.gfx.occlusion_query.mode != MALI_OCCLUSION_MODE_DISABLED);
+ 
+       if (needs_tiling) {
+          result = panvk_draw_prepare_tiler_job(cmdbuf, draw);
+@@ -2037,7 +2045,7 @@ v9_prepare_vs_driver_set_ex(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr driver_set = panvk_cmd_alloc_dev_mem(
+       cmdbuf, desc, desc_count * PANVK_DESCRIPTOR_SIZE, PANVK_DESCRIPTOR_SIZE);
+    if (!driver_set.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct panvk_opaque_desc *descs = driver_set.cpu;
+    for (uint32_t i = 0; i < MAX_VS_ATTRIBS; i++) {
+@@ -2089,7 +2097,7 @@ v9_prepare_stage_driver_set(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr driver_set = panvk_cmd_alloc_dev_mem(
+       cmdbuf, desc, desc_count * PANVK_DESCRIPTOR_SIZE, PANVK_DESCRIPTOR_SIZE);
+    if (desc_count && !driver_set.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct panvk_opaque_desc *descs = driver_set.cpu;
+    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {
+@@ -2120,7 +2128,7 @@ v9_prepare_blend_zsd(struct panvk_cmd_buffer *cmdbuf,
+    uint32_t bd_count = cmdbuf->state.gfx.render.fb.layout.rt_count;
+    struct pan_ptr bptr = panvk_cmd_alloc_desc_array(cmdbuf, bd_count, BLEND);
+    if (bd_count && !bptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+    if (fs) {
+       VkResult r = panvk_per_arch(blend_emit_descs)(cmdbuf, bptr.cpu);
+       if (r != VK_SUCCESS)
+@@ -2146,7 +2154,7 @@ v9_prepare_blend_zsd(struct panvk_cmd_buffer *cmdbuf,
+ 
+    struct pan_ptr zsd = panvk_cmd_alloc_desc(cmdbuf, DEPTH_STENCIL);
+    if (!zsd.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+    pan_cast_and_pack(zsd.cpu, DEPTH_STENCIL, cfg) {
+       cfg.stencil_test_enable = test_s;
+       if (test_s) {
+@@ -2320,7 +2328,7 @@ v9_emit_malloc_vertex_job(struct panvk_cmd_buffer *cmdbuf,
+                                   fs ? fs->info.tls_size : 0,
+                                   batch->tlsinfo.tls.size);
+    if (!job.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+    util_dynarray_append(&batch->jobs, job.cpu);
+    util_dynarray_append(&batch->malloc_vertex_jobs, job.cpu);
+ 
+@@ -2546,7 +2554,7 @@ v9_emit_malloc_vertex_job(struct panvk_cmd_buffer *cmdbuf,
+       uint32_t inst_mask;
+       uint64_t inst_info_gpu, vs_attribs;
+       if (!v9_inst_attr_info(cmdbuf, &inst_mask, &inst_info_gpu, &vs_attribs))
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       struct panvk_precomp_ctx pctx = panvk_per_arch(precomp_cs)(cmdbuf);
+       panlib_v9_draw_indirect_patch(&pctx, panlib_1d(1),
+@@ -3302,7 +3310,7 @@ v9_prerast_draw_viewports(struct panvk_cmd_buffer *cmdbuf,
+        !panvk_gpu_prerast_checked_size(out_count, sizeof(uint32_t), 4,
+                                        &index_bytes)) {
+       mesa_loge_once("panvk: viewport run list does not fit, draw discarded");
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return;
+    }
+ 
+@@ -3324,7 +3332,7 @@ v9_prerast_draw_viewports(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr draws = panvk_cmd_alloc_dev_mem(
+       cmdbuf, desc, PANLIB_VP_MAX_VIEWPORTS * 5 * sizeof(uint32_t), 16);
+    if (!runs.gpu || !out.gpu || (!merged && !part.gpu) || !draws.gpu) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return;
+    }
+ 
+@@ -3432,7 +3440,7 @@ v9_prerast_draw_one(struct panvk_cmd_buffer *cmdbuf,
+         !(gen_draw = v9_prerast_indirect(cmdbuf, src, &vs,
+                                          has_gs ? &gs : NULL, chunk,
+                                          poly_job.gpu)))) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return;
+    }
+    v9_prerast_add_job(cmdbuf, &vs.job);
+@@ -3491,8 +3499,8 @@ v9_prerast_split_fan(struct panvk_cmd_buffer *cmdbuf,
+          struct pan_ptr ib = panvk_cmd_alloc_dev_mem(
+             cmdbuf, desc, (n + 1) * sizeof(uint32_t), 16);
+          if (!ib.gpu) {
+-            vk_command_buffer_set_error(&cmdbuf->vk,
+-                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
++            fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
++vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+             return;
+          }
+ 
+@@ -3563,7 +3571,7 @@ v9_prerast_chunked(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr cd =
+       panvk_cmd_alloc_dev_mem(cmdbuf, desc, sizeof(struct panlib_chunk_draw), 16);
+    if (!cd.gpu) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return;
+    }
+ 
+@@ -3573,8 +3581,8 @@ v9_prerast_chunked(struct panvk_cmd_buffer *cmdbuf,
+       struct pan_ptr rec =
+          panvk_cmd_alloc_dev_mem(cmdbuf, desc, 5 * sizeof(uint32_t), 4);
+       if (!rec.gpu) {
+-         vk_command_buffer_set_error(&cmdbuf->vk,
+-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
++vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          return;
+       }
+ 
+@@ -3984,7 +3992,7 @@ v9_tess_draw(struct panvk_cmd_buffer *cmdbuf,
+       direct_draw =
+          panvk_cmd_alloc_dev_mem(cmdbuf, desc, 5 * sizeof(uint32_t), 4);
+    if (!td.gpu || (!indirect && !direct_draw.gpu)) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return;
+    }
+ 
+@@ -4058,7 +4066,7 @@ v9_tess_draw(struct panvk_cmd_buffer *cmdbuf,
+        v9_prepare_stage_driver_set(cmdbuf, tcs, tcs_desc) != VK_SUCCESS ||
+        panvk_per_arch(cmd_prepare_shader_res_table)(
+           cmdbuf, desc_state, &tcs->desc_info, tcs_desc, 1) != VK_SUCCESS) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return;
+    }
+ 
+@@ -4167,8 +4175,10 @@ v9_tess_draw(struct panvk_cmd_buffer *cmdbuf,
+    }
+ #undef TD
+ 
+-   if (!ok)
++   if (!ok) {
++      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+       vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++   }
+ }
+ 
+ static void
+diff --git a/src/panfrost/vulkan/panvk_device_memory.c b/src/panfrost/vulkan/panvk_device_memory.c
+index 804993c..376e112 100644
+--- a/src/panfrost/vulkan/panvk_device_memory.c
++++ b/src/panfrost/vulkan/panvk_device_memory.c
+@@ -3,6 +3,11 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <stdio.h>
++
++#include "panvk_macros.h"
++#include "panvk_buffer.h"
++
+ #include "genxml/decode.h"
+ 
+ #include "vulkan/util/vk_util.h"
+@@ -10,6 +15,489 @@
+ #include "panvk_android.h"
+ #include "panvk_device.h"
+ #include "panvk_device_memory.h"
++
++/* --- render activity counters (diagnostic) ---------------------------- */
++unsigned long long panvk_diag_draws;
++unsigned long long panvk_diag_renders;
++unsigned long long panvk_diag_blits;
++unsigned long long panvk_diag_copies;
++unsigned long long panvk_diag_clears;
++unsigned long long panvk_diag_present_writes;
++unsigned long long panvk_diag_present_reads;
++unsigned long long panvk_diag_present_clears;
++
++static VkImage diag_bind_imgs[512];
++static void *diag_bind_bos[512];
++static unsigned diag_bind_n;
++static void *diag_bind_hosts[512];
++static uint64_t diag_bind_hash[512];
++static bool diag_bind_valid[512];
++static unsigned diag_sweep_tick;
++static void panvk_diag_invalidate_cpu_range(const void *addr, size_t size);
++
++static VkImage diag_blit_src;
++static VkImage diag_rts[8];
++static unsigned diag_rt_n;
++static uint64_t diag_rt_hash[8];
++static bool diag_rt_valid[8];
++
++static void
++diag_sweep_all(void)
++{
++   for (unsigned i = 0; i < diag_bind_n; i++) {
++      struct pan_kmod_bo *bo = diag_bind_bos[i];
++
++      if (bo == NULL)
++         continue;
++
++      if (diag_bind_hosts[i] == NULL) {
++         void *h = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
++         if (h == NULL || h == MAP_FAILED)
++            continue;
++         diag_bind_hosts[i] = h;
++      }
++
++      uint64_t bytes = pan_kmod_bo_size(bo);
++      if (bytes > (uint64_t)1 * 1024 * 1024)
++         bytes = (uint64_t)1 * 1024 * 1024;
++      const uint64_t nwords = bytes / 4;
++      panvk_diag_invalidate_cpu_range(diag_bind_hosts[i], bytes);
++      const uint32_t *p = diag_bind_hosts[i];
++      uint64_t nz = 0, hash = 1469598103934665603ull;
++
++      for (uint64_t k = 0; k < nwords; k++) {
++         uint32_t v = p[k];
++         nz += (v != 0);
++         hash = (hash ^ v) * 1099511628211ull;
++      }
++
++      const bool changed = diag_bind_valid[i] && (hash != diag_bind_hash[i]);
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] IMG[%u]: img=%p size=%llu MiB nz=%llu/%llu "
++                        "hash=%016llx %s\n",
++                        i, (void *)diag_bind_imgs[i],
++                        (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
++                        (unsigned long long)nz, (unsigned long long)nwords,
++                        (unsigned long long)hash, changed ? "CHANGED" : "same");
++      diag_bind_hash[i] = hash;
++      diag_bind_valid[i] = true;
++   }
++}
++
++void
++panvk_import_probe_set_render_target(VkImage img)
++{
++   if (img == VK_NULL_HANDLE)
++      return;
++   for (unsigned i = 0; i < diag_rt_n; i++) {
++      if (diag_rts[i] == img)
++         return;
++   }
++   if (diag_rt_n < 8)
++      diag_rts[diag_rt_n++] = img;
++}
++
++static uint64_t diag_rt_draws[8];
++static uint64_t diag_rt_other_draws;
++
++unsigned long long
++panvk_diag_rt_other_draws(void)
++{
++   return diag_rt_other_draws;
++}
++
++void
++panvk_diag_note_rt_draw(VkImage img)
++{
++   if (img == VK_NULL_HANDLE) {
++      diag_rt_other_draws++;
++      return;
++   }
++   for (unsigned i = 0; i < diag_rt_n; i++) {
++      if (diag_rts[i] == img) {
++         diag_rt_draws[i]++;
++         return;
++      }
++   }
++   diag_rt_other_draws++;
++}
++
++static void
++diag_scan_rt(unsigned idx)
++{
++   const VkImage img = diag_rts[idx];
++   struct pan_kmod_bo *bo = NULL;
++
++   for (unsigned i = 0; i < diag_bind_n; i++) {
++      if (diag_bind_imgs[i] == img) {
++         bo = diag_bind_bos[i];
++         break;
++      }
++   }
++
++   if (bo == NULL) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] RT[%u] probe: img=%p no bo\n", idx, (void *)img);
++      return;
++   }
++
++   void *host = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
++   if (host == NULL || host == MAP_FAILED) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] RT[%u] probe: img=%p no cpu map, size=%llu MiB\n",
++                        idx, (void *)img, (unsigned long long)(pan_kmod_bo_size(bo) >> 20));
++      return;
++   }
++
++   uint64_t bytes = pan_kmod_bo_size(bo);
++   if (bytes > (uint64_t)16 * 1024 * 1024)
++      bytes = (uint64_t)16 * 1024 * 1024;
++   const uint64_t nwords = bytes / 4;
++   panvk_diag_invalidate_cpu_range(host, bytes);
++   const uint32_t *p = host;
++   uint64_t nz = 0, hash = 1469598103934665603ull;
++
++   for (uint64_t k = 0; k < nwords; k++) {
++      uint32_t v = p[k];
++      nz += (v != 0);
++      hash = (hash ^ v) * 1099511628211ull;
++   }
++
++   const bool changed = diag_rt_valid[idx] && (hash != diag_rt_hash[idx]);
++   PANVK_DIAG_PRINTF("[PANVK-DIAG] RT[%u] probe: img=%p size=%llu MiB nz=%llu/%llu "
++                     "hash=%016llx draws=%llu %s\n",
++                     idx, (void *)img, (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
++                     (unsigned long long)nz, (unsigned long long)nwords,
++                     (unsigned long long)hash,
++                     (unsigned long long)diag_rt_draws[idx],
++                     changed ? "CHANGED" : "same");
++   diag_rt_hash[idx] = hash;
++   diag_rt_valid[idx] = true;
++}
++
++static void
++diag_scan_image_bo(const char *tag, VkImage img)
++{
++   struct pan_kmod_bo *bo = NULL;
++
++   if (img == VK_NULL_HANDLE)
++      return;
++
++   for (unsigned i = 0; i < diag_bind_n; i++) {
++      if (diag_bind_imgs[i] == img) {
++         bo = diag_bind_bos[i];
++         break;
++      }
++   }
++
++   if (bo == NULL) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] %s probe: img=%p no bo found\n", tag, (void *)img);
++      return;
++   }
++
++   void *host = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
++   if (host == NULL || host == MAP_FAILED) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] %s probe: img=%p no cpu map, size=%llu MiB\n",
++                        tag, (void *)img, (unsigned long long)(pan_kmod_bo_size(bo) >> 20));
++      return;
++   }
++
++   uint64_t bytes = pan_kmod_bo_size(bo);
++   if (bytes > (uint64_t)16 * 1024 * 1024)
++      bytes = (uint64_t)16 * 1024 * 1024;
++   const uint64_t nwords = bytes / 4;
++   panvk_diag_invalidate_cpu_range(host, bytes);
++   const uint32_t *p = host;
++   uint64_t nz = 0, hash = 1469598103934665603ull;
++
++   for (uint64_t k = 0; k < nwords; k++) {
++      uint32_t v = p[k];
++      nz += (v != 0);
++      hash = (hash ^ v) * 1099511628211ull;
++   }
++
++   PANVK_DIAG_PRINTF("[PANVK-DIAG] %s probe: img=%p size=%llu MiB nz=%llu/%llu "
++                     "hash=%016llx w0=%08x w1=%08x w2=%08x w3=%08x\n",
++                     tag, (void *)img,
++                     (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
++                     (unsigned long long)nz, (unsigned long long)nwords,
++                     (unsigned long long)hash,
++                     p[0], p[1], p[2], p[3]);
++}
++
++void
++panvk_import_probe_note_bind(VkImage img, void *bo)
++{
++   if (bo == NULL)
++      return;
++   for (unsigned i = 0; i < diag_bind_n; i++) {
++      if (diag_bind_imgs[i] == img) {
++         diag_bind_bos[i] = bo;
++         return;
++      }
++   }
++   if (diag_bind_n < 512) {
++      diag_bind_imgs[diag_bind_n] = img;
++      diag_bind_bos[diag_bind_n] = bo;
++      diag_bind_n++;
++   }
++}
++
++void
++panvk_import_probe_set_blit_src(VkImage src, VkImage dst)
++{
++   if (panvk_import_probe_is_image(dst))
++      diag_blit_src = src;
++}
++
++static VkImage import_probe_imgs[8];
++static unsigned import_probe_img_count;
++static VkBuffer import_probe_bufs[8];
++static unsigned import_probe_buf_count;
++
++static struct pan_kmod_bo *import_probe_bos[8];
++
++static bool
++import_probe_bo_match(void *bo)
++{
++   if (bo == NULL)
++      return false;
++   for (unsigned i = 0; i < 8; i++) {
++      if (import_probe_bos[i] == bo)
++         return true;
++   }
++   return false;
++}
++
++void
++panvk_import_probe_track_image(VkImage img, void *bo)
++{
++   if (!import_probe_bo_match(bo))
++      return;
++   for (unsigned i = 0; i < import_probe_img_count; i++) {
++      if (import_probe_imgs[i] == img)
++         return;
++   }
++   if (import_probe_img_count < 8)
++      import_probe_imgs[import_probe_img_count++] = img;
++   PANVK_DIAG_PRINTF("[PANVK-DIAG] present IMAGE bound: img=%p bo=%p count=%u\n",
++                     (void *)img, bo, import_probe_img_count);
++}
++
++void
++panvk_import_probe_track_buffer(VkBuffer buf, void *bo)
++{
++   if (!import_probe_bo_match(bo))
++      return;
++   for (unsigned i = 0; i < import_probe_buf_count; i++) {
++      if (import_probe_bufs[i] == buf)
++         return;
++   }
++   if (import_probe_buf_count < 8)
++      import_probe_bufs[import_probe_buf_count++] = buf;
++   PANVK_DIAG_PRINTF("[PANVK-DIAG] present BUFFER bound: buf=%p bo=%p count=%u\n",
++                     (void *)buf, bo, import_probe_buf_count);
++}
++
++bool
++panvk_import_probe_is_image(VkImage img)
++{
++   for (unsigned i = 0; i < import_probe_img_count; i++) {
++      if (import_probe_imgs[i] == img)
++         return true;
++   }
++   return false;
++}
++
++bool
++panvk_import_probe_is_buffer(VkBuffer buf)
++{
++   for (unsigned i = 0; i < import_probe_buf_count; i++) {
++      if (import_probe_bufs[i] == buf)
++         return true;
++   }
++   return false;
++}
++
++static VkBuffer diag_vbo_bufs[8];
++static unsigned diag_vbo_count;
++
++void
++panvk_diag_note_draw(uint64_t vb_addr, uint32_t base, uint32_t count,
++                     uint32_t instances)
++{
++   static unsigned n;
++
++   if (n >= 8 || diag_vbo_count == 0)
++      return;
++   n++;
++
++   VK_FROM_HANDLE(panvk_buffer, b, diag_vbo_bufs[0]);
++   if (b == NULL || b->diag_bo == NULL) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]: no vbo tracking\n", n);
++      return;
++   }
++
++   uint64_t delta = vb_addr >= b->vk.device_address ?
++                    vb_addr - b->vk.device_address : ~0ull;
++
++   void *host = pan_kmod_bo_mmap(b->diag_bo, PROT_READ, MAP_SHARED, NULL);
++   if (host == NULL || host == MAP_FAILED || delta == ~0ull ||
++       delta + 64 > b->vk.size) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]: vb=0x%llx delta=0x%llx base=%u "
++                        "count=%u inst=%u unmappable\n", n,
++                        (unsigned long long)vb_addr, (unsigned long long)delta,
++                        base, count, instances);
++      return;
++   }
++
++   const uint32_t *p = (const uint32_t *)((char *)host + b->diag_mem_off + delta);
++   panvk_diag_invalidate_cpu_range(p, 64);
++
++   float f_stride4 = 0, f_stride8 = 0, f_stride16 = 0;
++   if (delta + (uint64_t)base * 16 + 4 <= b->vk.size) {
++      const uint32_t *q4 = (const uint32_t *)((const char *)p + (uint64_t)base * 4);
++      const uint32_t *q8 = (const uint32_t *)((const char *)p + (uint64_t)base * 8);
++      const uint32_t *q16 = (const uint32_t *)((const char *)p + (uint64_t)base * 16);
++      panvk_diag_invalidate_cpu_range(q4, 4);
++      f_stride4 = *(const float *)&q4[0];
++      f_stride8 = *(const float *)&q8[0];
++      f_stride16 = *(const float *)&q16[0];
++   }
++
++   PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]: vb=0x%llx delta=0x%llx base=%u "
++                     "count=%u inst=%u | w0=%08x(%g) w1=%08x(%g) w2=%08x(%g) "
++                     "w3=%08x(%g) | basef4=%g f8=%g f16=%g\n",
++                     n, (unsigned long long)vb_addr, (unsigned long long)delta,
++                     base, count, instances,
++                     p[0], (double)*(const float *)&p[0],
++                     p[1], (double)*(const float *)&p[1],
++                     p[2], (double)*(const float *)&p[2],
++                     p[3], (double)*(const float *)&p[3],
++                     (double)f_stride4, (double)f_stride8, (double)f_stride16);
++}
++
++void
++panvk_diag_note_vbo(VkBuffer buf)
++{
++   for (unsigned i = 0; i < diag_vbo_count; i++) {
++      if (diag_vbo_bufs[i] == buf)
++         return;
++   }
++   if (diag_vbo_count < 8)
++      diag_vbo_bufs[diag_vbo_count++] = buf;
++}
++
++static void
++panvk_diag_invalidate_cpu_range(const void *addr, size_t size)
++{
++#if defined(__aarch64__)
++   uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
++   uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
++   for (uintptr_t p = start; p < end; p += 64)
++      __asm__ volatile("dc civac, %0" : : "r"(p) : "memory");
++   __asm__ volatile("dsb sy" : : : "memory");
++#else
++   (void)addr;
++   (void)size;
++#endif
++}
++
++/* --- imported present buffer probe (diagnostic) ----------------------- */
++static uint32_t import_probe_count;
++static uint64_t import_probe_submits;
++
++void
++panvk_import_probe_tick(void)
++{
++   return; /* rc40-clean: sweeps disabled */
++   if (import_probe_count == 0)
++      return;
++
++   if ((++import_probe_submits % 32) != 0)
++      return;
++
++   for (uint32_t i = 0; i < 8; i++) {
++      struct pan_kmod_bo *bo = import_probe_bos[i];
++
++      if (bo == NULL)
++         continue;
++
++      void *host = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
++      if (host == NULL || host == MAP_FAILED) {
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] import probe %u: no cpu map, size=%llu MiB\n",
++                           i, (unsigned long long)(pan_kmod_bo_size(bo) >> 20));
++         continue;
++      }
++
++      uint64_t bytes = pan_kmod_bo_size(bo);
++      if (bytes > (uint64_t)16 * 1024 * 1024)
++         bytes = (uint64_t)16 * 1024 * 1024;
++      const uint64_t nwords = bytes / 4;
++      panvk_diag_invalidate_cpu_range(host, bytes);
++      const uint32_t *p = host;
++      uint64_t nz = 0, hash = 1469598103934665603ull;
++
++      for (uint64_t k = 0; k < nwords; k++) {
++         uint32_t v = p[k];
++         nz += (v != 0);
++         hash = (hash ^ v) * 1099511628211ull;
++      }
++
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] import probe %u: size=%llu MiB nz=%llu/%llu "
++                        "hash=%016llx w0=%08x w1=%08x w2=%08x w3=%08x submits=%llu "
++                        "draws=%llu renders=%llu blits=%llu copies=%llu clears=%llu "
++                        "pwrites=%llu preads=%llu\n",
++                        i, (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
++                        (unsigned long long)nz, (unsigned long long)nwords,
++                        (unsigned long long)hash,
++                        p[0], p[1], p[2], p[3],
++                        (unsigned long long)import_probe_submits,
++                        panvk_diag_draws, panvk_diag_renders,
++                        panvk_diag_blits, panvk_diag_copies, panvk_diag_clears,
++                        panvk_diag_present_writes, panvk_diag_present_reads);
++   }
++
++   for (unsigned i = 0; i < diag_vbo_count; i++) {
++      VK_FROM_HANDLE(panvk_buffer, b, diag_vbo_bufs[i]);
++
++      if (b == NULL || b->diag_bo == NULL)
++         continue;
++
++      void *host = pan_kmod_bo_mmap(b->diag_bo, PROT_READ, MAP_SHARED, NULL);
++      if (host == NULL || host == MAP_FAILED) {
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] VBO[%u]: no cpu map size=%llu\n", i,
++                           (unsigned long long)b->vk.size);
++         continue;
++      }
++
++      uint64_t bytes = MIN2(b->vk.size, (uint64_t)65536);
++      const uint32_t *p = (const uint32_t *)((char *)host + b->diag_mem_off);
++      panvk_diag_invalidate_cpu_range(p, bytes);
++      uint64_t nz = 0, nwords = bytes / 4;
++
++      for (uint64_t k = 0; k < nwords; k++)
++         nz += (p[k] != 0);
++
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] VBO[%u]: size=0x%llx off=0x%llx nz=%llu/%llu "
++                        "w0=%08x(%g) w1=%08x(%g) w2=%08x(%g) w3=%08x(%g)\n",
++                        i, (unsigned long long)b->vk.size,
++                        (unsigned long long)b->diag_mem_off,
++                        (unsigned long long)nz, (unsigned long long)nwords,
++                        p[0], (double)*(const float *)&p[0],
++                        p[1], (double)*(const float *)&p[1],
++                        p[2], (double)*(const float *)&p[2],
++                        p[3], (double)*(const float *)&p[3]);
++
++      pan_kmod_bo_munmap(b->diag_bo, host, 0);
++   }
++
++   diag_scan_image_bo("blit SRC", diag_blit_src);
++   for (unsigned i = 0; i < diag_rt_n; i++)
++      diag_scan_rt(i);
++
++   panvk_sparse_mirror_probe();
++
++   if ((diag_sweep_tick++ % 8) == 0)
++      diag_sweep_all();
++}
+ #include "panvk_entrypoints.h"
+ 
+ #include "pan_props.h"
+@@ -79,6 +567,21 @@ panvk_AllocateMemory(VkDevice _device,
+ 
+    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
+ 
++   if (pAllocateInfo->allocationSize >= (8ull << 20)) {
++      const VkImportMemoryFdInfoKHR *fd_dbg =
++         vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
++      const VkMemoryDedicatedAllocateInfo *ded_dbg =
++         vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO);
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory req size=%llu MiB type=%u "
++              "handle_type=%d export=%d dedicated=%d\n",
++              (unsigned long long)(pAllocateInfo->allocationSize >> 20),
++              pAllocateInfo->memoryTypeIndex,
++              fd_dbg != NULL ? (int)fd_dbg->handleType : -1,
++              (int)(vk_find_struct_const(pAllocateInfo->pNext,
++                                         EXPORT_MEMORY_ALLOCATE_INFO) != NULL),
++              (int)(ded_dbg != NULL));
++   }
++
+    const VkMemoryType *type =
+       &physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
+ 
+@@ -137,6 +640,10 @@ panvk_AllocateMemory(VkDevice _device,
+                                   shareable ? NULL : device->kmod.vm,
+                                   pAllocateInfo->allocationSize, bo_flags);
+       if (!mem->bo) {
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL bo size=%llu type=%u heap_used=%llu MiB\n",
++                 (unsigned long long)pAllocateInfo->allocationSize,
++                 pAllocateInfo->memoryTypeIndex,
++                 (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
+          result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          goto err_destroy_mem;
+       }
+@@ -184,6 +691,10 @@ panvk_AllocateMemory(VkDevice _device,
+       }
+ 
+       if (!op.va.start) {
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL va size=%llu type=%u heap_used=%llu MiB\n",
++                 (unsigned long long)pAllocateInfo->allocationSize,
++                 pAllocateInfo->memoryTypeIndex,
++                 (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
+          result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          goto err_put_bo;
+       }
+@@ -192,12 +703,21 @@ panvk_AllocateMemory(VkDevice _device,
+    int ret =
+       pan_kmod_vm_bind(device->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
+    if (ret) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL bind size=%llu type=%u ret=%d\n",
++              (unsigned long long)pAllocateInfo->allocationSize,
++              pAllocateInfo->memoryTypeIndex, ret);
+       result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       goto err_return_va;
+    }
+ 
+    mem->addr.dev = op.va.start;
+ 
++   if (fd_info &&
++       fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
++      import_probe_bos[import_probe_count % 8] = mem->bo;
++      import_probe_count++;
++   }
++
+    panvk_address_binding_report(device, &mem->vk.base, mem->addr.dev,
+                                 pan_kmod_bo_size(mem->bo),
+                                 VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
+@@ -236,6 +756,14 @@ panvk_AllocateMemory(VkDevice _device,
+    p_atomic_add(&physical_device->memory.heap_used,
+                 (uint64_t)pan_kmod_bo_size(mem->bo));
+ 
++   if (pAllocateInfo->allocationSize >= (8ull << 20))
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory ok size=%llu MiB type=%u "
++              "addr=0x%llx heap_used=%llu MiB\n",
++              (unsigned long long)(pAllocateInfo->allocationSize >> 20),
++              pAllocateInfo->memoryTypeIndex,
++              (unsigned long long)mem->addr.dev,
++              (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
++
+    *pMem = panvk_device_memory_to_handle(mem);
+ 
+    return VK_SUCCESS;
+@@ -259,6 +787,8 @@ VKAPI_ATTR void VKAPI_CALL
+ panvk_FreeMemory(VkDevice _device, VkDeviceMemory _mem,
+                  const VkAllocationCallbacks *pAllocator)
+ {
++   panvk_sparse_mirror_forget(VK_NULL_HANDLE, _mem);
++
+    VK_FROM_HANDLE(panvk_device, device, _device);
+    VK_FROM_HANDLE(panvk_device_memory, mem, _mem);
+ 
+@@ -377,6 +907,14 @@ panvk_MapMemory2KHR(VkDevice _device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
+ 
+    assert(!host_addr || addr == host_addr);
+    mem->addr.host = addr;
++   {
++      static uint32_t map_count;
++      if (map_count++ < 64)
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] MapMemory size=0x%llx off=0x%llx "
++                 "mem_va=0x%llx host=%p\n",
++                 (unsigned long long)size, (unsigned long long)offset,
++                 (unsigned long long)mem->addr.dev, addr);
++   }
+    *ppData = (char *)addr + offset;
+ 
+    return VK_SUCCESS;
+@@ -580,3 +1118,4 @@ panvk_SetDeviceMemoryPriorityEXT(VkDevice device, VkDeviceMemory memory,
+                                  float priority)
+ {
+ }
++
+diff --git a/src/panfrost/vulkan/panvk_device_memory.h b/src/panfrost/vulkan/panvk_device_memory.h
+index 6fc545b..e1b5ab6 100644
+--- a/src/panfrost/vulkan/panvk_device_memory.h
++++ b/src/panfrost/vulkan/panvk_device_memory.h
+@@ -30,4 +30,12 @@ struct panvk_device_memory {
+ VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_device_memory, vk.base, VkDeviceMemory,
+                                VK_OBJECT_TYPE_DEVICE_MEMORY)
+ 
++void panvk_import_probe_track_image(VkImage img, void *bo);
++void panvk_import_probe_note_bind(VkImage img, void *bo);
++void panvk_import_probe_set_blit_src(VkImage src, VkImage dst);
++void panvk_import_probe_set_render_target(VkImage img);
++void panvk_import_probe_track_buffer(VkBuffer buf, void *bo);
++bool panvk_import_probe_is_image(VkImage img);
++bool panvk_import_probe_is_buffer(VkBuffer buf);
++
+ #endif
+diff --git a/src/panfrost/vulkan/panvk_macros.h b/src/panfrost/vulkan/panvk_macros.h
+index 23985a1..3d5edcf 100644
+--- a/src/panfrost/vulkan/panvk_macros.h
++++ b/src/panfrost/vulkan/panvk_macros.h
+@@ -7,6 +7,36 @@
+ #define PANVK_MACROS_H
+ 
+ #include <assert.h>
++#include <stdarg.h>
++#include <stdio.h>
++
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
++
++/* Diagnostics are compiled out so they cannot cost anything on hot paths.
++ * Rebuild with -DPANVK_DIAG_ENABLE to get the stderr/logcat version back. */
++#ifdef PANVK_DIAG_ENABLE
++static inline void
++panvk_diag_printf(const char *format, ...)
++{
++   char buf[512];
++   va_list va;
++
++   va_start(va, format);
++   vsnprintf(buf, sizeof(buf), format, va);
++   va_end(va);
++
++   fputs(buf, stderr);
++#ifdef __ANDROID__
++   __android_log_write(ANDROID_LOG_ERROR, "PANVK-DIAG", buf);
++#endif
++}
++
++#define PANVK_DIAG_PRINTF(...) panvk_diag_printf(__VA_ARGS__)
++#else
++#define PANVK_DIAG_PRINTF(...) ((void)0)
++#endif
+ 
+ #ifdef HAVE_VALGRIND
+ #include <memcheck.h>
+@@ -26,6 +56,7 @@ panvk_catch_indirect_alloc_failure(VkResult error)
+     * the original error code. We also reset errno before leaving so we don't
+     * end up reporting the same allocation failure twice. */
+    if (errno == -ENOMEM) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] indirect alloc failure (-ENOMEM)\n");
+       errno = 0;
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+@@ -33,11 +64,25 @@ panvk_catch_indirect_alloc_failure(VkResult error)
+    return error;
+ }
+ 
++static inline VkResult
++panvk_diag_result(VkResult result, const char *file, int line)
++{
++   if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY ||
++       result == VK_ERROR_OUT_OF_HOST_MEMORY)
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] %s return at %s:%d\n",
++              result == VK_ERROR_OUT_OF_DEVICE_MEMORY ? "OOM" : "OOHM",
++              file, line);
++   return result;
++}
++
+ #define panvk_error(obj, error)                                                \
+-   vk_error(obj, panvk_catch_indirect_alloc_failure(error))
++   vk_error(obj, panvk_catch_indirect_alloc_failure(                           \
++                     panvk_diag_result(error, __FILE__, __LINE__)))
+ 
+ #define panvk_errorf(obj, error, ...)                                          \
+-   vk_errorf(obj, panvk_catch_indirect_alloc_failure(error), __VA_ARGS__)
++   vk_errorf(obj, panvk_catch_indirect_alloc_failure(                          \
++                       panvk_diag_result(error, __FILE__, __LINE__)),          \
++             __VA_ARGS__)
+ 
+ #define panvk_stub() assert(!"stub")
+ 
+diff --git a/src/vulkan/runtime/vk_log.c b/src/vulkan/runtime/vk_log.c
+index 2442219..4244529 100644
+--- a/src/vulkan/runtime/vk_log.c
++++ b/src/vulkan/runtime/vk_log.c
+@@ -25,6 +25,10 @@
+ #include "vk_debug_utils.h"
+ #include "vk_debug_report.h"
+ 
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
++
+ #include "vk_command_buffer.h"
+ #include "vk_enum_to_str.h"
+ #include "vk_queue.h"
+@@ -313,6 +317,16 @@ __vk_errorv(const void *_obj, VkResult error,
+ 
+    const char *error_str = vk_Result_to_str(error);
+ 
++#ifdef __ANDROID__
++   /* Allocations failures are the interesting case on panvk/kbase, and the
++    * app's stderr pipe may lose them if it aborts right after. */
++   if (error == VK_ERROR_OUT_OF_DEVICE_MEMORY ||
++       error == VK_ERROR_OUT_OF_HOST_MEMORY)
++      __android_log_print(ANDROID_LOG_ERROR, "PANVK-DIAG",
++                          "[PANVK-DIAG] vk_error %s at %s:%d", error_str,
++                          file, line);
++#endif
++
+    /* From the Vulkan 1.3.295 spec:
+     *
+     *    "VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT specifies use of

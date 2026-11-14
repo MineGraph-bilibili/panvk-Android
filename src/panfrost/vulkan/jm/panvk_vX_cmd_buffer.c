@@ -54,7 +54,7 @@ panvk_cmd_prepare_fragment_job(struct panvk_cmd_buffer *cmdbuf, uint64_t fbd)
    struct pan_ptr job_ptr = panvk_cmd_alloc_desc(cmdbuf, FRAGMENT_JOB);
 
    if (!job_ptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    (void)0;
    int minx = fb->tiling_area_px.min_x;
@@ -278,7 +278,7 @@ panvk_per_arch(cmd_alloc_tls_desc)(struct panvk_cmd_buffer *cmdbuf, bool gfx)
    if (!batch->tls.gpu) {
       batch->tls = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
       if (!batch->tls.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
    }
 
    return VK_SUCCESS;
@@ -319,7 +319,7 @@ panvk_per_arch(cmd_prepare_tiler_context)(struct panvk_cmd_buffer *cmdbuf,
    batch->tiler.ctx_descs =
       panvk_cmd_alloc_desc_array(cmdbuf, layer_count, TILER_CONTEXT);
    if (!batch->tiler.heap_desc.gpu || !batch->tiler.ctx_descs.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    tiler_desc =
       batch->tiler.ctx_descs.gpu + (pan_size(TILER_CONTEXT) * layer_idx);

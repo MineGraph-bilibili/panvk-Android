@@ -186,6 +186,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `010-android-afbc-gralloc` | 绕过 ARM gralloc 对 GPU-only 缓冲区强制 AFBC 的布局，补 dma-buf fd 查找与 BGRA/RGBA 处理；`panvk_wsi.c` 改回本地同步 WSI（覆盖仓库 zero-copy 实现）。 |
 | `011-kbase-backend` | kbase 后端对齐本地：丢弃无效的 tiler OOM CSI handler、`pan_kmod` 增加直写 logcat 的诊断输出、物理设备设置 gralloc usage 位并放开 v10 `robustBufferAccess2`。 |
 | `012-panvk-cmd-path` | 命令流路径对齐本地：clean-tile 跳过 preload、BC 转码管线后台预热、blend 描述符脏标记、null descriptor 修正。 |
+| `013-diagnostics-cleanup` | 统一 `PANVK_DIAG_PRINTF` / `panvk_diag_result` 诊断层（含 Android logcat），utrace 堆按需缩小，JM 侧补齐位置信息与 VS 未写 POS 的绘制保护。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -346,6 +347,33 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
   的兼容路径，v14 上原先会 DEVICE_LOST 的场景没有开关可回退；`PANVK_CLEAN_TILE_WRITE`
   默认关闭，打开后需确认 AFBC 块大于 tile 时仍会保留 preload（`discard_candidate` 逻辑）；
   BC 预热会在设备创建后占用一个后台线程。
+* **来源**：rc66 本地树（对齐本地行为）。
+
+#### `013-diagnostics-cleanup`（9 文件）
+
+* **机制**：
+  * `panvk_macros.h`：新增 `panvk_diag_printf()` / `PANVK_DIAG_PRINTF`（未定义
+    `PANVK_DIAG_ENABLE` 时编译为空，定义后同时写 stderr 与 logcat）与
+    `panvk_diag_result()`（只对 OOM/OOHM 打印 `文件:行`）；`panvk_error` /
+    `panvk_errorf` 统一套上 `panvk_diag_result()`。
+  * `vk_log.c`：Android 上 `VK_ERROR_OUT_OF_DEVICE_MEMORY` / `OUT_OF_HOST_MEMORY` 额外
+    打到 `PANVK-DIAG` logcat 通道，避免进程 abort 时 stderr 管道还没被读走就丢失。
+  * `panvk_device_memory.c/h`：import probe / 渲染活动计数等诊断辅助（绑定后扫描
+    BO 前 4 KiB 判断是否写过、RT/VBO/draw 计数），供 `PANVK-DIAG` 输出使用。
+  * `csf/panvk_vX_cmd_dispatch.c`：改用 `cmd_copy_tls_to_tsd()`，SPD 地址不再经
+    `pan_shader_get_spd_addr()` 二次计算。
+  * `csf/panvk_vX_utrace.c`：kbase 且未开 `MESA_GPU_TRACES` 时 u_trace clone 堆从 10 MiB
+    降到 64 KiB（`PANVK_UTRACE_CLONE_MEM_SIZE` 可覆盖）——kbase 提交路径不处理 u_trace，
+    原来的堆纯属白占。
+  * `jm/panvk_vX_cmd_draw.c`：给 `prepare_draw_layer()` 增加“VS 是否真的写
+    `VARYING_SLOT_POS`”判断，没有 GS 且 VS 不写位置时直接不发射绘制（与厂商驱动一致），
+    其余 OOM 返回带位置信息；`jm/panvk_vX_cmd_buffer.c` / `jm/panvk_vX_cmd_dispatch.c`
+    同样补齐 diag 返回。
+* **收益**：OOM 类失败在真机（尤其进程被 abort）时不再无迹可查；utrace 在 kbase 上省掉
+  10 MiB 常驻提交；坏绘制（VS 不写位置）不再把未初始化缓冲当坐标光栅化。
+* **风险/注意**：诊断宏默认编译为空，只有 `-DPANVK_DIAG_ENABLE` 才有输出；`extern` 的
+  `panvk_diag_draws` / `panvk_diag_renders` 计数在 `panvk_device_memory.c` 定义，属于
+  全局状态（非线程原子），只用于诊断，不参与决策。
 * **来源**：rc66 本地树（对齐本地行为）。
 
 ---

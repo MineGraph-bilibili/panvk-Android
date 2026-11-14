@@ -3,6 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
+
+#include "panvk_macros.h"
+#include "panvk_buffer.h"
+
 #include "genxml/decode.h"
 
 #include "vulkan/util/vk_util.h"
@@ -10,6 +15,489 @@
 #include "panvk_android.h"
 #include "panvk_device.h"
 #include "panvk_device_memory.h"
+
+/* --- render activity counters (diagnostic) ---------------------------- */
+unsigned long long panvk_diag_draws;
+unsigned long long panvk_diag_renders;
+unsigned long long panvk_diag_blits;
+unsigned long long panvk_diag_copies;
+unsigned long long panvk_diag_clears;
+unsigned long long panvk_diag_present_writes;
+unsigned long long panvk_diag_present_reads;
+unsigned long long panvk_diag_present_clears;
+
+static VkImage diag_bind_imgs[512];
+static void *diag_bind_bos[512];
+static unsigned diag_bind_n;
+static void *diag_bind_hosts[512];
+static uint64_t diag_bind_hash[512];
+static bool diag_bind_valid[512];
+static unsigned diag_sweep_tick;
+static void panvk_diag_invalidate_cpu_range(const void *addr, size_t size);
+
+static VkImage diag_blit_src;
+static VkImage diag_rts[8];
+static unsigned diag_rt_n;
+static uint64_t diag_rt_hash[8];
+static bool diag_rt_valid[8];
+
+static void
+diag_sweep_all(void)
+{
+   for (unsigned i = 0; i < diag_bind_n; i++) {
+      struct pan_kmod_bo *bo = diag_bind_bos[i];
+
+      if (bo == NULL)
+         continue;
+
+      if (diag_bind_hosts[i] == NULL) {
+         void *h = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
+         if (h == NULL || h == MAP_FAILED)
+            continue;
+         diag_bind_hosts[i] = h;
+      }
+
+      uint64_t bytes = pan_kmod_bo_size(bo);
+      if (bytes > (uint64_t)1 * 1024 * 1024)
+         bytes = (uint64_t)1 * 1024 * 1024;
+      const uint64_t nwords = bytes / 4;
+      panvk_diag_invalidate_cpu_range(diag_bind_hosts[i], bytes);
+      const uint32_t *p = diag_bind_hosts[i];
+      uint64_t nz = 0, hash = 1469598103934665603ull;
+
+      for (uint64_t k = 0; k < nwords; k++) {
+         uint32_t v = p[k];
+         nz += (v != 0);
+         hash = (hash ^ v) * 1099511628211ull;
+      }
+
+      const bool changed = diag_bind_valid[i] && (hash != diag_bind_hash[i]);
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] IMG[%u]: img=%p size=%llu MiB nz=%llu/%llu "
+                        "hash=%016llx %s\n",
+                        i, (void *)diag_bind_imgs[i],
+                        (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
+                        (unsigned long long)nz, (unsigned long long)nwords,
+                        (unsigned long long)hash, changed ? "CHANGED" : "same");
+      diag_bind_hash[i] = hash;
+      diag_bind_valid[i] = true;
+   }
+}
+
+void
+panvk_import_probe_set_render_target(VkImage img)
+{
+   if (img == VK_NULL_HANDLE)
+      return;
+   for (unsigned i = 0; i < diag_rt_n; i++) {
+      if (diag_rts[i] == img)
+         return;
+   }
+   if (diag_rt_n < 8)
+      diag_rts[diag_rt_n++] = img;
+}
+
+static uint64_t diag_rt_draws[8];
+static uint64_t diag_rt_other_draws;
+
+unsigned long long
+panvk_diag_rt_other_draws(void)
+{
+   return diag_rt_other_draws;
+}
+
+void
+panvk_diag_note_rt_draw(VkImage img)
+{
+   if (img == VK_NULL_HANDLE) {
+      diag_rt_other_draws++;
+      return;
+   }
+   for (unsigned i = 0; i < diag_rt_n; i++) {
+      if (diag_rts[i] == img) {
+         diag_rt_draws[i]++;
+         return;
+      }
+   }
+   diag_rt_other_draws++;
+}
+
+static void
+diag_scan_rt(unsigned idx)
+{
+   const VkImage img = diag_rts[idx];
+   struct pan_kmod_bo *bo = NULL;
+
+   for (unsigned i = 0; i < diag_bind_n; i++) {
+      if (diag_bind_imgs[i] == img) {
+         bo = diag_bind_bos[i];
+         break;
+      }
+   }
+
+   if (bo == NULL) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] RT[%u] probe: img=%p no bo\n", idx, (void *)img);
+      return;
+   }
+
+   void *host = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
+   if (host == NULL || host == MAP_FAILED) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] RT[%u] probe: img=%p no cpu map, size=%llu MiB\n",
+                        idx, (void *)img, (unsigned long long)(pan_kmod_bo_size(bo) >> 20));
+      return;
+   }
+
+   uint64_t bytes = pan_kmod_bo_size(bo);
+   if (bytes > (uint64_t)16 * 1024 * 1024)
+      bytes = (uint64_t)16 * 1024 * 1024;
+   const uint64_t nwords = bytes / 4;
+   panvk_diag_invalidate_cpu_range(host, bytes);
+   const uint32_t *p = host;
+   uint64_t nz = 0, hash = 1469598103934665603ull;
+
+   for (uint64_t k = 0; k < nwords; k++) {
+      uint32_t v = p[k];
+      nz += (v != 0);
+      hash = (hash ^ v) * 1099511628211ull;
+   }
+
+   const bool changed = diag_rt_valid[idx] && (hash != diag_rt_hash[idx]);
+   PANVK_DIAG_PRINTF("[PANVK-DIAG] RT[%u] probe: img=%p size=%llu MiB nz=%llu/%llu "
+                     "hash=%016llx draws=%llu %s\n",
+                     idx, (void *)img, (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
+                     (unsigned long long)nz, (unsigned long long)nwords,
+                     (unsigned long long)hash,
+                     (unsigned long long)diag_rt_draws[idx],
+                     changed ? "CHANGED" : "same");
+   diag_rt_hash[idx] = hash;
+   diag_rt_valid[idx] = true;
+}
+
+static void
+diag_scan_image_bo(const char *tag, VkImage img)
+{
+   struct pan_kmod_bo *bo = NULL;
+
+   if (img == VK_NULL_HANDLE)
+      return;
+
+   for (unsigned i = 0; i < diag_bind_n; i++) {
+      if (diag_bind_imgs[i] == img) {
+         bo = diag_bind_bos[i];
+         break;
+      }
+   }
+
+   if (bo == NULL) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] %s probe: img=%p no bo found\n", tag, (void *)img);
+      return;
+   }
+
+   void *host = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
+   if (host == NULL || host == MAP_FAILED) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] %s probe: img=%p no cpu map, size=%llu MiB\n",
+                        tag, (void *)img, (unsigned long long)(pan_kmod_bo_size(bo) >> 20));
+      return;
+   }
+
+   uint64_t bytes = pan_kmod_bo_size(bo);
+   if (bytes > (uint64_t)16 * 1024 * 1024)
+      bytes = (uint64_t)16 * 1024 * 1024;
+   const uint64_t nwords = bytes / 4;
+   panvk_diag_invalidate_cpu_range(host, bytes);
+   const uint32_t *p = host;
+   uint64_t nz = 0, hash = 1469598103934665603ull;
+
+   for (uint64_t k = 0; k < nwords; k++) {
+      uint32_t v = p[k];
+      nz += (v != 0);
+      hash = (hash ^ v) * 1099511628211ull;
+   }
+
+   PANVK_DIAG_PRINTF("[PANVK-DIAG] %s probe: img=%p size=%llu MiB nz=%llu/%llu "
+                     "hash=%016llx w0=%08x w1=%08x w2=%08x w3=%08x\n",
+                     tag, (void *)img,
+                     (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
+                     (unsigned long long)nz, (unsigned long long)nwords,
+                     (unsigned long long)hash,
+                     p[0], p[1], p[2], p[3]);
+}
+
+void
+panvk_import_probe_note_bind(VkImage img, void *bo)
+{
+   if (bo == NULL)
+      return;
+   for (unsigned i = 0; i < diag_bind_n; i++) {
+      if (diag_bind_imgs[i] == img) {
+         diag_bind_bos[i] = bo;
+         return;
+      }
+   }
+   if (diag_bind_n < 512) {
+      diag_bind_imgs[diag_bind_n] = img;
+      diag_bind_bos[diag_bind_n] = bo;
+      diag_bind_n++;
+   }
+}
+
+void
+panvk_import_probe_set_blit_src(VkImage src, VkImage dst)
+{
+   if (panvk_import_probe_is_image(dst))
+      diag_blit_src = src;
+}
+
+static VkImage import_probe_imgs[8];
+static unsigned import_probe_img_count;
+static VkBuffer import_probe_bufs[8];
+static unsigned import_probe_buf_count;
+
+static struct pan_kmod_bo *import_probe_bos[8];
+
+static bool
+import_probe_bo_match(void *bo)
+{
+   if (bo == NULL)
+      return false;
+   for (unsigned i = 0; i < 8; i++) {
+      if (import_probe_bos[i] == bo)
+         return true;
+   }
+   return false;
+}
+
+void
+panvk_import_probe_track_image(VkImage img, void *bo)
+{
+   if (!import_probe_bo_match(bo))
+      return;
+   for (unsigned i = 0; i < import_probe_img_count; i++) {
+      if (import_probe_imgs[i] == img)
+         return;
+   }
+   if (import_probe_img_count < 8)
+      import_probe_imgs[import_probe_img_count++] = img;
+   PANVK_DIAG_PRINTF("[PANVK-DIAG] present IMAGE bound: img=%p bo=%p count=%u\n",
+                     (void *)img, bo, import_probe_img_count);
+}
+
+void
+panvk_import_probe_track_buffer(VkBuffer buf, void *bo)
+{
+   if (!import_probe_bo_match(bo))
+      return;
+   for (unsigned i = 0; i < import_probe_buf_count; i++) {
+      if (import_probe_bufs[i] == buf)
+         return;
+   }
+   if (import_probe_buf_count < 8)
+      import_probe_bufs[import_probe_buf_count++] = buf;
+   PANVK_DIAG_PRINTF("[PANVK-DIAG] present BUFFER bound: buf=%p bo=%p count=%u\n",
+                     (void *)buf, bo, import_probe_buf_count);
+}
+
+bool
+panvk_import_probe_is_image(VkImage img)
+{
+   for (unsigned i = 0; i < import_probe_img_count; i++) {
+      if (import_probe_imgs[i] == img)
+         return true;
+   }
+   return false;
+}
+
+bool
+panvk_import_probe_is_buffer(VkBuffer buf)
+{
+   for (unsigned i = 0; i < import_probe_buf_count; i++) {
+      if (import_probe_bufs[i] == buf)
+         return true;
+   }
+   return false;
+}
+
+static VkBuffer diag_vbo_bufs[8];
+static unsigned diag_vbo_count;
+
+void
+panvk_diag_note_draw(uint64_t vb_addr, uint32_t base, uint32_t count,
+                     uint32_t instances)
+{
+   static unsigned n;
+
+   if (n >= 8 || diag_vbo_count == 0)
+      return;
+   n++;
+
+   VK_FROM_HANDLE(panvk_buffer, b, diag_vbo_bufs[0]);
+   if (b == NULL || b->diag_bo == NULL) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]: no vbo tracking\n", n);
+      return;
+   }
+
+   uint64_t delta = vb_addr >= b->vk.device_address ?
+                    vb_addr - b->vk.device_address : ~0ull;
+
+   void *host = pan_kmod_bo_mmap(b->diag_bo, PROT_READ, MAP_SHARED, NULL);
+   if (host == NULL || host == MAP_FAILED || delta == ~0ull ||
+       delta + 64 > b->vk.size) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]: vb=0x%llx delta=0x%llx base=%u "
+                        "count=%u inst=%u unmappable\n", n,
+                        (unsigned long long)vb_addr, (unsigned long long)delta,
+                        base, count, instances);
+      return;
+   }
+
+   const uint32_t *p = (const uint32_t *)((char *)host + b->diag_mem_off + delta);
+   panvk_diag_invalidate_cpu_range(p, 64);
+
+   float f_stride4 = 0, f_stride8 = 0, f_stride16 = 0;
+   if (delta + (uint64_t)base * 16 + 4 <= b->vk.size) {
+      const uint32_t *q4 = (const uint32_t *)((const char *)p + (uint64_t)base * 4);
+      const uint32_t *q8 = (const uint32_t *)((const char *)p + (uint64_t)base * 8);
+      const uint32_t *q16 = (const uint32_t *)((const char *)p + (uint64_t)base * 16);
+      panvk_diag_invalidate_cpu_range(q4, 4);
+      f_stride4 = *(const float *)&q4[0];
+      f_stride8 = *(const float *)&q8[0];
+      f_stride16 = *(const float *)&q16[0];
+   }
+
+   PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]: vb=0x%llx delta=0x%llx base=%u "
+                     "count=%u inst=%u | w0=%08x(%g) w1=%08x(%g) w2=%08x(%g) "
+                     "w3=%08x(%g) | basef4=%g f8=%g f16=%g\n",
+                     n, (unsigned long long)vb_addr, (unsigned long long)delta,
+                     base, count, instances,
+                     p[0], (double)*(const float *)&p[0],
+                     p[1], (double)*(const float *)&p[1],
+                     p[2], (double)*(const float *)&p[2],
+                     p[3], (double)*(const float *)&p[3],
+                     (double)f_stride4, (double)f_stride8, (double)f_stride16);
+}
+
+void
+panvk_diag_note_vbo(VkBuffer buf)
+{
+   for (unsigned i = 0; i < diag_vbo_count; i++) {
+      if (diag_vbo_bufs[i] == buf)
+         return;
+   }
+   if (diag_vbo_count < 8)
+      diag_vbo_bufs[diag_vbo_count++] = buf;
+}
+
+static void
+panvk_diag_invalidate_cpu_range(const void *addr, size_t size)
+{
+#if defined(__aarch64__)
+   uintptr_t start = (uintptr_t)addr & ~(uintptr_t)63;
+   uintptr_t end = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
+   for (uintptr_t p = start; p < end; p += 64)
+      __asm__ volatile("dc civac, %0" : : "r"(p) : "memory");
+   __asm__ volatile("dsb sy" : : : "memory");
+#else
+   (void)addr;
+   (void)size;
+#endif
+}
+
+/* --- imported present buffer probe (diagnostic) ----------------------- */
+static uint32_t import_probe_count;
+static uint64_t import_probe_submits;
+
+void
+panvk_import_probe_tick(void)
+{
+   return; /* rc40-clean: sweeps disabled */
+   if (import_probe_count == 0)
+      return;
+
+   if ((++import_probe_submits % 32) != 0)
+      return;
+
+   for (uint32_t i = 0; i < 8; i++) {
+      struct pan_kmod_bo *bo = import_probe_bos[i];
+
+      if (bo == NULL)
+         continue;
+
+      void *host = pan_kmod_bo_mmap(bo, PROT_READ, MAP_SHARED, NULL);
+      if (host == NULL || host == MAP_FAILED) {
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] import probe %u: no cpu map, size=%llu MiB\n",
+                           i, (unsigned long long)(pan_kmod_bo_size(bo) >> 20));
+         continue;
+      }
+
+      uint64_t bytes = pan_kmod_bo_size(bo);
+      if (bytes > (uint64_t)16 * 1024 * 1024)
+         bytes = (uint64_t)16 * 1024 * 1024;
+      const uint64_t nwords = bytes / 4;
+      panvk_diag_invalidate_cpu_range(host, bytes);
+      const uint32_t *p = host;
+      uint64_t nz = 0, hash = 1469598103934665603ull;
+
+      for (uint64_t k = 0; k < nwords; k++) {
+         uint32_t v = p[k];
+         nz += (v != 0);
+         hash = (hash ^ v) * 1099511628211ull;
+      }
+
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] import probe %u: size=%llu MiB nz=%llu/%llu "
+                        "hash=%016llx w0=%08x w1=%08x w2=%08x w3=%08x submits=%llu "
+                        "draws=%llu renders=%llu blits=%llu copies=%llu clears=%llu "
+                        "pwrites=%llu preads=%llu\n",
+                        i, (unsigned long long)(pan_kmod_bo_size(bo) >> 20),
+                        (unsigned long long)nz, (unsigned long long)nwords,
+                        (unsigned long long)hash,
+                        p[0], p[1], p[2], p[3],
+                        (unsigned long long)import_probe_submits,
+                        panvk_diag_draws, panvk_diag_renders,
+                        panvk_diag_blits, panvk_diag_copies, panvk_diag_clears,
+                        panvk_diag_present_writes, panvk_diag_present_reads);
+   }
+
+   for (unsigned i = 0; i < diag_vbo_count; i++) {
+      VK_FROM_HANDLE(panvk_buffer, b, diag_vbo_bufs[i]);
+
+      if (b == NULL || b->diag_bo == NULL)
+         continue;
+
+      void *host = pan_kmod_bo_mmap(b->diag_bo, PROT_READ, MAP_SHARED, NULL);
+      if (host == NULL || host == MAP_FAILED) {
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] VBO[%u]: no cpu map size=%llu\n", i,
+                           (unsigned long long)b->vk.size);
+         continue;
+      }
+
+      uint64_t bytes = MIN2(b->vk.size, (uint64_t)65536);
+      const uint32_t *p = (const uint32_t *)((char *)host + b->diag_mem_off);
+      panvk_diag_invalidate_cpu_range(p, bytes);
+      uint64_t nz = 0, nwords = bytes / 4;
+
+      for (uint64_t k = 0; k < nwords; k++)
+         nz += (p[k] != 0);
+
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] VBO[%u]: size=0x%llx off=0x%llx nz=%llu/%llu "
+                        "w0=%08x(%g) w1=%08x(%g) w2=%08x(%g) w3=%08x(%g)\n",
+                        i, (unsigned long long)b->vk.size,
+                        (unsigned long long)b->diag_mem_off,
+                        (unsigned long long)nz, (unsigned long long)nwords,
+                        p[0], (double)*(const float *)&p[0],
+                        p[1], (double)*(const float *)&p[1],
+                        p[2], (double)*(const float *)&p[2],
+                        p[3], (double)*(const float *)&p[3]);
+
+      pan_kmod_bo_munmap(b->diag_bo, host, 0);
+   }
+
+   diag_scan_image_bo("blit SRC", diag_blit_src);
+   for (unsigned i = 0; i < diag_rt_n; i++)
+      diag_scan_rt(i);
+
+   panvk_sparse_mirror_probe();
+
+   if ((diag_sweep_tick++ % 8) == 0)
+      diag_sweep_all();
+}
 #include "panvk_entrypoints.h"
 
 #include "pan_props.h"
@@ -79,6 +567,21 @@ panvk_AllocateMemory(VkDevice _device,
 
    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
 
+   if (pAllocateInfo->allocationSize >= (8ull << 20)) {
+      const VkImportMemoryFdInfoKHR *fd_dbg =
+         vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
+      const VkMemoryDedicatedAllocateInfo *ded_dbg =
+         vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO);
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory req size=%llu MiB type=%u "
+              "handle_type=%d export=%d dedicated=%d\n",
+              (unsigned long long)(pAllocateInfo->allocationSize >> 20),
+              pAllocateInfo->memoryTypeIndex,
+              fd_dbg != NULL ? (int)fd_dbg->handleType : -1,
+              (int)(vk_find_struct_const(pAllocateInfo->pNext,
+                                         EXPORT_MEMORY_ALLOCATE_INFO) != NULL),
+              (int)(ded_dbg != NULL));
+   }
+
    const VkMemoryType *type =
       &physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
 
@@ -137,6 +640,10 @@ panvk_AllocateMemory(VkDevice _device,
                                   shareable ? NULL : device->kmod.vm,
                                   pAllocateInfo->allocationSize, bo_flags);
       if (!mem->bo) {
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL bo size=%llu type=%u heap_used=%llu MiB\n",
+                 (unsigned long long)pAllocateInfo->allocationSize,
+                 pAllocateInfo->memoryTypeIndex,
+                 (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
          result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          goto err_destroy_mem;
       }
@@ -184,6 +691,10 @@ panvk_AllocateMemory(VkDevice _device,
       }
 
       if (!op.va.start) {
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL va size=%llu type=%u heap_used=%llu MiB\n",
+                 (unsigned long long)pAllocateInfo->allocationSize,
+                 pAllocateInfo->memoryTypeIndex,
+                 (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
          result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          goto err_put_bo;
       }
@@ -192,11 +703,20 @@ panvk_AllocateMemory(VkDevice _device,
    int ret =
       pan_kmod_vm_bind(device->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
    if (ret) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL bind size=%llu type=%u ret=%d\n",
+              (unsigned long long)pAllocateInfo->allocationSize,
+              pAllocateInfo->memoryTypeIndex, ret);
       result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       goto err_return_va;
    }
 
    mem->addr.dev = op.va.start;
+
+   if (fd_info &&
+       fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
+      import_probe_bos[import_probe_count % 8] = mem->bo;
+      import_probe_count++;
+   }
 
    panvk_address_binding_report(device, &mem->vk.base, mem->addr.dev,
                                 pan_kmod_bo_size(mem->bo),
@@ -236,6 +756,14 @@ panvk_AllocateMemory(VkDevice _device,
    p_atomic_add(&physical_device->memory.heap_used,
                 (uint64_t)pan_kmod_bo_size(mem->bo));
 
+   if (pAllocateInfo->allocationSize >= (8ull << 20))
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory ok size=%llu MiB type=%u "
+              "addr=0x%llx heap_used=%llu MiB\n",
+              (unsigned long long)(pAllocateInfo->allocationSize >> 20),
+              pAllocateInfo->memoryTypeIndex,
+              (unsigned long long)mem->addr.dev,
+              (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
+
    *pMem = panvk_device_memory_to_handle(mem);
 
    return VK_SUCCESS;
@@ -259,6 +787,8 @@ VKAPI_ATTR void VKAPI_CALL
 panvk_FreeMemory(VkDevice _device, VkDeviceMemory _mem,
                  const VkAllocationCallbacks *pAllocator)
 {
+   panvk_sparse_mirror_forget(VK_NULL_HANDLE, _mem);
+
    VK_FROM_HANDLE(panvk_device, device, _device);
    VK_FROM_HANDLE(panvk_device_memory, mem, _mem);
 
@@ -377,6 +907,14 @@ panvk_MapMemory2KHR(VkDevice _device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
 
    assert(!host_addr || addr == host_addr);
    mem->addr.host = addr;
+   {
+      static uint32_t map_count;
+      if (map_count++ < 64)
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] MapMemory size=0x%llx off=0x%llx "
+                 "mem_va=0x%llx host=%p\n",
+                 (unsigned long long)size, (unsigned long long)offset,
+                 (unsigned long long)mem->addr.dev, addr);
+   }
    *ppData = (char *)addr + offset;
 
    return VK_SUCCESS;
@@ -580,3 +1118,4 @@ panvk_SetDeviceMemoryPriorityEXT(VkDevice device, VkDeviceMemory memory,
                                  float priority)
 {
 }
+

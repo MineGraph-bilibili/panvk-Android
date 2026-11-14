@@ -29,7 +29,6 @@
 #include "pan_desc.h"
 #include "pan_encoder.h"
 #include "pan_props.h"
-#include "pan_shader.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -120,7 +119,7 @@ prepare_driver_set(struct panvk_cmd_buffer *cmdbuf)
    struct panvk_opaque_desc *descs = driver_set.cpu;
 
    if (!driver_set.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    /* Dummy sampler always comes first. */
    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {
@@ -231,12 +230,9 @@ panvk_per_arch(cmd_dispatch_shader)(
          cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_FAU), fau_ptr);
       }
 
-      if (compute_state_dirty(cmdbuf, CS)) {
-         uint64_t spd_addr =
-	    pan_shader_get_spd_addr(&cs->info,
-	                            panvk_priv_mem_dev_addr(cs->spd));
-         cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_SPD), spd_addr);
-      }
+      if (compute_state_dirty(cmdbuf, CS))
+         cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_SPD),
+                      panvk_priv_mem_dev_addr(cs->spd));
 
       cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_TSD), tsd);
 
@@ -425,18 +421,9 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
 
    struct cs_builder *b = panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
 
-   /* Copy the global TLS pointer and size to the per-job TSD: with packed
-    * TLS addressing the stack stride comes from the size word, so a job that
-    * only copies the pointer races jobs with a different stack size. */
-   if (cs->info.tls_size) {
-      cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
-      cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
-      cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
-      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
-      cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
-      cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
-      cs_flush_stores(b);
-   }
+   /* Copy the global TLS pointer and size to the per-job TSD. */
+   if (cs->info.tls_size)
+      panvk_per_arch(cmd_copy_tls_to_tsd)(cmdbuf, b, tsd);
 
    panvk_per_arch(cmd_dispatch_shader)(cmdbuf, cs, cs_desc_state,
                                        cmdbuf->state.compute.push_uniforms,

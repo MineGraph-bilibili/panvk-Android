@@ -25,6 +25,10 @@
 #include "vk_debug_utils.h"
 #include "vk_debug_report.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #include "vk_command_buffer.h"
 #include "vk_enum_to_str.h"
 #include "vk_queue.h"
@@ -312,6 +316,16 @@ __vk_errorv(const void *_obj, VkResult error,
       object = NULL;
 
    const char *error_str = vk_Result_to_str(error);
+
+#ifdef __ANDROID__
+   /* Allocations failures are the interesting case on panvk/kbase, and the
+    * app's stderr pipe may lose them if it aborts right after. */
+   if (error == VK_ERROR_OUT_OF_DEVICE_MEMORY ||
+       error == VK_ERROR_OUT_OF_HOST_MEMORY)
+      __android_log_print(ANDROID_LOG_ERROR, "PANVK-DIAG",
+                          "[PANVK-DIAG] vk_error %s at %s:%d", error_str,
+                          file, line);
+#endif
 
    /* From the Vulkan 1.3.295 spec:
     *

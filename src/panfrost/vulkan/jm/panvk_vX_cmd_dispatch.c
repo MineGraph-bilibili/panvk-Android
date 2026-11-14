@@ -84,7 +84,7 @@ prepare_driver_set(struct panvk_cmd_buffer *cmdbuf)
    struct panvk_opaque_desc *descs = driver_set.cpu;
 
    if (!driver_set.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    /* Dummy sampler always comes first. */
    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {

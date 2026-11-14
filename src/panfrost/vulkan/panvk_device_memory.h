@@ -30,4 +30,12 @@ struct panvk_device_memory {
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_device_memory, vk.base, VkDeviceMemory,
                                VK_OBJECT_TYPE_DEVICE_MEMORY)
 
+void panvk_import_probe_track_image(VkImage img, void *bo);
+void panvk_import_probe_note_bind(VkImage img, void *bo);
+void panvk_import_probe_set_blit_src(VkImage src, VkImage dst);
+void panvk_import_probe_set_render_target(VkImage img);
+void panvk_import_probe_track_buffer(VkBuffer buf, void *bo);
+bool panvk_import_probe_is_image(VkImage img);
+bool panvk_import_probe_is_buffer(VkBuffer buf);
+
 #endif

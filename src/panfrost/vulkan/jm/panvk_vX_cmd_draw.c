@@ -290,7 +290,7 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr ptr = panvk_cmd_alloc_desc_aggregate(
       cmdbuf, PAN_DESC(RENDERER_STATE), PAN_DESC_ARRAY(bd_count, BLEND));
    if (!ptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct mali_renderer_state_packed *rsd = ptr.cpu;
    struct mali_blend_packed *bds = ptr.cpu + pan_size(RENDERER_STATE);
@@ -443,7 +443,7 @@ panvk_draw_prepare_varyings(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr bufs = panvk_cmd_alloc_desc_array(
       cmdbuf, PANVK_VARY_BUF_MAX + 1, ATTRIBUTE_BUFFER);
    if (!bufs.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct mali_attribute_buffer_packed *buf_descs = bufs.cpu;
    const struct vk_input_assembly_state *ia =
@@ -459,7 +459,7 @@ panvk_draw_prepare_varyings(struct panvk_cmd_buffer *cmdbuf,
          cmdbuf, desc, sizeof(struct libpan_draw_helper_varying_buf_info), 8);
 
       if (!bufs_info_storage.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       cmdbuf->state.gfx.vs.indirect_varying_bufs_infos = bufs_info_storage.gpu;
 
@@ -486,7 +486,7 @@ panvk_draw_prepare_varyings(struct panvk_cmd_buffer *cmdbuf,
                : 0;
 
          if (buf_size && !buf_addr)
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
       }
 
       pan_pack(&buf_descs[i], ATTRIBUTE_BUFFER, cfg) {
@@ -669,7 +669,7 @@ panvk_draw_prepare_vs_attribs(struct panvk_cmd_buffer *cmdbuf,
    struct mali_attribute_packed *attrib_descs = attribs.cpu;
 
    if (!bufs.gpu || (attrib_count && !attribs.gpu))
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct libpan_draw_helper_attrib_buf_info *bufs_infos = NULL;
    struct libpan_draw_helper_attrib_info *attribs_infos = NULL;
@@ -684,7 +684,7 @@ panvk_draw_prepare_vs_attribs(struct panvk_cmd_buffer *cmdbuf,
 
       if (!bufs_infos_storage.gpu ||
           (num_vs_attribs && !attribs_infos_storage.gpu))
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       cmdbuf->state.gfx.vs.indirect_attrib_bufs_infos = bufs_infos_storage.gpu;
       cmdbuf->state.gfx.vs.indirect_attribs_infos = attribs_infos_storage.gpu;
@@ -816,7 +816,7 @@ panvk_draw_prepare_viewport(struct panvk_cmd_buffer *cmdbuf,
        dyn_gfx_state_dirty(cmdbuf, VP_DEPTH_CLAMP_RANGE)) {
       struct pan_ptr vp = panvk_cmd_alloc_desc(cmdbuf, VIEWPORT);
       if (!vp.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       panvk_emit_viewport(cmdbuf, vp.cpu);
       cmdbuf->state.gfx.vpd = vp.gpu;
@@ -865,7 +865,7 @@ panvk_draw_prepare_vertex_job(struct panvk_cmd_buffer *cmdbuf,
    struct panvk_batch *batch = cmdbuf->cur_batch;
    struct pan_ptr ptr = panvk_cmd_alloc_desc(cmdbuf, COMPUTE_JOB);
    if (!ptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    util_dynarray_append(&batch->jobs, ptr.cpu);
    draw->jobs.vertex = ptr;
@@ -1138,7 +1138,7 @@ panvk_draw_prepare_idvs_job(struct panvk_cmd_buffer *cmdbuf,
    struct panvk_batch *batch = cmdbuf->cur_batch;
    struct pan_ptr ptr = panvk_cmd_alloc_desc(cmdbuf, INDEXED_VERTEX_JOB);
    if (!ptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    util_dynarray_append(&batch->jobs, ptr.cpu);
    draw->jobs.idvs = ptr;
@@ -1455,10 +1455,18 @@ prepare_draw_layer(struct panvk_cmd_buffer *cmdbuf,
       if (result != VK_SUCCESS)
          return result;
 
+      /* Without a geometry or tessellation stage the tiler reads the vertex shader's positions.
+       * A vertex shader that writes none leaves them undefined, so nothing is rasterized, as on
+       * the vendor driver, rather than the tiler reading whatever the buffer held. */
+      const bool writes_pos =
+#if PAN_ARCH >= 9
+         cmdbuf->state.gfx.gs.shader ||
+#endif
+         pan_varying_layout_find_slot(&vs->info.varyings.formats, VARYING_SLOT_POS);
       bool needs_tiling =
-         !cmdbuf->vk.dynamic_graphics_state.rs.rasterizer_discard_enable ||
-         cmdbuf->state.gfx.occlusion_query.mode !=
-            MALI_OCCLUSION_MODE_DISABLED;
+         writes_pos &&
+         (!cmdbuf->vk.dynamic_graphics_state.rs.rasterizer_discard_enable ||
+          cmdbuf->state.gfx.occlusion_query.mode != MALI_OCCLUSION_MODE_DISABLED);
 
       if (needs_tiling) {
          result = panvk_draw_prepare_tiler_job(cmdbuf, draw);
@@ -2037,7 +2045,7 @@ v9_prepare_vs_driver_set_ex(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr driver_set = panvk_cmd_alloc_dev_mem(
       cmdbuf, desc, desc_count * PANVK_DESCRIPTOR_SIZE, PANVK_DESCRIPTOR_SIZE);
    if (!driver_set.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct panvk_opaque_desc *descs = driver_set.cpu;
    for (uint32_t i = 0; i < MAX_VS_ATTRIBS; i++) {
@@ -2089,7 +2097,7 @@ v9_prepare_stage_driver_set(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr driver_set = panvk_cmd_alloc_dev_mem(
       cmdbuf, desc, desc_count * PANVK_DESCRIPTOR_SIZE, PANVK_DESCRIPTOR_SIZE);
    if (desc_count && !driver_set.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct panvk_opaque_desc *descs = driver_set.cpu;
    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {
@@ -2120,7 +2128,7 @@ v9_prepare_blend_zsd(struct panvk_cmd_buffer *cmdbuf,
    uint32_t bd_count = cmdbuf->state.gfx.render.fb.layout.rt_count;
    struct pan_ptr bptr = panvk_cmd_alloc_desc_array(cmdbuf, bd_count, BLEND);
    if (bd_count && !bptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
    if (fs) {
       VkResult r = panvk_per_arch(blend_emit_descs)(cmdbuf, bptr.cpu);
       if (r != VK_SUCCESS)
@@ -2146,7 +2154,7 @@ v9_prepare_blend_zsd(struct panvk_cmd_buffer *cmdbuf,
 
    struct pan_ptr zsd = panvk_cmd_alloc_desc(cmdbuf, DEPTH_STENCIL);
    if (!zsd.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
    pan_cast_and_pack(zsd.cpu, DEPTH_STENCIL, cfg) {
       cfg.stencil_test_enable = test_s;
       if (test_s) {
@@ -2320,7 +2328,7 @@ v9_emit_malloc_vertex_job(struct panvk_cmd_buffer *cmdbuf,
                                   fs ? fs->info.tls_size : 0,
                                   batch->tlsinfo.tls.size);
    if (!job.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
    util_dynarray_append(&batch->jobs, job.cpu);
    util_dynarray_append(&batch->malloc_vertex_jobs, job.cpu);
 
@@ -2546,7 +2554,7 @@ v9_emit_malloc_vertex_job(struct panvk_cmd_buffer *cmdbuf,
       uint32_t inst_mask;
       uint64_t inst_info_gpu, vs_attribs;
       if (!v9_inst_attr_info(cmdbuf, &inst_mask, &inst_info_gpu, &vs_attribs))
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       struct panvk_precomp_ctx pctx = panvk_per_arch(precomp_cs)(cmdbuf);
       panlib_v9_draw_indirect_patch(&pctx, panlib_1d(1),
@@ -3302,7 +3310,7 @@ v9_prerast_draw_viewports(struct panvk_cmd_buffer *cmdbuf,
        !panvk_gpu_prerast_checked_size(out_count, sizeof(uint32_t), 4,
                                        &index_bytes)) {
       mesa_loge_once("panvk: viewport run list does not fit, draw discarded");
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
@@ -3324,7 +3332,7 @@ v9_prerast_draw_viewports(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr draws = panvk_cmd_alloc_dev_mem(
       cmdbuf, desc, PANLIB_VP_MAX_VIEWPORTS * 5 * sizeof(uint32_t), 16);
    if (!runs.gpu || !out.gpu || (!merged && !part.gpu) || !draws.gpu) {
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
@@ -3432,7 +3440,7 @@ v9_prerast_draw_one(struct panvk_cmd_buffer *cmdbuf,
         !(gen_draw = v9_prerast_indirect(cmdbuf, src, &vs,
                                          has_gs ? &gs : NULL, chunk,
                                          poly_job.gpu)))) {
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
    v9_prerast_add_job(cmdbuf, &vs.job);
@@ -3491,8 +3499,8 @@ v9_prerast_split_fan(struct panvk_cmd_buffer *cmdbuf,
          struct pan_ptr ib = panvk_cmd_alloc_dev_mem(
             cmdbuf, desc, (n + 1) * sizeof(uint32_t), 16);
          if (!ib.gpu) {
-            vk_command_buffer_set_error(&cmdbuf->vk,
-                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
             return;
          }
 
@@ -3563,7 +3571,7 @@ v9_prerast_chunked(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr cd =
       panvk_cmd_alloc_dev_mem(cmdbuf, desc, sizeof(struct panlib_chunk_draw), 16);
    if (!cd.gpu) {
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
@@ -3573,8 +3581,8 @@ v9_prerast_chunked(struct panvk_cmd_buffer *cmdbuf,
       struct pan_ptr rec =
          panvk_cmd_alloc_dev_mem(cmdbuf, desc, 5 * sizeof(uint32_t), 4);
       if (!rec.gpu) {
-         vk_command_buffer_set_error(&cmdbuf->vk,
-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
       }
 
@@ -3984,7 +3992,7 @@ v9_tess_draw(struct panvk_cmd_buffer *cmdbuf,
       direct_draw =
          panvk_cmd_alloc_dev_mem(cmdbuf, desc, 5 * sizeof(uint32_t), 4);
    if (!td.gpu || (!indirect && !direct_draw.gpu)) {
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
@@ -4058,7 +4066,7 @@ v9_tess_draw(struct panvk_cmd_buffer *cmdbuf,
        v9_prepare_stage_driver_set(cmdbuf, tcs, tcs_desc) != VK_SUCCESS ||
        panvk_per_arch(cmd_prepare_shader_res_table)(
           cmdbuf, desc_state, &tcs->desc_info, tcs_desc, 1) != VK_SUCCESS) {
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
@@ -4167,8 +4175,10 @@ v9_tess_draw(struct panvk_cmd_buffer *cmdbuf,
    }
 #undef TD
 
-   if (!ok)
+   if (!ok) {
+      fprintf(stderr, "[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
       vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
 }
 
 static void
