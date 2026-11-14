@@ -185,6 +185,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `009-perf-lifecycle` | 命令池自动裁剪窗口、TLS 稀疏化/收缩、kbase 稀疏缓冲与回读镜像、tiler heap 槽位与终止策略对齐本地。 |
 | `010-android-afbc-gralloc` | 绕过 ARM gralloc 对 GPU-only 缓冲区强制 AFBC 的布局，补 dma-buf fd 查找与 BGRA/RGBA 处理；`panvk_wsi.c` 改回本地同步 WSI（覆盖仓库 zero-copy 实现）。 |
 | `011-kbase-backend` | kbase 后端对齐本地：丢弃无效的 tiler OOM CSI handler、`pan_kmod` 增加直写 logcat 的诊断输出、物理设备设置 gralloc usage 位并放开 v10 `robustBufferAccess2`。 |
+| `012-panvk-cmd-path` | 命令流路径对齐本地：clean-tile 跳过 preload、BC 转码管线后台预热、blend 描述符脏标记、null descriptor 修正。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -314,6 +315,37 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 * **风险/注意**：去掉 `csi_handlers` 后 tiler 堆耗尽仍由内核直接终止 group（与 panfork 的
   CSF 路径一致，但没有应用层兜底）；`robustImageAccess2` 在 v10 仍受开关控制，
   `robustBufferAccess2` 放宽到 v10 属于能力声明变更，需按 GPU 实测。
+* **来源**：rc66 本地树（对齐本地行为）。
+
+#### `012-panvk-cmd-path`（14 文件）
+
+* **机制**：
+  * `panvk_vX_cmd_draw.c`：新增 `PANVK_CLEAN_TILE_WRITE=1` 路径，在 tile 尺寸最终确定后
+    判断某个 target 能否整块省掉 preload；interleaved Z/S 只 store 单平面时不再误踩另一
+    平面；渲染状态与 sysvals 相应更新。
+  * `csf/panvk_vX_cmd_draw.c`：删除 `PANVK_KBASE_TILER_IR`（kbase incremental rendering）
+    开关与相关注释——本地树不再走这条路径；`fn_addr` 由 `uint32_t` 改 `uint64_t`，避免
+    地址截断；补 draw/render 计数与带位置的 OOM 返回。
+  * `panvk_vX_cmd_meta.c` + `panvk_device.h` + `panvk_vX_device.c`：新增
+    `bc_pipeline_mtx` 与后台预热（`PANVK_BC_PREWARM`，默认开），首个 BC 上传不再在
+    提交线程上编译转码管线；设备销毁时 `bc_prewarm_finish()` 收尾。
+  * `panvk_cmd_draw.h` + `panvk_vX_blend.c`：新增 `blend_descs_dirty`，blend 描述符重建后
+    只让 `cmd_prepare_draw_sysvals` 重新拷贝一次；`panvk_resolve_attachment` 去掉不再使用的
+    `flags`。
+  * `panvk_vX_descriptor_set.c`：null descriptor 改写为 `get_sampler_subdesc_info()`，
+    原来用 tex 子描述符填 sampler 槽会写坏描述符。
+  * `panvk_instance.c`：`GetInstanceProcAddr` 统一传 `&instance->vk`（不再依赖
+    `vk_instance_get_proc_addr(NULL)` 的空实例路径）。
+  * `csf/panvk_vX_cmd_precomp.c`：复用 `cmd_copy_tls_to_tsd()`，并简化 SPD 地址计算。
+  * `panvk_vX_query_pool.c` / `panvk_vX_cmd_push_constant.c` / `panvk_vX_cmd_frame_shaders.c`
+    / `panvk_vX_cmd_desc_state.c`：OOM 统一走 `panvk_error()` / `panvk_diag_result()`。
+* **收益**：clean-tile 路径省掉无用的 preload 带宽；BC 转码管线在首次上传前就绪，避免首帧
+  卡顿；重复 blend 绑定不再触发 sysvals 全量重拷；null descriptor 修正与 64-bit 地址修正
+  消除两类真实缺陷。
+* **风险/注意**：删除 `PANVK_KBASE_TILER_IR` 意味着不再有“FINISH_FRAGMENT 回收 chunk”
+  的兼容路径，v14 上原先会 DEVICE_LOST 的场景没有开关可回退；`PANVK_CLEAN_TILE_WRITE`
+  默认关闭，打开后需确认 AFBC 块大于 tile 时仍会保留 preload（`discard_candidate` 逻辑）；
+  BC 预热会在设备创建后占用一个后台线程。
 * **来源**：rc66 本地树（对齐本地行为）。
 
 ---

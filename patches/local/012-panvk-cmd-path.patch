@@ -1,0 +1,1184 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+index e60691a..3f1520a 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -17,6 +17,9 @@
+ #include "drm-uapi/panthor_drm.h"
+ 
+ #include "panvk_buffer.h"
++
++extern unsigned long long panvk_diag_draws;
++extern unsigned long long panvk_diag_renders;
+ #include "panvk_cmd_alloc.h"
+ #include "panvk_cmd_buffer.h"
+ #include "panvk_cmd_desc_state.h"
+@@ -489,15 +492,6 @@ cmdbuf_skips_gpu_heap_ops(const struct panvk_cmd_buffer *cmdbuf)
+    return phys_dev->kbase_node_path[0] != '\0';
+ }
+ 
+-/* kbase incremental rendering (one queue group, panvk_vX_gpu_queue.c).
+- * FINISH_FRAGMENT without the FRAGMENT_COMPLETED increment still gives the
+- * pass's chunks back to the heap, which the TILER_OOM handler needs once
+- * earlier passes hold every chunk; without it the handler frees nothing and
+- * the tiler OOMs forever.  On by default only where verified: on v14 the
+- * first submit hangs (DEVICE_LOST).  PANVK_KBASE_TILER_IR=0/1 forces it. */
+-DEBUG_GET_ONCE_BOOL_OPTION(kbase_tiler_ir, "PANVK_KBASE_TILER_IR",
+-                           PAN_ARCH == 11 || PAN_ARCH == 13)
+-
+ static bool
+ render_needs_zs_crc_ext(struct panvk_cmd_buffer *cmdbuf)
+ {
+@@ -793,7 +787,7 @@ prepare_vs_driver_set(struct panvk_cmd_buffer *cmdbuf, uint32_t repeat_count)
+    struct panvk_opaque_desc *descs = driver_set.cpu;
+ 
+    if (!driver_set.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    for (uint32_t r = 0; r < repeat_count; r++) {
+       for (uint32_t i = 0; i < MAX_VS_ATTRIBS; i++) {
+@@ -986,7 +980,7 @@ prepare_fs_driver_set(struct panvk_cmd_buffer *cmdbuf)
+    struct panvk_opaque_desc *descs = driver_set.cpu;
+ 
+    if (desc_count && !driver_set.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    if (fs_desc_info->fs_varying_attr_desc_count > 0)
+       emit_varying_descs(cmdbuf, (struct mali_attribute_packed *)(&descs[0]));
+@@ -1222,7 +1216,7 @@ update_tls(struct panvk_cmd_buffer *cmdbuf)
+       if (!state->desc.gpu) {
+          state->desc = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
+          if (!state->desc.gpu)
+-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++            return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+       }
+ 
+       cmdbuf->state.gfx.tsd = state->desc.gpu;
+@@ -1271,7 +1265,7 @@ build_blend(struct panvk_cmd_buffer *cmdbuf,
+    struct mali_blend_packed *bds = ptr.cpu;
+ 
+    if (bd_count && !ptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    if (fs) {
+       VkResult result = panvk_per_arch(blend_emit_descs)(cmdbuf, bds);
+@@ -1827,7 +1821,7 @@ get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
+    if (!simul_use) {
+       tiler_desc = panvk_cmd_alloc_desc_array(cmdbuf, td_count, TILER_CONTEXT);
+       if (!tiler_desc.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+    }
+ 
+    account_tiler_work(cmdbuf, td_count);
+@@ -2300,7 +2294,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
+    cmdbuf->state.gfx.render.fbds =
+       panvk_cmd_alloc_dev_mem(cmdbuf, desc, fbds_sz, fbds_alignment);
+    if (!cmdbuf->state.gfx.render.fbds.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+    struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+@@ -2434,7 +2428,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
+          panvk_cmd_alloc_dev_mem(cmdbuf, desc, fbds_sz, fbds_alignment);
+ 
+       if (!ir_fbds.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       uint32_t ir_view_mask_temp = cmdbuf->state.gfx.render.view_mask;
+       const struct pan_fb_store *ir_store = ir_pass == PANVK_IR_LAST_PASS
+@@ -2670,7 +2664,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
+          uint32_t fn_idx = calc_fn_set_fbds_provoking_vertex_idx(cmdbuf);
+          uint32_t fn_stride =
+             dev->draw_ctx->fn_set_fbds_provoking_vertex_stride;
+-         uint32_t fn_addr =
++         uint64_t fn_addr =
+             dev->draw_ctx->fns_bo->addr.dev + fn_idx * fn_stride;
+          cs_move64_to(b, addr_reg, fn_addr);
+          cs_move32_to(b, length_reg, fn_stride);
+@@ -2878,7 +2872,7 @@ build_zsd(struct panvk_cmd_buffer *cmdbuf, struct pan_earlyzs_state earlyzs,
+ 
+    struct pan_ptr zsd = panvk_cmd_alloc_desc(cmdbuf, DEPTH_STENCIL);
+    if (!zsd.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    pan_cast_and_pack(zsd.cpu, DEPTH_STENCIL, cfg) {
+       cfg.stencil_test_enable = test_s;
+@@ -2988,7 +2982,7 @@ wrap_prev_oq(struct panvk_cmd_buffer *cmdbuf)
+ 
+ 
+       if (!new_oq_node.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       cmdbuf->state.gfx.render.oq.chain = new_oq_node.gpu;
+ 
+@@ -4181,11 +4175,7 @@ gpu_prerast_launch_cs_desc(struct panvk_cmd_buffer *cmdbuf,
+    if (cs->info.tls_size) {
+       struct cs_builder *b =
+          panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
+-      cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
+-      cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+-      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
+-      cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+-      cs_flush_stores(b);
++      panvk_per_arch(cmd_copy_tls_to_tsd)(cmdbuf, b, tsd);
+    }
+ 
+    compute_state_set_dirty(cmdbuf, CS);
+@@ -4227,7 +4217,7 @@ prepare_prerast_desc(struct panvk_cmd_buffer *cmdbuf,
+    struct panvk_opaque_desc *descs = driver_set.cpu;
+ 
+    if (!driver_set.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {
+       cfg.clamp_integer_array_indices = false;
+@@ -5026,8 +5016,8 @@ gpu_prerast_draw_generated(struct panvk_cmd_buffer *cmdbuf,
+        struct pan_ptr cptr =
+           panvk_cmd_alloc_dev_mem(cmdbuf, desc, clamps_size, 8);
+        if (!cptr.gpu) {
+-          vk_command_buffer_set_error(&cmdbuf->vk,
+-                                      VK_ERROR_OUT_OF_DEVICE_MEMORY);
++          PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
++vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+           return;
+        }
+        memcpy(cptr.cpu, clamps_cpu, clamps_size);
+@@ -5261,7 +5251,7 @@ gpu_prerast_vp_prepare(struct panvk_cmd_buffer *cmdbuf, uint64_t arena,
+        !panvk_gpu_prerast_checked_size(out_count, sizeof(uint32_t), 4,
+                                        &index_bytes)) {
+       mesa_loge_once("panvk: viewport run list does not fit, draw discarded");
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return false;
+    }
+ 
+@@ -5269,7 +5259,7 @@ gpu_prerast_vp_prepare(struct panvk_cmd_buffer *cmdbuf, uint64_t arena,
+    struct pan_ptr out = panvk_cmd_alloc_dev_mem(cmdbuf, desc, index_bytes, 16);
+ 
+    if (!runs.gpu || !out.gpu) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return false;
+    }
+ 
+@@ -5778,8 +5768,10 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
+       gpu_prerast_release_arena(cmdbuf, prerast_arena);
+    gpu_prerast_release_arena(cmdbuf, arena);
+ 
+-   if (!ok)
++   if (!ok) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+       vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++   }
+ }
+ 
+ static bool
+@@ -5900,7 +5892,7 @@ gpu_prerast_chunk_loop(struct panvk_cmd_buffer *cmdbuf,
+    if (!indirect)
+       direct = panvk_cmd_alloc_dev_mem(cmdbuf, desc, 8 * sizeof(uint32_t), 16);
+    if (!cd.gpu || (!indirect && !direct.gpu)) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       return;
+    }
+ 
+@@ -6083,8 +6075,10 @@ gpu_prerast_chunk_loop(struct panvk_cmd_buffer *cmdbuf,
+ 
+    gpu_prerast_release_arena(cmdbuf, arena);
+ 
+-   if (!ok)
++   if (!ok) {
++      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+       vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++   }
+ }
+ 
+ /* A triangle fan over the arena, as indexed fans of the hub and the next
+@@ -6116,8 +6110,8 @@ gpu_prerast_split_fan(struct panvk_cmd_buffer *cmdbuf,
+             panvk_cmd_alloc_dev_mem(cmdbuf, desc, (n + 1) * sizeof(uint32_t),
+                                     16);
+          if (!ib.gpu) {
+-            vk_command_buffer_set_error(&cmdbuf->vk,
+-                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
++            PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
++vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+             return true;
+          }
+ 
+@@ -6295,6 +6289,10 @@ lazy_vt_draw_needs_wait(const struct panvk_cmd_buffer *cmdbuf,
+    return false;
+ }
+ 
++static unsigned long long rc38_draws_total;
++static unsigned long long rc38_draws_skipped;
++static unsigned long long rc38_draws_no_fs;
++
+ static void
+ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
+ {
+@@ -6302,6 +6300,84 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
+       raster_vs_variant(cmdbuf, draw.gpu_prerast_generated);
+    VkResult result;
+ 
++   /* [rc38] Pipeline / shader / render-state of the first draws. */
++   {
++      static unsigned rc38_n;
++
++      if (rc38_n < 16) {
++         const struct vk_dynamic_graphics_state *d =
++            &cmdbuf->vk.dynamic_graphics_state;
++         const struct panvk_shader *vsh = cmdbuf->state.gfx.vs.shader;
++         const struct panvk_shader *fsh = cmdbuf->state.gfx.fs.shader;
++         const struct panvk_shader_variant *fsv =
++            panvk_shader_only_variant(fsh);
++
++         rc38_n++;
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]-A: prim=%d vcnt=%u icnt=%u | "
++                           "vs=%p bin=%u spd=%d out=0x%llx | fs=%p bin=%u "
++                           "out=0x%llx sidefx=%d fsreq=%d\n",
++                           rc38_n, (int)draw.prim, draw.vertex.count,
++                           draw.instance.count, (const void *)vsh,
++                           vs ? vs->bin_size : 0,
++                           vs ? (int)panvk_priv_mem_check_alloc(vs->spd) : -1,
++                           vs ? (unsigned long long)vs->info.outputs_written : 0,
++                           (const void *)fsh, fsv ? fsv->bin_size : 0,
++                           fsv ? (unsigned long long)fsv->info.outputs_written
++                               : 0,
++                           fsv ? (int)fsv->info.fs.sidefx : -1,
++                           (int)fs_required(&cmdbuf->state.gfx, d));
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]-B: att=0x%x cfmt=%u s=%u "
++                           "catt=%u wren=0x%x wmask0=0x%x zfmt=%u ztest=%d "
++                           "zcmp=%d zwr=%d cull=%d disc=%d | vp0=%.0fx%.0f "
++                           "sc0=%dx%d fb=%ux%u\n",
++                           rc38_n,
++                           (unsigned)cmdbuf->state.gfx.render.bound_attachments,
++                           (unsigned)cmdbuf->state.gfx.render
++                              .color_attachments.fmts[0],
++                           (unsigned)cmdbuf->state.gfx.render
++                              .color_attachments.samples[0],
++                           (unsigned)d->cb.attachment_count,
++                           (unsigned)d->cb.color_write_enables,
++                           (unsigned)d->cb.attachments[0].write_mask,
++                           (unsigned)cmdbuf->state.gfx.render.z_attachment.fmt,
++                           (int)d->ds.depth.test_enable,
++                           (int)d->ds.depth.compare_op,
++                           (int)d->ds.depth.write_enable,
++                           (int)d->rs.cull_mode,
++                           (int)d->rs.rasterizer_discard_enable,
++                           (double)d->vp.viewports[0].width,
++                           (double)d->vp.viewports[0].height,
++                           d->vp.scissors[0].extent.width,
++                           d->vp.scissors[0].extent.height,
++                           cmdbuf->state.gfx.render.fb.layout.width_px,
++                           cmdbuf->state.gfx.render.fb.layout.height_px);
++      }
++   }
++
++   rc38_draws_total++;
++   if (!fs_required(&cmdbuf->state.gfx, &cmdbuf->vk.dynamic_graphics_state))
++      rc38_draws_no_fs++;
++
++   {
++      extern void panvk_diag_note_rt_draw(VkImage img);
++      const struct panvk_image_view *rc39_iv =
++         cmdbuf->state.gfx.render.color_attachments.iviews[0];
++
++      panvk_diag_note_rt_draw(rc39_iv ? (VkImage)rc39_iv->vk.image
++                                      : VK_NULL_HANDLE);
++   }
++
++   if ((rc38_draws_total & 1023) == 0)
++   {
++      extern unsigned long long panvk_diag_rt_other_draws(void);
++
++      if ((rc38_draws_total & 1023) == 0)
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAWSUM: total=%llu skipped=%llu "
++                           "no_fs=%llu untracked_rt=%llu\n",
++                           rc38_draws_total, rc38_draws_skipped,
++                           rc38_draws_no_fs, panvk_diag_rt_other_draws());
++   }
++
+    if ((cmdbuf->state.lazy_wait[PANVK_SUBQUEUE_VERTEX_TILER].pending ||
+         cmdbuf->state.lazy_wait[PANVK_SUBQUEUE_COMPUTE].pending) &&
+        lazy_draw_is_complex(cmdbuf, &draw)) {
+@@ -6320,8 +6396,10 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
+                                 cmdbuf->state.gfx.prims_generated_query.ptr;
+    if (draw.prim != MESA_PRIM_PATCHES && !panvk_priv_mem_check_alloc(vs->spd) &&
+        (draw.gpu_prerast_generated ||
+-        (!gpu_prerast_xfb_active(cmdbuf) && !gs_counts_prims)))
++        (!gpu_prerast_xfb_active(cmdbuf) && !gs_counts_prims))) {
++      rc38_draws_skipped++;
+       return;
++   }
+ 
+    /* Count once per API draw, before gpu_prerast splits or lowers it. */
+    if (!draw.gpu_prerast_generated && !draw.pstats_counted) {
+@@ -6441,6 +6519,11 @@ panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
+    if (instanceCount == 0 || vertexCount == 0)
+       return;
+ 
++   panvk_diag_draws++;
++   panvk_diag_note_draw(cmdbuf->state.gfx.vb.bufs[0].address,
++                        firstVertex,
++                        vertexCount, instanceCount);
++
+    /* gl_BaseVertexARB is a signed integer, and it should expose the value of
+     * firstVertex in a non-indexed draw. */
+    assert(firstVertex < INT32_MAX);
+@@ -6471,6 +6554,11 @@ panvk_per_arch(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
+    if (instanceCount == 0 || indexCount == 0)
+       return;
+ 
++   panvk_diag_draws++;
++   panvk_diag_note_draw(cmdbuf->state.gfx.vb.bufs[0].address,
++                        vertexOffset,
++                        indexCount, instanceCount);
++
+    /* gl_BaseInstance is a signed integer, and it should expose the value of
+     * firstInstnace. */
+    assert(firstInstance < INT32_MAX);
+@@ -6578,6 +6666,8 @@ panvk_per_arch(CmdDrawIndirect)(VkCommandBuffer commandBuffer, VkBuffer _buffer,
+    if (drawCount == 0)
+       return;
+ 
++   panvk_diag_draws += drawCount;
++
+    struct panvk_draw_info draw = {
+       .indirect.buffer_dev_addr = panvk_buffer_gpu_ptr(buffer, offset),
+       .indirect.draw_count = drawCount,
+@@ -6787,8 +6877,11 @@ invalidate_initial_attachment_crcs(struct panvk_cmd_buffer *cmdbuf,
+          vk_find_struct_const(att->pNext,
+                               RENDERING_ATTACHMENT_INITIAL_LAYOUT_INFO_MESA);
+ 
++      /* UNDEFINED: the memory may have been written through an alias, so the
++       * CRCs describe contents that are gone. */
+       bool host_preinit =
+-         initial && initial->initialLayout == VK_IMAGE_LAYOUT_PREINITIALIZED;
++         initial && (initial->initialLayout == VK_IMAGE_LAYOUT_PREINITIALIZED ||
++                     initial->initialLayout == VK_IMAGE_LAYOUT_UNDEFINED);
+       bool discard = att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
+                      att->loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+       if (!host_preinit && !discard)
+@@ -6885,6 +6978,17 @@ panvk_per_arch(CmdBeginRendering)(VkCommandBuffer commandBuffer,
+                                   const VkRenderingInfo *pRenderingInfo)
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
++   panvk_diag_renders++;
++   {
++      extern void panvk_import_probe_set_render_target(VkImage img);
++
++   if (pRenderingInfo->colorAttachmentCount > 0 &&
++       pRenderingInfo->pColorAttachments[0].imageView != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(panvk_image_view, diag_iv,
++                     pRenderingInfo->pColorAttachments[0].imageView);
++      panvk_import_probe_set_render_target((VkImage)diag_iv->vk.image);
++   }
++   }
+    struct panvk_rp_merge *m = &cmdbuf->state.gfx.rp_merge;
+    rp_trace_begin(pRenderingInfo);
+    const bool mergeable = rp_info_mergeable(cmdbuf, pRenderingInfo);
+@@ -7752,21 +7856,11 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
+          cs_defer(SB_WAIT_ITER(sb_upd_ctx.cur_sb), SB_ITER(sb_upd_ctx.next_sb));
+ #endif
+ 
+-      /* On kbase, FINISH_FRAGMENT without the FRAGMENT_COMPLETED increment
+-       * (and no FRAGMENT_END, see cmdbuf_skips_gpu_heap_ops()) still gives
+-       * the pass's chunks back to the heap context.  Without it a heap
+-       * generation only grows until the queue's heap renewal, and once
+-       * earlier passes hold every chunk the incremental rendering handler
+-       * frees nothing and the tiler OOMs forever.  PANVK_KBASE_TILER_IR=0
+-       * keeps the old behaviour. */
+-      const bool heap_stats = !cmdbuf_skips_gpu_heap_ops(cmdbuf);
+-
+-      if (!heap_stats && !debug_get_option_kbase_tiler_ir()) {
++      if (cmdbuf_skips_gpu_heap_ops(cmdbuf)) {
+          /* Heap chunks are reclaimed by the queue's heap renewal. */
+       } else if (td_count == 1) {
+          cs_load_to(b, completed, cur_tiler, BITFIELD_MASK(4), 40);
+-         cs_finish_fragment(b, heap_stats, completed_top, completed_bottom,
+-                            async);
++         cs_finish_fragment(b, true, completed_top, completed_bottom, async);
+       } else if (td_count > 1) {
+          cs_while(b, MALI_CS_CONDITION_GREATER, tiler_count) {
+             cs_load_to(b, completed, cur_tiler, BITFIELD_MASK(4), 40);
+@@ -7776,8 +7870,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
+                cs_add_imm64(b, cur_tiler, cur_tiler, pan_size(TILER_CONTEXT));
+             cs_add_imm32(b, tiler_count, tiler_count, -1);
+          }
+-         if (heap_stats)
+-            cs_frag_end(b, async);
++         cs_frag_end(b, async);
+       }
+ 
+ #if PAN_ARCH >= 11
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c
+index dd309be..b58c602 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c
+@@ -68,18 +68,9 @@ panvk_per_arch(dispatch_precomp)(struct panvk_precomp_ctx *ctx,
+    const struct cs_tracing_ctx *tracing_ctx =
+       &cmdbuf->state.cs[PANVK_SUBQUEUE_COMPUTE].tracing;
+ 
+-   /* Copy the global TLS pointer and size to the per-job TSD: with packed
+-    * TLS addressing the stack stride comes from the size word, so a job that
+-    * only copies the pointer races jobs with a different stack size. */
+-   if (shader->info.tls_size) {
+-      cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
+-      cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+-      cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+-      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
+-      cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+-      cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+-      cs_flush_stores(b);
+-   }
++   /* Copy the global TLS pointer and size to the per-job TSD. */
++   if (shader->info.tls_size)
++      panvk_per_arch(cmd_copy_tls_to_tsd)(cmdbuf, b, tsd);
+ 
+    cs_update_compute_ctx(b) {
+       /* No resource table */
+@@ -90,10 +81,8 @@ panvk_per_arch(dispatch_precomp)(struct panvk_precomp_ctx *ctx,
+       uint64_t fau_ptr = push_uniforms.gpu | (fau_count << 56);
+       cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_FAU), fau_ptr);
+ 
+-      uint64_t spd_addr =
+-         pan_shader_get_spd_addr(&shader->info,
+-	                         panvk_priv_mem_dev_addr(shader->spd));
+-      cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_SPD), spd_addr);
++      cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_SPD),
++                   panvk_priv_mem_dev_addr(shader->spd));
+ 
+       cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_TSD), tsd);
+ 
+diff --git a/src/panfrost/vulkan/panvk_cmd_draw.h b/src/panfrost/vulkan/panvk_cmd_draw.h
+index 7cd91de..22f6228 100644
+--- a/src/panfrost/vulkan/panvk_cmd_draw.h
++++ b/src/panfrost/vulkan/panvk_cmd_draw.h
+@@ -48,7 +48,6 @@ struct panvk_attrib_buf {
+ 
+ struct panvk_resolve_attachment {
+    VkResolveModeFlagBits mode;
+-   VkRenderingAttachmentFlagsKHR flags;
+    struct panvk_image_view *dst_iview;
+ };
+ 
+@@ -173,9 +172,9 @@ struct panvk_cmd_graphics_state {
+    /* PANVK_PASS_STATS=1 per-pass bookkeeping. */
+    struct panvk_pass_stats {
+       uint32_t draws;
++      uint32_t clean_tile_skip;
+       uint8_t pre_color, pre_zs;
+       bool clean_tile, frame_shaders_set;
+-      uint32_t clean_tile_skip;
+    } pass_stats;
+    /* PANVK_RP_MERGE=1: a render pass that ends with a compatible pass right
+     * behind it is kept open (suspended) and the next one resumes it, so the
+@@ -210,6 +209,7 @@ struct panvk_cmd_graphics_state {
+       uint64_t queries[4];
+    } xfb;
+ #endif
++
+    struct panvk_graphics_sysvals sysvals;
+ 
+ #if PAN_ARCH < 9
+@@ -220,6 +220,8 @@ struct panvk_cmd_graphics_state {
+       const struct panvk_shader *shader;
+       struct panvk_shader_desc_state desc;
+       uint64_t blend_descs[MAX_RTS];
++      /* blend_descs changed since cmd_prepare_draw_sysvals last copied them. */
++      bool blend_descs_dirty;
+       uint64_t push_uniforms;
+       bool required;
+ #if PAN_ARCH < 9
+diff --git a/src/panfrost/vulkan/panvk_device.h b/src/panfrost/vulkan/panvk_device.h
+index 061194f..5247bc3 100644
+--- a/src/panfrost/vulkan/panvk_device.h
++++ b/src/panfrost/vulkan/panvk_device.h
+@@ -28,6 +28,7 @@
+ 
+ #include "util/simple_mtx.h"
+ #include "util/u_dynarray.h"
++#include "util/u_queue.h"
+ #include "util/u_call_once.h"
+ #include "util/u_printf.h"
+ #include "util/vma.h"
+@@ -80,6 +81,14 @@ struct panvk_device {
+    /* BC4/BC5 -> EAC transcode table, created on first use. */
+    struct panvk_priv_bo *bc_eac_lut;
+ 
++   /* Background prewarm of the BC transcode pipelines, submitted when the
++    * first emulated BC image is created. bc_pipeline_mtx serialises pipeline
++    * creation between the worker and the first transcoding command buffer,
++    * and guards bc_prewarm_started. */
++   struct util_queue bc_prewarm;
++   simple_mtx_t bc_pipeline_mtx;
++   bool bc_prewarm_started;
++
+    struct {
+       struct panvk_priv_bo *handlers_bo;
+       uint32_t handler_stride;
+@@ -126,9 +135,6 @@ struct panvk_device {
+    /* struct panvk_gpu_prerast_syncs */
+    struct panvk_priv_bo *gpu_prerast_syncs;
+ 
+-   /* Device-wide thread local storage shared by all command buffers. The
+-    * last BO is the current one; outgrown ones stay alive for command
+-    * buffers that still point at them. */
+    struct {
+       simple_mtx_t lock;
+       struct util_dynarray bos;
+@@ -159,6 +165,11 @@ struct panvk_device {
+ 
+ VK_DEFINE_HANDLE_CASTS(panvk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+ 
++#ifdef PAN_ARCH
++void panvk_per_arch(bc_prewarm)(struct panvk_device *dev);
++void panvk_per_arch(bc_prewarm_finish)(struct panvk_device *dev);
++#endif
++
+ static inline struct panvk_device *
+ to_panvk_device(struct vk_device *dev)
+ {
+diff --git a/src/panfrost/vulkan/panvk_instance.c b/src/panfrost/vulkan/panvk_instance.c
+index a44b557..e475174 100644
+--- a/src/panfrost/vulkan/panvk_instance.c
++++ b/src/panfrost/vulkan/panvk_instance.c
+@@ -393,8 +393,8 @@ PFN_vkVoidFunction
+ panvk_GetInstanceProcAddr(VkInstance _instance, const char *pName)
+ {
+    VK_FROM_HANDLE(panvk_instance, instance, _instance);
+-   return vk_instance_get_proc_addr(instance ? &instance->vk : NULL,
+-                                    &panvk_instance_entrypoints, pName);
++   return vk_instance_get_proc_addr(&instance->vk, &panvk_instance_entrypoints,
++                                    pName);
+ }
+ 
+ /* The loader wants us to expose a second GetInstanceProcAddr function
+diff --git a/src/panfrost/vulkan/panvk_vX_blend.c b/src/panfrost/vulkan/panvk_vX_blend.c
+index 25ae021..a715ce9 100644
+--- a/src/panfrost/vulkan/panvk_vX_blend.c
++++ b/src/panfrost/vulkan/panvk_vX_blend.c
+@@ -461,6 +461,7 @@ panvk_per_arch(blend_emit_descs)(struct panvk_cmd_buffer *cmdbuf,
+       }
+    }
+ 
++   cmdbuf->state.gfx.fs.blend_descs_dirty = true;
+    gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);
+ 
+    return VK_SUCCESS;
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c b/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
+index 5efa3c4..a4927e4 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
+@@ -147,7 +147,7 @@ panvk_per_arch(cmd_prepare_dyn_ssbos)(
+       cmdbuf, desc, desc_info->dyn_ssbos.count * PANVK_DESCRIPTOR_SIZE,
+       PANVK_DESCRIPTOR_SIZE);
+    if (!ptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct panvk_ssbo_addr *ssbos = ptr.cpu;
+    for (uint32_t i = 0; i < desc_info->dyn_ssbos.count; i++) {
+@@ -219,7 +219,7 @@ panvk_per_arch(cmd_prepare_shader_desc_tables)(
+       struct pan_ptr ptr = panvk_cmd_alloc_dev_mem(
+          cmdbuf, desc, desc_count * desc_size, PANVK_DESCRIPTOR_SIZE);
+       if (!ptr.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       shader_desc_state->tables[i] = ptr.gpu;
+ 
+@@ -231,7 +231,7 @@ panvk_per_arch(cmd_prepare_shader_desc_tables)(
+       if (i == PANVK_BIFROST_DESC_TABLE_IMG && fill_image_table) {
+          ptr = panvk_cmd_alloc_desc_array(cmdbuf, desc_count, ATTRIBUTE);
+          if (!ptr.gpu)
+-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++            return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+          shader_desc_state->img_attrib_table = ptr.gpu;
+       }
+@@ -245,7 +245,7 @@ panvk_per_arch(cmd_prepare_shader_desc_tables)(
+    if (tex_count && !sampler_count) {
+       struct pan_ptr sampler = panvk_cmd_alloc_desc(cmdbuf, SAMPLER);
+       if (!sampler.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       /* Emit a dummy sampler if we have to. */
+       pan_cast_and_pack(sampler.cpu, SAMPLER, cfg) {
+@@ -297,7 +297,7 @@ panvk_per_arch(cmd_prepare_shader_res_table)(
+    struct pan_ptr ptr =
+       panvk_cmd_alloc_desc_array(cmdbuf, res_count * repeat_count, RESOURCE);
+    if (!ptr.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct mali_resource_packed *res_table = ptr.cpu;
+ 
+@@ -373,7 +373,7 @@ panvk_per_arch(cmd_prepare_push_descs)(struct panvk_cmd_buffer *cmdbuf,
+          cmdbuf, desc, push_set->desc_count * PANVK_DESCRIPTOR_SIZE,
+          PANVK_DESCRIPTOR_SIZE);
+       if (!ptr.gpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+       memcpy(ptr.cpu, push_set->descs.host,
+              push_set->desc_count * PANVK_DESCRIPTOR_SIZE);
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+index deabfc7..aa519cf 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+@@ -13,11 +13,35 @@
+ #include "pan_desc.h"
+ #include "pan_util.h"
+ 
+-#if PAN_ARCH == 9
+ #include "util/u_debug.h"
++
++#if PAN_ARCH == 9
+ DEBUG_GET_ONCE_OPTION(v9_rt128, "PANVK_V9_RT128", NULL)
+ #endif
+ 
++/* PANVK_CLEAN_TILE_WRITE=1: skip the preload forced by
++ * loadOp=DONT_CARE/NONE + storeOp=NONE when the clean tile write can be
++ * safely disabled for the final tile size.
++ */
++static bool
++clean_tile_write_elide_enabled(void)
++{
++   static int enabled = -1;
++   if (enabled < 0)
++      enabled = debug_get_bool_option("PANVK_CLEAN_TILE_WRITE", false);
++   return enabled;
++}
++
++static bool
++discard_preload_candidate(const VkRenderingAttachmentInfo *att)
++{
++   return clean_tile_write_elide_enabled() &&
++          (att->loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE ||
++           att->loadOp == VK_ATTACHMENT_LOAD_OP_NONE) &&
++          att->storeOp == VK_ATTACHMENT_STORE_OP_NONE &&
++          att->resolveMode == VK_RESOLVE_MODE_NONE;
++}
++
+ static enum pan_fb_load_op
+ get_att_fb_load_op(const VkRenderingAttachmentInfo *att)
+ {
+@@ -185,6 +209,7 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
+       .in_bounds_load = get_att_fb_load_op(att),
+       .border_load = PAN_FB_LOAD_IMAGE,
+       .always = att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
++      .discard_candidate = discard_preload_candidate(att),
+       .msaa = ms2ss ? PAN_FB_MSAA_COPY_SINGLE
+                     : PAN_FB_MSAA_COPY_ALL,
+       .iview = ms2ss ? &iview_ss->pview : &iview->pview,
+@@ -406,6 +431,10 @@ render_state_set_zs_attachments(struct panvk_cmd_buffer *cmdbuf,
+          .in_bounds_load = get_att_fb_load_op(z_att),
+          .border_load = PAN_FB_LOAD_IMAGE,
+          .always = z_att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
++         /* Interleaved Z/S stores both planes together and would stomp the
++          * aspect that was not loaded. */
++         .discard_candidate = !interleaved_zs &&
++                              discard_preload_candidate(z_att),
+          .msaa = z_ms2ss ? PAN_FB_MSAA_COPY_SINGLE
+                          : PAN_FB_MSAA_COPY_ALL,
+          .iview = &render->z_pview.load,
+@@ -427,6 +456,10 @@ render_state_set_zs_attachments(struct panvk_cmd_buffer *cmdbuf,
+          .in_bounds_load = get_att_fb_load_op(s_att),
+          .border_load = PAN_FB_LOAD_IMAGE,
+          .always = s_att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
++         /* Interleaved Z/S stores both planes together and would stomp the
++          * aspect that was not loaded. */
++         .discard_candidate = !interleaved_zs &&
++                              discard_preload_candidate(s_att),
+          .msaa = s_ms2ss ? PAN_FB_MSAA_COPY_SINGLE
+                          : PAN_FB_MSAA_COPY_ALL,
+          .iview = &render->s_pview.load,
+@@ -733,6 +766,30 @@ panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
+    }
+ }
+ 
++/* Returns true if the preload of the given target was elided.  This is only
++ * safe when the clean tile write can be disabled: an AFBC/AFRC block larger
++ * than a tile forces a clean tile write-back which needs the loaded contents.
++ */
++static bool
++try_elide_discard_preload(struct pan_fb_load_target *target,
++                          const struct pan_image *img, unsigned tile_size_px)
++{
++   if (!target->discard_candidate || !img)
++      return false;
++
++   if (GENX(pan_force_clean_write_on)(img, tile_size_px) ||
++       drm_is_afrc(img->props.modifier))
++      return false;
++
++   if (target->in_bounds_load == PAN_FB_LOAD_NONE &&
++       target->border_load == PAN_FB_LOAD_NONE)
++      return false;
++
++   target->in_bounds_load = PAN_FB_LOAD_NONE;
++   target->border_load = PAN_FB_LOAD_NONE;
++   return true;
++}
++
+ void
+ panvk_per_arch(cmd_select_tile_size)(struct panvk_cmd_buffer *cmdbuf)
+ {
+@@ -757,6 +814,49 @@ panvk_per_arch(cmd_select_tile_size)(struct panvk_cmd_buffer *cmdbuf)
+        * that the sample count didn't change (this should never happen) */
+       assert(fb->sample_count == render->fb.nr_samples);
+    }
++
++   /* The tile size is final now, so we know whether skipping the preload of a
++    * discarded attachment is safe. */
++   for (unsigned rt = 0; rt < PAN_MAX_RTS; rt++) {
++      if (fb->rt_formats[rt] == PIPE_FORMAT_NONE)
++         continue;
++
++      struct pan_fb_load_target *target = &render->fb.load.rts[rt];
++      const struct pan_image *img =
++         target->iview ? pan_image_view_get_color_plane(target->iview).image
++                       : NULL;
++
++      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
++#if PAN_ARCH >= 10
++         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
++#endif
++      }
++   }
++
++   if (fb->z_format != PIPE_FORMAT_NONE) {
++      struct pan_fb_load_target *target = &render->fb.load.z;
++      const struct pan_image *img =
++         target->iview ? pan_image_view_get_zs_plane(target->iview).image
++                       : NULL;
++
++      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
++#if PAN_ARCH >= 10
++         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
++#endif
++      }
++   }
++
++   if (fb->s_format != PIPE_FORMAT_NONE) {
++      struct pan_fb_load_target *target = &render->fb.load.s;
++      const struct pan_image *img =
++         target->iview ? pan_image_view_get_s_plane(target->iview).image : NULL;
++
++      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
++#if PAN_ARCH >= 10
++         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
++#endif
++      }
++   }
+ }
+ 
+ static void
+@@ -952,9 +1052,12 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
+       }
+    }
+ 
+-   for (unsigned i = 0; i < MAX_RTS; i++) {
+-      set_gfx_sysval(cmdbuf, dirty_sysvals, fs.blend_descs[i],
+-                     cmdbuf->state.gfx.fs.blend_descs[i]);
++   if (cmdbuf->state.gfx.fs.blend_descs_dirty) {
++      for (unsigned i = 0; i < MAX_RTS; i++) {
++         set_gfx_sysval(cmdbuf, dirty_sysvals, fs.blend_descs[i],
++                        cmdbuf->state.gfx.fs.blend_descs[i]);
++      }
++      cmdbuf->state.gfx.fs.blend_descs_dirty = false;
+    }
+ 
+    if (dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
+@@ -1123,6 +1226,8 @@ panvk_per_arch(CmdBindVertexBuffers2)(VkCommandBuffer commandBuffer,
+       VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
+ 
+       if (buffer) {
++         panvk_diag_note_vbo(pBuffers[i]);
++
+          cmdbuf->state.gfx.vb.bufs[firstBinding + i].address =
+             panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
+          cmdbuf->state.gfx.vb.bufs[firstBinding + i].size = panvk_buffer_range(
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_frame_shaders.c b/src/panfrost/vulkan/panvk_vX_cmd_frame_shaders.c
+index 31be72d..f5372b0 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_frame_shaders.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_frame_shaders.c
+@@ -276,7 +276,7 @@ alloc_pre_post_dcds(struct panvk_cmd_buffer *cmdbuf,
+ 
+    struct pan_ptr dcd = panvk_cmd_alloc_desc_array(cmdbuf, dcd_count, DRAW);
+    if (!dcd.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    fs->dcd_pointer = dcd.gpu;
+    *dcds = dcd.cpu;
+@@ -456,7 +456,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+       cmdbuf, PAN_DESC(RENDERER_STATE),
+       PAN_DESC_ARRAY(bd_count, BLEND));
+    if (!rsd.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    pan_cast_and_pack(rsd.cpu, RENDERER_STATE, cfg) {
+       pan_shader_prepare_rsd(&shader->info,
+@@ -514,7 +514,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+ 
+    struct pan_ptr vpd = panvk_cmd_alloc_desc(cmdbuf, VIEWPORT);
+    if (!vpd.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    pan_cast_and_pack(vpd.cpu, VIEWPORT, cfg) {
+       cfg.scissor_minimum_x = aligned_bbox.min_x;
+@@ -525,7 +525,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+ 
+    struct pan_ptr sampler = panvk_cmd_alloc_desc(cmdbuf, SAMPLER);
+    if (!sampler.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    pan_cast_and_pack(sampler.cpu, SAMPLER, cfg) {
+       cfg.seamless_cube_map = false;
+@@ -538,7 +538,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr textures =
+       panvk_cmd_alloc_desc_array(cmdbuf, tex_count, TEXTURE);
+    if (!textures.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    fill_textures(cmdbuf, iviews, key, textures.cpu);
+ 
+@@ -623,7 +623,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+    uint32_t bd_count = preload_color ? fb->rt_count : 0;
+    struct pan_ptr bds = panvk_cmd_alloc_desc_array(cmdbuf, bd_count, BLEND);
+    if (bd_count > 0 && !bds.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    uint32_t tex_count = util_bitcount(locations_written);
+    uint32_t desc_count = tex_count + 1;
+@@ -631,7 +631,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr descs = panvk_cmd_alloc_dev_mem(
+       cmdbuf, desc, desc_count * PANVK_DESCRIPTOR_SIZE, PANVK_DESCRIPTOR_SIZE);
+    if (!descs.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct mali_sampler_packed *sampler = descs.cpu;
+ 
+@@ -660,7 +660,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+    struct pan_ptr res_table =
+       panvk_cmd_alloc_desc_array(cmdbuf, res_table_size, RESOURCE);
+    if (!res_table.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+    memset(res_table.cpu, 0, pan_size(RESOURCE) * res_table_size);
+ 
+    pan_cast_and_pack(res_table.cpu, RESOURCE, cfg) {
+@@ -670,7 +670,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
+ 
+    struct pan_ptr zsd = panvk_cmd_alloc_desc(cmdbuf, DEPTH_STENCIL);
+    if (!zsd.cpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    pan_cast_and_pack(zsd.cpu, DEPTH_STENCIL, cfg) {
+       cfg.depth_function = MALI_FUNC_ALWAYS;
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_meta.c b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+index 9cd5f4b..90ae1a9 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_meta.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+@@ -17,6 +17,7 @@
+ #include "csf/panvk_instr.h"
+ #endif
+ 
++#include "util/simple_mtx.h"
+ #include "util/u_atomic.h"
+ 
+ #include "bc/panvk_bc_s3tc_astc_spv.h"
+@@ -33,6 +34,15 @@
+ #include "libpan_copy.h"
+ #include "libpan_dgc.h"
+ 
++extern unsigned long long panvk_diag_blits;
++extern unsigned long long panvk_diag_copies;
++extern unsigned long long panvk_diag_clears;
++extern unsigned long long panvk_diag_present_writes;
++extern unsigned long long panvk_diag_present_reads;
++extern unsigned long long panvk_diag_present_clears;
++extern bool panvk_import_probe_is_image(VkImage img);
++extern void panvk_import_probe_set_blit_src(VkImage src, VkImage dst);
++
+ static bool
+ copy_to_image_use_gfx_pipeline(struct panvk_image *dst_img)
+ {
+@@ -307,6 +317,13 @@ panvk_per_arch(CmdBlitImage2)(VkCommandBuffer commandBuffer,
+                               const VkBlitImageInfo2 *pBlitImageInfo)
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
++   panvk_diag_blits++;
++   if (panvk_import_probe_is_image(pBlitImageInfo->dstImage)) {
++      panvk_diag_present_writes++;
++      panvk_import_probe_set_blit_src(pBlitImageInfo->srcImage,
++                                      pBlitImageInfo->dstImage);
++   } else if (panvk_import_probe_is_image(pBlitImageInfo->srcImage))
++      panvk_diag_present_reads++;
+ #if PAN_ARCH >= 10
+    panvk_cmd_rp_merge_flush_pending(cmdbuf);
+    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
+@@ -409,6 +426,9 @@ panvk_per_arch(CmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image,
+                                    const VkImageSubresourceRange *pRanges)
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
++   panvk_diag_clears++;
++   if (panvk_import_probe_is_image(image))
++      panvk_diag_present_clears++;
+ #if PAN_ARCH >= 10
+    panvk_cmd_rp_merge_flush_pending(cmdbuf);
+    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
+@@ -624,12 +644,6 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
+       .offset = 0,
+       .size = sizeof(struct panvk_bc_decode_push),
+    };
+-   VkResult result =
+-      vk_meta_get_pipeline_layout(&dev->vk, &dev->meta, NULL, &push_range,
+-                                  &layout_key, sizeof(layout_key), layout_out);
+-   if (result != VK_SUCCESS)
+-      return result;
+-
+    const struct panvk_bc_decode_key key = {
+       .type = PANVK_META_OBJECT_KEY_BC_DECODE_SHADER,
+       .shader = shader,
+@@ -641,6 +655,25 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
+       return VK_SUCCESS;
+    }
+ 
++   /* The prewarm worker creates these pipelines in the background. Take the
++    * lock so a given (shader, format) pair is only ever created once, and
++    * wait for an in-flight creation instead of duplicating it. */
++   simple_mtx_lock(&dev->bc_pipeline_mtx);
++   cached = vk_meta_lookup_pipeline(&dev->meta, &key, sizeof(key));
++   if (cached != VK_NULL_HANDLE) {
++      simple_mtx_unlock(&dev->bc_pipeline_mtx);
++      *pipeline_out = cached;
++      return VK_SUCCESS;
++   }
++
++   VkResult result =
++      vk_meta_get_pipeline_layout(&dev->vk, &dev->meta, NULL, &push_range,
++                                  &layout_key, sizeof(layout_key), layout_out);
++   if (result != VK_SUCCESS) {
++      simple_mtx_unlock(&dev->bc_pipeline_mtx);
++      return result;
++   }
++
+    const VkShaderModuleCreateInfo module_info = {
+       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+       .codeSize = spv[shader].size,
+@@ -669,8 +702,86 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
+       .layout = *layout_out,
+    };
+ 
+-   return vk_meta_create_compute_pipeline(&dev->vk, &dev->meta, &info, &key,
+-                                          sizeof(key), pipeline_out);
++   result = vk_meta_create_compute_pipeline(&dev->vk, &dev->meta, &info, &key,
++                                            sizeof(key), pipeline_out);
++   simple_mtx_unlock(&dev->bc_pipeline_mtx);
++   return result;
++}
++
++/* Compiling the transcode pipelines on first use stalls the first upload of
++ * every BC format on the main thread. Warm them on a worker as soon as the
++ * application creates its first emulated BC image, which normally happens
++ * while assets are still being loaded. If a transcode still gets there first,
++ * get_bc_decode_pipeline() creates the pipeline synchronously under
++ * bc_pipeline_mtx, so there is no correctness gap. */
++static const VkFormat panvk_bc_prewarm_formats[] = {
++   VK_FORMAT_BC1_RGB_UNORM_BLOCK,
++   VK_FORMAT_BC1_RGB_SRGB_BLOCK,
++   VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
++   VK_FORMAT_BC1_RGBA_SRGB_BLOCK,
++   VK_FORMAT_BC2_UNORM_BLOCK,
++   VK_FORMAT_BC2_SRGB_BLOCK,
++   VK_FORMAT_BC3_UNORM_BLOCK,
++   VK_FORMAT_BC3_SRGB_BLOCK,
++   VK_FORMAT_BC4_UNORM_BLOCK,
++   VK_FORMAT_BC4_SNORM_BLOCK,
++   VK_FORMAT_BC5_UNORM_BLOCK,
++   VK_FORMAT_BC5_SNORM_BLOCK,
++   VK_FORMAT_BC6H_UFLOAT_BLOCK,
++   VK_FORMAT_BC6H_SFLOAT_BLOCK,
++   VK_FORMAT_BC7_UNORM_BLOCK,
++   VK_FORMAT_BC7_SRGB_BLOCK,
++};
++
++static void
++panvk_bc_prewarm_job(void *job, void *gdata, int thread_index)
++{
++   struct panvk_device *dev = job;
++
++   for (unsigned i = 0; i < ARRAY_SIZE(panvk_bc_prewarm_formats); i++) {
++      const VkFormat format = panvk_bc_prewarm_formats[i];
++      VkPipelineLayout layout;
++      VkPipeline pipeline;
++
++      if (get_bc_decode_pipeline(dev, bc_decode_shader_index(format), format,
++                                 &layout, &pipeline) != VK_SUCCESS)
++         return;
++   }
++}
++
++void
++panvk_per_arch(bc_prewarm)(struct panvk_device *dev)
++{
++   static int enabled = -1;
++
++   if (enabled < 0)
++      enabled = debug_get_bool_option("PANVK_BC_PREWARM", true);
++   if (!enabled)
++      return;
++
++   simple_mtx_lock(&dev->bc_pipeline_mtx);
++   bool submit = false;
++   if (!dev->bc_prewarm_started &&
++       util_queue_init(&dev->bc_prewarm, "panvk_bc", 1, 1, 0, dev)) {
++      dev->bc_prewarm_started = true;
++      submit = true;
++   }
++   simple_mtx_unlock(&dev->bc_pipeline_mtx);
++
++   if (submit)
++      util_queue_add_job(&dev->bc_prewarm, dev, NULL,
++                         panvk_bc_prewarm_job, NULL, 0);
++}
++
++void
++panvk_per_arch(bc_prewarm_finish)(struct panvk_device *dev)
++{
++   if (!dev->bc_prewarm_started)
++      return;
++
++   util_queue_finish(&dev->bc_prewarm);
++   util_queue_destroy(&dev->bc_prewarm);
++   dev->bc_prewarm_started = false;
+ }
+ 
+ /* ---- BC2/BC3 into an AFRC shadow: fragment decode -------------------- */
+@@ -955,7 +1066,7 @@ bc_decode_region(struct panvk_cmd_buffer *cmdbuf, struct panvk_image *img,
+        (shader_idx == BC_ETC_SHADER && img->vk.format >= VK_FORMAT_BC2_UNORM_BLOCK)) {
+       lut = panvk_bc_eac_lut_addr(dev);
+       if (!lut) {
+-         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          return;
+       }
+    }
+@@ -1168,6 +1279,8 @@ panvk_per_arch(CmdCopyMemoryToImageKHR)(
+    const VkCopyDeviceMemoryImageInfoKHR* pCopyMemoryInfo)
+ {
+    VK_FROM_HANDLE(panvk_image, bc_img, pCopyMemoryInfo->image);
++   if (panvk_import_probe_is_image(pCopyMemoryInfo->image))
++      panvk_diag_present_writes++;
+ 
+    if (bc_img->bc_afrc) {
+       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+@@ -1607,6 +1720,11 @@ panvk_per_arch(CmdCopyImage2)(VkCommandBuffer commandBuffer,
+ {
+    VK_FROM_HANDLE(panvk_image, bc_src, pCopyImageInfo->srcImage);
+    VK_FROM_HANDLE(panvk_image, bc_dst, pCopyImageInfo->dstImage);
++   panvk_diag_copies++;
++   if (panvk_import_probe_is_image(pCopyImageInfo->dstImage))
++      panvk_diag_present_writes++;
++   else if (panvk_import_probe_is_image(pCopyImageInfo->srcImage))
++      panvk_diag_present_reads++;
+ 
+    if (bc_src->bc_noraw || bc_dst->bc_noraw) {
+       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_push_constant.c b/src/panfrost/vulkan/panvk_vX_cmd_push_constant.c
+index 7c762bb..f491f44 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_push_constant.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_push_constant.c
+@@ -26,7 +26,7 @@ prepare_push_uniforms(struct panvk_cmd_buffer *cmdbuf,
+       sizeof(uint64_t));
+ 
+    if (!push_uniforms->gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    struct panvk_common_sysvals_inner common_inner = {
+       .printf_buffer_address = dev->printf.bo->addr.dev,
+diff --git a/src/panfrost/vulkan/panvk_vX_descriptor_set.c b/src/panfrost/vulkan/panvk_vX_descriptor_set.c
+index c84800c..4df1003 100644
+--- a/src/panfrost/vulkan/panvk_vX_descriptor_set.c
++++ b/src/panfrost/vulkan/panvk_vX_descriptor_set.c
+@@ -142,7 +142,7 @@ write_image_view_desc(struct panvk_descriptor_set *set,
+       for (uint8_t plane = 0; plane < binding_layout->textures_per_desc;
+            plane++)
+          write_nulldesc(set, binding, elem,
+-                        get_tex_subdesc_info(binding_layout->type, plane));
++                        get_sampler_subdesc_info(binding_layout->type, plane));
+       return;
+    }
+ 
+diff --git a/src/panfrost/vulkan/panvk_vX_device.c b/src/panfrost/vulkan/panvk_vX_device.c
+index d11f9f9..c7b5ea9 100644
+--- a/src/panfrost/vulkan/panvk_vX_device.c
++++ b/src/panfrost/vulkan/panvk_vX_device.c
+@@ -164,7 +164,7 @@ panvk_meta_cmd_bind_map_buffer(struct vk_command_buffer *cmd,
+       panvk_cmd_alloc_dev_mem(cmdbuf, desc, buffer->vk.size, 64);
+ 
+    if (!mem.gpu)
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
+ 
+    assert(buffer->vk.device_address == 0);
+    buffer->vk.device_address = mem.gpu;
+@@ -615,6 +615,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
+ 
+    panvk_device_init_mempools(device);
+    simple_mtx_init(&device->tls.lock, mtx_plain);
++   simple_mtx_init(&device->bc_pipeline_mtx, mtx_plain);
+    util_dynarray_init(&device->tls.bos, NULL);
+ 
+ #if PAN_ARCH >= 9
+@@ -865,6 +866,8 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
+ #endif
+    if (device->depth_bounds_fs)
+       vk_shader_destroy(&device->vk, &device->depth_bounds_fs->vk, NULL);
++   panvk_per_arch(bc_prewarm_finish)(device);
++   simple_mtx_destroy(&device->bc_pipeline_mtx);
+    panvk_meta_cleanup(device);
+    vk_pipeline_cache_destroy(device->vk.mem_cache, NULL);
+    pan_kmod_bo_put(device->sparse_mem.blackhole);
+diff --git a/src/panfrost/vulkan/panvk_vX_query_pool.c b/src/panfrost/vulkan/panvk_vX_query_pool.c
+index f2be393..b072b45 100644
+--- a/src/panfrost/vulkan/panvk_vX_query_pool.c
++++ b/src/panfrost/vulkan/panvk_vX_query_pool.c
+@@ -101,7 +101,7 @@ panvk_per_arch(CreateQueryPool)(VkDevice _device,
+    pool->mem = panvk_pool_alloc_mem(&device->mempools.rw, alloc_info);
+    if (!pool->mem.bo) {
+       vk_query_pool_destroy(&device->vk, pAllocator, &pool->vk);
+-      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      return panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+ 
+    struct panvk_pool_alloc_info syncobjs_alloc_info = {
+@@ -113,7 +113,7 @@ panvk_per_arch(CreateQueryPool)(VkDevice _device,
+    if (!pool->available_mem.bo) {
+       panvk_pool_free_mem(&pool->mem);
+       vk_query_pool_destroy(&device->vk, pAllocator, &pool->vk);
+-      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      return panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+ 
+    if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR)

@@ -17,6 +17,7 @@
 #include "csf/panvk_instr.h"
 #endif
 
+#include "util/simple_mtx.h"
 #include "util/u_atomic.h"
 
 #include "bc/panvk_bc_s3tc_astc_spv.h"
@@ -32,6 +33,15 @@
 #include "libpan.h"
 #include "libpan_copy.h"
 #include "libpan_dgc.h"
+
+extern unsigned long long panvk_diag_blits;
+extern unsigned long long panvk_diag_copies;
+extern unsigned long long panvk_diag_clears;
+extern unsigned long long panvk_diag_present_writes;
+extern unsigned long long panvk_diag_present_reads;
+extern unsigned long long panvk_diag_present_clears;
+extern bool panvk_import_probe_is_image(VkImage img);
+extern void panvk_import_probe_set_blit_src(VkImage src, VkImage dst);
 
 static bool
 copy_to_image_use_gfx_pipeline(struct panvk_image *dst_img)
@@ -307,6 +317,13 @@ panvk_per_arch(CmdBlitImage2)(VkCommandBuffer commandBuffer,
                               const VkBlitImageInfo2 *pBlitImageInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_diag_blits++;
+   if (panvk_import_probe_is_image(pBlitImageInfo->dstImage)) {
+      panvk_diag_present_writes++;
+      panvk_import_probe_set_blit_src(pBlitImageInfo->srcImage,
+                                      pBlitImageInfo->dstImage);
+   } else if (panvk_import_probe_is_image(pBlitImageInfo->srcImage))
+      panvk_diag_present_reads++;
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -409,6 +426,9 @@ panvk_per_arch(CmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image,
                                    const VkImageSubresourceRange *pRanges)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_diag_clears++;
+   if (panvk_import_probe_is_image(image))
+      panvk_diag_present_clears++;
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -624,12 +644,6 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
       .offset = 0,
       .size = sizeof(struct panvk_bc_decode_push),
    };
-   VkResult result =
-      vk_meta_get_pipeline_layout(&dev->vk, &dev->meta, NULL, &push_range,
-                                  &layout_key, sizeof(layout_key), layout_out);
-   if (result != VK_SUCCESS)
-      return result;
-
    const struct panvk_bc_decode_key key = {
       .type = PANVK_META_OBJECT_KEY_BC_DECODE_SHADER,
       .shader = shader,
@@ -639,6 +653,25 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
    if (cached != VK_NULL_HANDLE) {
       *pipeline_out = cached;
       return VK_SUCCESS;
+   }
+
+   /* The prewarm worker creates these pipelines in the background. Take the
+    * lock so a given (shader, format) pair is only ever created once, and
+    * wait for an in-flight creation instead of duplicating it. */
+   simple_mtx_lock(&dev->bc_pipeline_mtx);
+   cached = vk_meta_lookup_pipeline(&dev->meta, &key, sizeof(key));
+   if (cached != VK_NULL_HANDLE) {
+      simple_mtx_unlock(&dev->bc_pipeline_mtx);
+      *pipeline_out = cached;
+      return VK_SUCCESS;
+   }
+
+   VkResult result =
+      vk_meta_get_pipeline_layout(&dev->vk, &dev->meta, NULL, &push_range,
+                                  &layout_key, sizeof(layout_key), layout_out);
+   if (result != VK_SUCCESS) {
+      simple_mtx_unlock(&dev->bc_pipeline_mtx);
+      return result;
    }
 
    const VkShaderModuleCreateInfo module_info = {
@@ -669,8 +702,86 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
       .layout = *layout_out,
    };
 
-   return vk_meta_create_compute_pipeline(&dev->vk, &dev->meta, &info, &key,
-                                          sizeof(key), pipeline_out);
+   result = vk_meta_create_compute_pipeline(&dev->vk, &dev->meta, &info, &key,
+                                            sizeof(key), pipeline_out);
+   simple_mtx_unlock(&dev->bc_pipeline_mtx);
+   return result;
+}
+
+/* Compiling the transcode pipelines on first use stalls the first upload of
+ * every BC format on the main thread. Warm them on a worker as soon as the
+ * application creates its first emulated BC image, which normally happens
+ * while assets are still being loaded. If a transcode still gets there first,
+ * get_bc_decode_pipeline() creates the pipeline synchronously under
+ * bc_pipeline_mtx, so there is no correctness gap. */
+static const VkFormat panvk_bc_prewarm_formats[] = {
+   VK_FORMAT_BC1_RGB_UNORM_BLOCK,
+   VK_FORMAT_BC1_RGB_SRGB_BLOCK,
+   VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+   VK_FORMAT_BC1_RGBA_SRGB_BLOCK,
+   VK_FORMAT_BC2_UNORM_BLOCK,
+   VK_FORMAT_BC2_SRGB_BLOCK,
+   VK_FORMAT_BC3_UNORM_BLOCK,
+   VK_FORMAT_BC3_SRGB_BLOCK,
+   VK_FORMAT_BC4_UNORM_BLOCK,
+   VK_FORMAT_BC4_SNORM_BLOCK,
+   VK_FORMAT_BC5_UNORM_BLOCK,
+   VK_FORMAT_BC5_SNORM_BLOCK,
+   VK_FORMAT_BC6H_UFLOAT_BLOCK,
+   VK_FORMAT_BC6H_SFLOAT_BLOCK,
+   VK_FORMAT_BC7_UNORM_BLOCK,
+   VK_FORMAT_BC7_SRGB_BLOCK,
+};
+
+static void
+panvk_bc_prewarm_job(void *job, void *gdata, int thread_index)
+{
+   struct panvk_device *dev = job;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(panvk_bc_prewarm_formats); i++) {
+      const VkFormat format = panvk_bc_prewarm_formats[i];
+      VkPipelineLayout layout;
+      VkPipeline pipeline;
+
+      if (get_bc_decode_pipeline(dev, bc_decode_shader_index(format), format,
+                                 &layout, &pipeline) != VK_SUCCESS)
+         return;
+   }
+}
+
+void
+panvk_per_arch(bc_prewarm)(struct panvk_device *dev)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_BC_PREWARM", true);
+   if (!enabled)
+      return;
+
+   simple_mtx_lock(&dev->bc_pipeline_mtx);
+   bool submit = false;
+   if (!dev->bc_prewarm_started &&
+       util_queue_init(&dev->bc_prewarm, "panvk_bc", 1, 1, 0, dev)) {
+      dev->bc_prewarm_started = true;
+      submit = true;
+   }
+   simple_mtx_unlock(&dev->bc_pipeline_mtx);
+
+   if (submit)
+      util_queue_add_job(&dev->bc_prewarm, dev, NULL,
+                         panvk_bc_prewarm_job, NULL, 0);
+}
+
+void
+panvk_per_arch(bc_prewarm_finish)(struct panvk_device *dev)
+{
+   if (!dev->bc_prewarm_started)
+      return;
+
+   util_queue_finish(&dev->bc_prewarm);
+   util_queue_destroy(&dev->bc_prewarm);
+   dev->bc_prewarm_started = false;
 }
 
 /* ---- BC2/BC3 into an AFRC shadow: fragment decode -------------------- */
@@ -955,7 +1066,7 @@ bc_decode_region(struct panvk_cmd_buffer *cmdbuf, struct panvk_image *img,
        (shader_idx == BC_ETC_SHADER && img->vk.format >= VK_FORMAT_BC2_UNORM_BLOCK)) {
       lut = panvk_bc_eac_lut_addr(dev);
       if (!lut) {
-         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
       }
    }
@@ -1168,6 +1279,8 @@ panvk_per_arch(CmdCopyMemoryToImageKHR)(
    const VkCopyDeviceMemoryImageInfoKHR* pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(panvk_image, bc_img, pCopyMemoryInfo->image);
+   if (panvk_import_probe_is_image(pCopyMemoryInfo->image))
+      panvk_diag_present_writes++;
 
    if (bc_img->bc_afrc) {
       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
@@ -1607,6 +1720,11 @@ panvk_per_arch(CmdCopyImage2)(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(panvk_image, bc_src, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(panvk_image, bc_dst, pCopyImageInfo->dstImage);
+   panvk_diag_copies++;
+   if (panvk_import_probe_is_image(pCopyImageInfo->dstImage))
+      panvk_diag_present_writes++;
+   else if (panvk_import_probe_is_image(pCopyImageInfo->srcImage))
+      panvk_diag_present_reads++;
 
    if (bc_src->bc_noraw || bc_dst->bc_noraw) {
       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);

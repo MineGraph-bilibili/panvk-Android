@@ -461,6 +461,7 @@ panvk_per_arch(blend_emit_descs)(struct panvk_cmd_buffer *cmdbuf,
       }
    }
 
+   cmdbuf->state.gfx.fs.blend_descs_dirty = true;
    gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);
 
    return VK_SUCCESS;

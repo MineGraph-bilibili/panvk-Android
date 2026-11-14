@@ -17,6 +17,9 @@
 #include "drm-uapi/panthor_drm.h"
 
 #include "panvk_buffer.h"
+
+extern unsigned long long panvk_diag_draws;
+extern unsigned long long panvk_diag_renders;
 #include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_cmd_desc_state.h"
@@ -489,15 +492,6 @@ cmdbuf_skips_gpu_heap_ops(const struct panvk_cmd_buffer *cmdbuf)
    return phys_dev->kbase_node_path[0] != '\0';
 }
 
-/* kbase incremental rendering (one queue group, panvk_vX_gpu_queue.c).
- * FINISH_FRAGMENT without the FRAGMENT_COMPLETED increment still gives the
- * pass's chunks back to the heap, which the TILER_OOM handler needs once
- * earlier passes hold every chunk; without it the handler frees nothing and
- * the tiler OOMs forever.  On by default only where verified: on v14 the
- * first submit hangs (DEVICE_LOST).  PANVK_KBASE_TILER_IR=0/1 forces it. */
-DEBUG_GET_ONCE_BOOL_OPTION(kbase_tiler_ir, "PANVK_KBASE_TILER_IR",
-                           PAN_ARCH == 11 || PAN_ARCH == 13)
-
 static bool
 render_needs_zs_crc_ext(struct panvk_cmd_buffer *cmdbuf)
 {
@@ -793,7 +787,7 @@ prepare_vs_driver_set(struct panvk_cmd_buffer *cmdbuf, uint32_t repeat_count)
    struct panvk_opaque_desc *descs = driver_set.cpu;
 
    if (!driver_set.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    for (uint32_t r = 0; r < repeat_count; r++) {
       for (uint32_t i = 0; i < MAX_VS_ATTRIBS; i++) {
@@ -986,7 +980,7 @@ prepare_fs_driver_set(struct panvk_cmd_buffer *cmdbuf)
    struct panvk_opaque_desc *descs = driver_set.cpu;
 
    if (desc_count && !driver_set.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    if (fs_desc_info->fs_varying_attr_desc_count > 0)
       emit_varying_descs(cmdbuf, (struct mali_attribute_packed *)(&descs[0]));
@@ -1222,7 +1216,7 @@ update_tls(struct panvk_cmd_buffer *cmdbuf)
       if (!state->desc.gpu) {
          state->desc = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
          if (!state->desc.gpu)
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
       }
 
       cmdbuf->state.gfx.tsd = state->desc.gpu;
@@ -1271,7 +1265,7 @@ build_blend(struct panvk_cmd_buffer *cmdbuf,
    struct mali_blend_packed *bds = ptr.cpu;
 
    if (bd_count && !ptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    if (fs) {
       VkResult result = panvk_per_arch(blend_emit_descs)(cmdbuf, bds);
@@ -1827,7 +1821,7 @@ get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
    if (!simul_use) {
       tiler_desc = panvk_cmd_alloc_desc_array(cmdbuf, td_count, TILER_CONTEXT);
       if (!tiler_desc.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
    }
 
    account_tiler_work(cmdbuf, td_count);
@@ -2300,7 +2294,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
    cmdbuf->state.gfx.render.fbds =
       panvk_cmd_alloc_dev_mem(cmdbuf, desc, fbds_sz, fbds_alignment);
    if (!cmdbuf->state.gfx.render.fbds.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
@@ -2434,7 +2428,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
          panvk_cmd_alloc_dev_mem(cmdbuf, desc, fbds_sz, fbds_alignment);
 
       if (!ir_fbds.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       uint32_t ir_view_mask_temp = cmdbuf->state.gfx.render.view_mask;
       const struct pan_fb_store *ir_store = ir_pass == PANVK_IR_LAST_PASS
@@ -2670,7 +2664,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
          uint32_t fn_idx = calc_fn_set_fbds_provoking_vertex_idx(cmdbuf);
          uint32_t fn_stride =
             dev->draw_ctx->fn_set_fbds_provoking_vertex_stride;
-         uint32_t fn_addr =
+         uint64_t fn_addr =
             dev->draw_ctx->fns_bo->addr.dev + fn_idx * fn_stride;
          cs_move64_to(b, addr_reg, fn_addr);
          cs_move32_to(b, length_reg, fn_stride);
@@ -2878,7 +2872,7 @@ build_zsd(struct panvk_cmd_buffer *cmdbuf, struct pan_earlyzs_state earlyzs,
 
    struct pan_ptr zsd = panvk_cmd_alloc_desc(cmdbuf, DEPTH_STENCIL);
    if (!zsd.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    pan_cast_and_pack(zsd.cpu, DEPTH_STENCIL, cfg) {
       cfg.stencil_test_enable = test_s;
@@ -2988,7 +2982,7 @@ wrap_prev_oq(struct panvk_cmd_buffer *cmdbuf)
 
 
       if (!new_oq_node.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       cmdbuf->state.gfx.render.oq.chain = new_oq_node.gpu;
 
@@ -4181,11 +4175,7 @@ gpu_prerast_launch_cs_desc(struct panvk_cmd_buffer *cmdbuf,
    if (cs->info.tls_size) {
       struct cs_builder *b =
          panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
-      cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
-      cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
-      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
-      cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
-      cs_flush_stores(b);
+      panvk_per_arch(cmd_copy_tls_to_tsd)(cmdbuf, b, tsd);
    }
 
    compute_state_set_dirty(cmdbuf, CS);
@@ -4227,7 +4217,7 @@ prepare_prerast_desc(struct panvk_cmd_buffer *cmdbuf,
    struct panvk_opaque_desc *descs = driver_set.cpu;
 
    if (!driver_set.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    pan_cast_and_pack(&descs[0], SAMPLER, cfg) {
       cfg.clamp_integer_array_indices = false;
@@ -5026,8 +5016,8 @@ gpu_prerast_draw_generated(struct panvk_cmd_buffer *cmdbuf,
        struct pan_ptr cptr =
           panvk_cmd_alloc_dev_mem(cmdbuf, desc, clamps_size, 8);
        if (!cptr.gpu) {
-          vk_command_buffer_set_error(&cmdbuf->vk,
-                                      VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
           return;
        }
        memcpy(cptr.cpu, clamps_cpu, clamps_size);
@@ -5261,7 +5251,7 @@ gpu_prerast_vp_prepare(struct panvk_cmd_buffer *cmdbuf, uint64_t arena,
        !panvk_gpu_prerast_checked_size(out_count, sizeof(uint32_t), 4,
                                        &index_bytes)) {
       mesa_loge_once("panvk: viewport run list does not fit, draw discarded");
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return false;
    }
 
@@ -5269,7 +5259,7 @@ gpu_prerast_vp_prepare(struct panvk_cmd_buffer *cmdbuf, uint64_t arena,
    struct pan_ptr out = panvk_cmd_alloc_dev_mem(cmdbuf, desc, index_bytes, 16);
 
    if (!runs.gpu || !out.gpu) {
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return false;
    }
 
@@ -5778,8 +5768,10 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
       gpu_prerast_release_arena(cmdbuf, prerast_arena);
    gpu_prerast_release_arena(cmdbuf, arena);
 
-   if (!ok)
+   if (!ok) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
       vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
 }
 
 static bool
@@ -5900,7 +5892,7 @@ gpu_prerast_chunk_loop(struct panvk_cmd_buffer *cmdbuf,
    if (!indirect)
       direct = panvk_cmd_alloc_dev_mem(cmdbuf, desc, 8 * sizeof(uint32_t), 16);
    if (!cd.gpu || (!indirect && !direct.gpu)) {
-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
@@ -6083,8 +6075,10 @@ gpu_prerast_chunk_loop(struct panvk_cmd_buffer *cmdbuf,
 
    gpu_prerast_release_arena(cmdbuf, arena);
 
-   if (!ok)
+   if (!ok) {
+      PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
       vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
 }
 
 /* A triangle fan over the arena, as indexed fans of the hub and the next
@@ -6116,8 +6110,8 @@ gpu_prerast_split_fan(struct panvk_cmd_buffer *cmdbuf,
             panvk_cmd_alloc_dev_mem(cmdbuf, desc, (n + 1) * sizeof(uint32_t),
                                     16);
          if (!ib.gpu) {
-            vk_command_buffer_set_error(&cmdbuf->vk,
-                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
             return true;
          }
 
@@ -6295,12 +6289,94 @@ lazy_vt_draw_needs_wait(const struct panvk_cmd_buffer *cmdbuf,
    return false;
 }
 
+static unsigned long long rc38_draws_total;
+static unsigned long long rc38_draws_skipped;
+static unsigned long long rc38_draws_no_fs;
+
 static void
 panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
 {
    const struct panvk_shader_variant *vs =
       raster_vs_variant(cmdbuf, draw.gpu_prerast_generated);
    VkResult result;
+
+   /* [rc38] Pipeline / shader / render-state of the first draws. */
+   {
+      static unsigned rc38_n;
+
+      if (rc38_n < 16) {
+         const struct vk_dynamic_graphics_state *d =
+            &cmdbuf->vk.dynamic_graphics_state;
+         const struct panvk_shader *vsh = cmdbuf->state.gfx.vs.shader;
+         const struct panvk_shader *fsh = cmdbuf->state.gfx.fs.shader;
+         const struct panvk_shader_variant *fsv =
+            panvk_shader_only_variant(fsh);
+
+         rc38_n++;
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]-A: prim=%d vcnt=%u icnt=%u | "
+                           "vs=%p bin=%u spd=%d out=0x%llx | fs=%p bin=%u "
+                           "out=0x%llx sidefx=%d fsreq=%d\n",
+                           rc38_n, (int)draw.prim, draw.vertex.count,
+                           draw.instance.count, (const void *)vsh,
+                           vs ? vs->bin_size : 0,
+                           vs ? (int)panvk_priv_mem_check_alloc(vs->spd) : -1,
+                           vs ? (unsigned long long)vs->info.outputs_written : 0,
+                           (const void *)fsh, fsv ? fsv->bin_size : 0,
+                           fsv ? (unsigned long long)fsv->info.outputs_written
+                               : 0,
+                           fsv ? (int)fsv->info.fs.sidefx : -1,
+                           (int)fs_required(&cmdbuf->state.gfx, d));
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAW[%u]-B: att=0x%x cfmt=%u s=%u "
+                           "catt=%u wren=0x%x wmask0=0x%x zfmt=%u ztest=%d "
+                           "zcmp=%d zwr=%d cull=%d disc=%d | vp0=%.0fx%.0f "
+                           "sc0=%dx%d fb=%ux%u\n",
+                           rc38_n,
+                           (unsigned)cmdbuf->state.gfx.render.bound_attachments,
+                           (unsigned)cmdbuf->state.gfx.render
+                              .color_attachments.fmts[0],
+                           (unsigned)cmdbuf->state.gfx.render
+                              .color_attachments.samples[0],
+                           (unsigned)d->cb.attachment_count,
+                           (unsigned)d->cb.color_write_enables,
+                           (unsigned)d->cb.attachments[0].write_mask,
+                           (unsigned)cmdbuf->state.gfx.render.z_attachment.fmt,
+                           (int)d->ds.depth.test_enable,
+                           (int)d->ds.depth.compare_op,
+                           (int)d->ds.depth.write_enable,
+                           (int)d->rs.cull_mode,
+                           (int)d->rs.rasterizer_discard_enable,
+                           (double)d->vp.viewports[0].width,
+                           (double)d->vp.viewports[0].height,
+                           d->vp.scissors[0].extent.width,
+                           d->vp.scissors[0].extent.height,
+                           cmdbuf->state.gfx.render.fb.layout.width_px,
+                           cmdbuf->state.gfx.render.fb.layout.height_px);
+      }
+   }
+
+   rc38_draws_total++;
+   if (!fs_required(&cmdbuf->state.gfx, &cmdbuf->vk.dynamic_graphics_state))
+      rc38_draws_no_fs++;
+
+   {
+      extern void panvk_diag_note_rt_draw(VkImage img);
+      const struct panvk_image_view *rc39_iv =
+         cmdbuf->state.gfx.render.color_attachments.iviews[0];
+
+      panvk_diag_note_rt_draw(rc39_iv ? (VkImage)rc39_iv->vk.image
+                                      : VK_NULL_HANDLE);
+   }
+
+   if ((rc38_draws_total & 1023) == 0)
+   {
+      extern unsigned long long panvk_diag_rt_other_draws(void);
+
+      if ((rc38_draws_total & 1023) == 0)
+         PANVK_DIAG_PRINTF("[PANVK-DIAG] DRAWSUM: total=%llu skipped=%llu "
+                           "no_fs=%llu untracked_rt=%llu\n",
+                           rc38_draws_total, rc38_draws_skipped,
+                           rc38_draws_no_fs, panvk_diag_rt_other_draws());
+   }
 
    if ((cmdbuf->state.lazy_wait[PANVK_SUBQUEUE_VERTEX_TILER].pending ||
         cmdbuf->state.lazy_wait[PANVK_SUBQUEUE_COMPUTE].pending) &&
@@ -6320,8 +6396,10 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
                                 cmdbuf->state.gfx.prims_generated_query.ptr;
    if (draw.prim != MESA_PRIM_PATCHES && !panvk_priv_mem_check_alloc(vs->spd) &&
        (draw.gpu_prerast_generated ||
-        (!gpu_prerast_xfb_active(cmdbuf) && !gs_counts_prims)))
+        (!gpu_prerast_xfb_active(cmdbuf) && !gs_counts_prims))) {
+      rc38_draws_skipped++;
       return;
+   }
 
    /* Count once per API draw, before gpu_prerast splits or lowers it. */
    if (!draw.gpu_prerast_generated && !draw.pstats_counted) {
@@ -6441,6 +6519,11 @@ panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
    if (instanceCount == 0 || vertexCount == 0)
       return;
 
+   panvk_diag_draws++;
+   panvk_diag_note_draw(cmdbuf->state.gfx.vb.bufs[0].address,
+                        firstVertex,
+                        vertexCount, instanceCount);
+
    /* gl_BaseVertexARB is a signed integer, and it should expose the value of
     * firstVertex in a non-indexed draw. */
    assert(firstVertex < INT32_MAX);
@@ -6470,6 +6553,11 @@ panvk_per_arch(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
 
    if (instanceCount == 0 || indexCount == 0)
       return;
+
+   panvk_diag_draws++;
+   panvk_diag_note_draw(cmdbuf->state.gfx.vb.bufs[0].address,
+                        vertexOffset,
+                        indexCount, instanceCount);
 
    /* gl_BaseInstance is a signed integer, and it should expose the value of
     * firstInstnace. */
@@ -6577,6 +6665,8 @@ panvk_per_arch(CmdDrawIndirect)(VkCommandBuffer commandBuffer, VkBuffer _buffer,
 
    if (drawCount == 0)
       return;
+
+   panvk_diag_draws += drawCount;
 
    struct panvk_draw_info draw = {
       .indirect.buffer_dev_addr = panvk_buffer_gpu_ptr(buffer, offset),
@@ -6787,8 +6877,11 @@ invalidate_initial_attachment_crcs(struct panvk_cmd_buffer *cmdbuf,
          vk_find_struct_const(att->pNext,
                               RENDERING_ATTACHMENT_INITIAL_LAYOUT_INFO_MESA);
 
+      /* UNDEFINED: the memory may have been written through an alias, so the
+       * CRCs describe contents that are gone. */
       bool host_preinit =
-         initial && initial->initialLayout == VK_IMAGE_LAYOUT_PREINITIALIZED;
+         initial && (initial->initialLayout == VK_IMAGE_LAYOUT_PREINITIALIZED ||
+                     initial->initialLayout == VK_IMAGE_LAYOUT_UNDEFINED);
       bool discard = att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
                      att->loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE;
       if (!host_preinit && !discard)
@@ -6885,6 +6978,17 @@ panvk_per_arch(CmdBeginRendering)(VkCommandBuffer commandBuffer,
                                   const VkRenderingInfo *pRenderingInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_diag_renders++;
+   {
+      extern void panvk_import_probe_set_render_target(VkImage img);
+
+   if (pRenderingInfo->colorAttachmentCount > 0 &&
+       pRenderingInfo->pColorAttachments[0].imageView != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(panvk_image_view, diag_iv,
+                     pRenderingInfo->pColorAttachments[0].imageView);
+      panvk_import_probe_set_render_target((VkImage)diag_iv->vk.image);
+   }
+   }
    struct panvk_rp_merge *m = &cmdbuf->state.gfx.rp_merge;
    rp_trace_begin(pRenderingInfo);
    const bool mergeable = rp_info_mergeable(cmdbuf, pRenderingInfo);
@@ -7752,21 +7856,11 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
          cs_defer(SB_WAIT_ITER(sb_upd_ctx.cur_sb), SB_ITER(sb_upd_ctx.next_sb));
 #endif
 
-      /* On kbase, FINISH_FRAGMENT without the FRAGMENT_COMPLETED increment
-       * (and no FRAGMENT_END, see cmdbuf_skips_gpu_heap_ops()) still gives
-       * the pass's chunks back to the heap context.  Without it a heap
-       * generation only grows until the queue's heap renewal, and once
-       * earlier passes hold every chunk the incremental rendering handler
-       * frees nothing and the tiler OOMs forever.  PANVK_KBASE_TILER_IR=0
-       * keeps the old behaviour. */
-      const bool heap_stats = !cmdbuf_skips_gpu_heap_ops(cmdbuf);
-
-      if (!heap_stats && !debug_get_option_kbase_tiler_ir()) {
+      if (cmdbuf_skips_gpu_heap_ops(cmdbuf)) {
          /* Heap chunks are reclaimed by the queue's heap renewal. */
       } else if (td_count == 1) {
          cs_load_to(b, completed, cur_tiler, BITFIELD_MASK(4), 40);
-         cs_finish_fragment(b, heap_stats, completed_top, completed_bottom,
-                            async);
+         cs_finish_fragment(b, true, completed_top, completed_bottom, async);
       } else if (td_count > 1) {
          cs_while(b, MALI_CS_CONDITION_GREATER, tiler_count) {
             cs_load_to(b, completed, cur_tiler, BITFIELD_MASK(4), 40);
@@ -7776,8 +7870,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
                cs_add_imm64(b, cur_tiler, cur_tiler, pan_size(TILER_CONTEXT));
             cs_add_imm32(b, tiler_count, tiler_count, -1);
          }
-         if (heap_stats)
-            cs_frag_end(b, async);
+         cs_frag_end(b, async);
       }
 
 #if PAN_ARCH >= 11

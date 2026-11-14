@@ -276,7 +276,7 @@ alloc_pre_post_dcds(struct panvk_cmd_buffer *cmdbuf,
 
    struct pan_ptr dcd = panvk_cmd_alloc_desc_array(cmdbuf, dcd_count, DRAW);
    if (!dcd.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    fs->dcd_pointer = dcd.gpu;
    *dcds = dcd.cpu;
@@ -456,7 +456,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
       cmdbuf, PAN_DESC(RENDERER_STATE),
       PAN_DESC_ARRAY(bd_count, BLEND));
    if (!rsd.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    pan_cast_and_pack(rsd.cpu, RENDERER_STATE, cfg) {
       pan_shader_prepare_rsd(&shader->info,
@@ -514,7 +514,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
 
    struct pan_ptr vpd = panvk_cmd_alloc_desc(cmdbuf, VIEWPORT);
    if (!vpd.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    pan_cast_and_pack(vpd.cpu, VIEWPORT, cfg) {
       cfg.scissor_minimum_x = aligned_bbox.min_x;
@@ -525,7 +525,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
 
    struct pan_ptr sampler = panvk_cmd_alloc_desc(cmdbuf, SAMPLER);
    if (!sampler.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    pan_cast_and_pack(sampler.cpu, SAMPLER, cfg) {
       cfg.seamless_cube_map = false;
@@ -538,7 +538,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr textures =
       panvk_cmd_alloc_desc_array(cmdbuf, tex_count, TEXTURE);
    if (!textures.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    fill_textures(cmdbuf, iviews, key, textures.cpu);
 
@@ -623,7 +623,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
    uint32_t bd_count = preload_color ? fb->rt_count : 0;
    struct pan_ptr bds = panvk_cmd_alloc_desc_array(cmdbuf, bd_count, BLEND);
    if (bd_count > 0 && !bds.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    uint32_t tex_count = util_bitcount(locations_written);
    uint32_t desc_count = tex_count + 1;
@@ -631,7 +631,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr descs = panvk_cmd_alloc_dev_mem(
       cmdbuf, desc, desc_count * PANVK_DESCRIPTOR_SIZE, PANVK_DESCRIPTOR_SIZE);
    if (!descs.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct mali_sampler_packed *sampler = descs.cpu;
 
@@ -660,7 +660,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
    struct pan_ptr res_table =
       panvk_cmd_alloc_desc_array(cmdbuf, res_table_size, RESOURCE);
    if (!res_table.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
    memset(res_table.cpu, 0, pan_size(RESOURCE) * res_table_size);
 
    pan_cast_and_pack(res_table.cpu, RESOURCE, cfg) {
@@ -670,7 +670,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf,
 
    struct pan_ptr zsd = panvk_cmd_alloc_desc(cmdbuf, DEPTH_STENCIL);
    if (!zsd.cpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    pan_cast_and_pack(zsd.cpu, DEPTH_STENCIL, cfg) {
       cfg.depth_function = MALI_FUNC_ALWAYS;

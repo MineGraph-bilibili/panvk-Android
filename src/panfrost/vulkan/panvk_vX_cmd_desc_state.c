@@ -147,7 +147,7 @@ panvk_per_arch(cmd_prepare_dyn_ssbos)(
       cmdbuf, desc, desc_info->dyn_ssbos.count * PANVK_DESCRIPTOR_SIZE,
       PANVK_DESCRIPTOR_SIZE);
    if (!ptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct panvk_ssbo_addr *ssbos = ptr.cpu;
    for (uint32_t i = 0; i < desc_info->dyn_ssbos.count; i++) {
@@ -219,7 +219,7 @@ panvk_per_arch(cmd_prepare_shader_desc_tables)(
       struct pan_ptr ptr = panvk_cmd_alloc_dev_mem(
          cmdbuf, desc, desc_count * desc_size, PANVK_DESCRIPTOR_SIZE);
       if (!ptr.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       shader_desc_state->tables[i] = ptr.gpu;
 
@@ -231,7 +231,7 @@ panvk_per_arch(cmd_prepare_shader_desc_tables)(
       if (i == PANVK_BIFROST_DESC_TABLE_IMG && fill_image_table) {
          ptr = panvk_cmd_alloc_desc_array(cmdbuf, desc_count, ATTRIBUTE);
          if (!ptr.gpu)
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
          shader_desc_state->img_attrib_table = ptr.gpu;
       }
@@ -245,7 +245,7 @@ panvk_per_arch(cmd_prepare_shader_desc_tables)(
    if (tex_count && !sampler_count) {
       struct pan_ptr sampler = panvk_cmd_alloc_desc(cmdbuf, SAMPLER);
       if (!sampler.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       /* Emit a dummy sampler if we have to. */
       pan_cast_and_pack(sampler.cpu, SAMPLER, cfg) {
@@ -297,7 +297,7 @@ panvk_per_arch(cmd_prepare_shader_res_table)(
    struct pan_ptr ptr =
       panvk_cmd_alloc_desc_array(cmdbuf, res_count * repeat_count, RESOURCE);
    if (!ptr.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct mali_resource_packed *res_table = ptr.cpu;
 
@@ -373,7 +373,7 @@ panvk_per_arch(cmd_prepare_push_descs)(struct panvk_cmd_buffer *cmdbuf,
          cmdbuf, desc, push_set->desc_count * PANVK_DESCRIPTOR_SIZE,
          PANVK_DESCRIPTOR_SIZE);
       if (!ptr.gpu)
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
       memcpy(ptr.cpu, push_set->descs.host,
              push_set->desc_count * PANVK_DESCRIPTOR_SIZE);

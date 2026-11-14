@@ -13,10 +13,34 @@
 #include "pan_desc.h"
 #include "pan_util.h"
 
-#if PAN_ARCH == 9
 #include "util/u_debug.h"
+
+#if PAN_ARCH == 9
 DEBUG_GET_ONCE_OPTION(v9_rt128, "PANVK_V9_RT128", NULL)
 #endif
+
+/* PANVK_CLEAN_TILE_WRITE=1: skip the preload forced by
+ * loadOp=DONT_CARE/NONE + storeOp=NONE when the clean tile write can be
+ * safely disabled for the final tile size.
+ */
+static bool
+clean_tile_write_elide_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_CLEAN_TILE_WRITE", false);
+   return enabled;
+}
+
+static bool
+discard_preload_candidate(const VkRenderingAttachmentInfo *att)
+{
+   return clean_tile_write_elide_enabled() &&
+          (att->loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE ||
+           att->loadOp == VK_ATTACHMENT_LOAD_OP_NONE) &&
+          att->storeOp == VK_ATTACHMENT_STORE_OP_NONE &&
+          att->resolveMode == VK_RESOLVE_MODE_NONE;
+}
 
 static enum pan_fb_load_op
 get_att_fb_load_op(const VkRenderingAttachmentInfo *att)
@@ -185,6 +209,7 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
       .in_bounds_load = get_att_fb_load_op(att),
       .border_load = PAN_FB_LOAD_IMAGE,
       .always = att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .discard_candidate = discard_preload_candidate(att),
       .msaa = ms2ss ? PAN_FB_MSAA_COPY_SINGLE
                     : PAN_FB_MSAA_COPY_ALL,
       .iview = ms2ss ? &iview_ss->pview : &iview->pview,
@@ -406,6 +431,10 @@ render_state_set_zs_attachments(struct panvk_cmd_buffer *cmdbuf,
          .in_bounds_load = get_att_fb_load_op(z_att),
          .border_load = PAN_FB_LOAD_IMAGE,
          .always = z_att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
+         /* Interleaved Z/S stores both planes together and would stomp the
+          * aspect that was not loaded. */
+         .discard_candidate = !interleaved_zs &&
+                              discard_preload_candidate(z_att),
          .msaa = z_ms2ss ? PAN_FB_MSAA_COPY_SINGLE
                          : PAN_FB_MSAA_COPY_ALL,
          .iview = &render->z_pview.load,
@@ -427,6 +456,10 @@ render_state_set_zs_attachments(struct panvk_cmd_buffer *cmdbuf,
          .in_bounds_load = get_att_fb_load_op(s_att),
          .border_load = PAN_FB_LOAD_IMAGE,
          .always = s_att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
+         /* Interleaved Z/S stores both planes together and would stomp the
+          * aspect that was not loaded. */
+         .discard_candidate = !interleaved_zs &&
+                              discard_preload_candidate(s_att),
          .msaa = s_ms2ss ? PAN_FB_MSAA_COPY_SINGLE
                          : PAN_FB_MSAA_COPY_ALL,
          .iview = &render->s_pview.load,
@@ -733,6 +766,30 @@ panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
    }
 }
 
+/* Returns true if the preload of the given target was elided.  This is only
+ * safe when the clean tile write can be disabled: an AFBC/AFRC block larger
+ * than a tile forces a clean tile write-back which needs the loaded contents.
+ */
+static bool
+try_elide_discard_preload(struct pan_fb_load_target *target,
+                          const struct pan_image *img, unsigned tile_size_px)
+{
+   if (!target->discard_candidate || !img)
+      return false;
+
+   if (GENX(pan_force_clean_write_on)(img, tile_size_px) ||
+       drm_is_afrc(img->props.modifier))
+      return false;
+
+   if (target->in_bounds_load == PAN_FB_LOAD_NONE &&
+       target->border_load == PAN_FB_LOAD_NONE)
+      return false;
+
+   target->in_bounds_load = PAN_FB_LOAD_NONE;
+   target->border_load = PAN_FB_LOAD_NONE;
+   return true;
+}
+
 void
 panvk_per_arch(cmd_select_tile_size)(struct panvk_cmd_buffer *cmdbuf)
 {
@@ -756,6 +813,49 @@ panvk_per_arch(cmd_select_tile_size)(struct panvk_cmd_buffer *cmdbuf)
       /* In case we already emitted tiler/framebuffer descriptors, we ensure
        * that the sample count didn't change (this should never happen) */
       assert(fb->sample_count == render->fb.nr_samples);
+   }
+
+   /* The tile size is final now, so we know whether skipping the preload of a
+    * discarded attachment is safe. */
+   for (unsigned rt = 0; rt < PAN_MAX_RTS; rt++) {
+      if (fb->rt_formats[rt] == PIPE_FORMAT_NONE)
+         continue;
+
+      struct pan_fb_load_target *target = &render->fb.load.rts[rt];
+      const struct pan_image *img =
+         target->iview ? pan_image_view_get_color_plane(target->iview).image
+                       : NULL;
+
+      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
+#if PAN_ARCH >= 10
+         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
+#endif
+      }
+   }
+
+   if (fb->z_format != PIPE_FORMAT_NONE) {
+      struct pan_fb_load_target *target = &render->fb.load.z;
+      const struct pan_image *img =
+         target->iview ? pan_image_view_get_zs_plane(target->iview).image
+                       : NULL;
+
+      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
+#if PAN_ARCH >= 10
+         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
+#endif
+      }
+   }
+
+   if (fb->s_format != PIPE_FORMAT_NONE) {
+      struct pan_fb_load_target *target = &render->fb.load.s;
+      const struct pan_image *img =
+         target->iview ? pan_image_view_get_s_plane(target->iview).image : NULL;
+
+      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
+#if PAN_ARCH >= 10
+         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
+#endif
+      }
    }
 }
 
@@ -952,9 +1052,12 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
       }
    }
 
-   for (unsigned i = 0; i < MAX_RTS; i++) {
-      set_gfx_sysval(cmdbuf, dirty_sysvals, fs.blend_descs[i],
-                     cmdbuf->state.gfx.fs.blend_descs[i]);
+   if (cmdbuf->state.gfx.fs.blend_descs_dirty) {
+      for (unsigned i = 0; i < MAX_RTS; i++) {
+         set_gfx_sysval(cmdbuf, dirty_sysvals, fs.blend_descs[i],
+                        cmdbuf->state.gfx.fs.blend_descs[i]);
+      }
+      cmdbuf->state.gfx.fs.blend_descs_dirty = false;
    }
 
    if (dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
@@ -1123,6 +1226,8 @@ panvk_per_arch(CmdBindVertexBuffers2)(VkCommandBuffer commandBuffer,
       VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
 
       if (buffer) {
+         panvk_diag_note_vbo(pBuffers[i]);
+
          cmdbuf->state.gfx.vb.bufs[firstBinding + i].address =
             panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
          cmdbuf->state.gfx.vb.bufs[firstBinding + i].size = panvk_buffer_range(

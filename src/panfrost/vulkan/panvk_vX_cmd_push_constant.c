@@ -26,7 +26,7 @@ prepare_push_uniforms(struct panvk_cmd_buffer *cmdbuf,
       sizeof(uint64_t));
 
    if (!push_uniforms->gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    struct panvk_common_sysvals_inner common_inner = {
       .printf_buffer_address = dev->printf.bo->addr.dev,

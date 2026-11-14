@@ -68,18 +68,9 @@ panvk_per_arch(dispatch_precomp)(struct panvk_precomp_ctx *ctx,
    const struct cs_tracing_ctx *tracing_ctx =
       &cmdbuf->state.cs[PANVK_SUBQUEUE_COMPUTE].tracing;
 
-   /* Copy the global TLS pointer and size to the per-job TSD: with packed
-    * TLS addressing the stack stride comes from the size word, so a job that
-    * only copies the pointer races jobs with a different stack size. */
-   if (shader->info.tls_size) {
-      cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
-      cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
-      cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
-      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
-      cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
-      cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
-      cs_flush_stores(b);
-   }
+   /* Copy the global TLS pointer and size to the per-job TSD. */
+   if (shader->info.tls_size)
+      panvk_per_arch(cmd_copy_tls_to_tsd)(cmdbuf, b, tsd);
 
    cs_update_compute_ctx(b) {
       /* No resource table */
@@ -90,10 +81,8 @@ panvk_per_arch(dispatch_precomp)(struct panvk_precomp_ctx *ctx,
       uint64_t fau_ptr = push_uniforms.gpu | (fau_count << 56);
       cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_FAU), fau_ptr);
 
-      uint64_t spd_addr =
-         pan_shader_get_spd_addr(&shader->info,
-	                         panvk_priv_mem_dev_addr(shader->spd));
-      cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_SPD), spd_addr);
+      cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_SPD),
+                   panvk_priv_mem_dev_addr(shader->spd));
 
       cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_TSD), tsd);
 

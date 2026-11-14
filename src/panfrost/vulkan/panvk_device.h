@@ -28,6 +28,7 @@
 
 #include "util/simple_mtx.h"
 #include "util/u_dynarray.h"
+#include "util/u_queue.h"
 #include "util/u_call_once.h"
 #include "util/u_printf.h"
 #include "util/vma.h"
@@ -80,6 +81,14 @@ struct panvk_device {
    /* BC4/BC5 -> EAC transcode table, created on first use. */
    struct panvk_priv_bo *bc_eac_lut;
 
+   /* Background prewarm of the BC transcode pipelines, submitted when the
+    * first emulated BC image is created. bc_pipeline_mtx serialises pipeline
+    * creation between the worker and the first transcoding command buffer,
+    * and guards bc_prewarm_started. */
+   struct util_queue bc_prewarm;
+   simple_mtx_t bc_pipeline_mtx;
+   bool bc_prewarm_started;
+
    struct {
       struct panvk_priv_bo *handlers_bo;
       uint32_t handler_stride;
@@ -126,9 +135,6 @@ struct panvk_device {
    /* struct panvk_gpu_prerast_syncs */
    struct panvk_priv_bo *gpu_prerast_syncs;
 
-   /* Device-wide thread local storage shared by all command buffers. The
-    * last BO is the current one; outgrown ones stay alive for command
-    * buffers that still point at them. */
    struct {
       simple_mtx_t lock;
       struct util_dynarray bos;
@@ -158,6 +164,11 @@ struct panvk_device {
 };
 
 VK_DEFINE_HANDLE_CASTS(panvk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+
+#ifdef PAN_ARCH
+void panvk_per_arch(bc_prewarm)(struct panvk_device *dev);
+void panvk_per_arch(bc_prewarm_finish)(struct panvk_device *dev);
+#endif
 
 static inline struct panvk_device *
 to_panvk_device(struct vk_device *dev)

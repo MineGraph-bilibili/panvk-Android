@@ -101,7 +101,7 @@ panvk_per_arch(CreateQueryPool)(VkDevice _device,
    pool->mem = panvk_pool_alloc_mem(&device->mempools.rw, alloc_info);
    if (!pool->mem.bo) {
       vk_query_pool_destroy(&device->vk, pAllocator, &pool->vk);
-      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
    struct panvk_pool_alloc_info syncobjs_alloc_info = {
@@ -113,7 +113,7 @@ panvk_per_arch(CreateQueryPool)(VkDevice _device,
    if (!pool->available_mem.bo) {
       panvk_pool_free_mem(&pool->mem);
       vk_query_pool_destroy(&device->vk, pAllocator, &pool->vk);
-      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
    if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR)

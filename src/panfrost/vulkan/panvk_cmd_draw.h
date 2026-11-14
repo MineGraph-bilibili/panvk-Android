@@ -48,7 +48,6 @@ struct panvk_attrib_buf {
 
 struct panvk_resolve_attachment {
    VkResolveModeFlagBits mode;
-   VkRenderingAttachmentFlagsKHR flags;
    struct panvk_image_view *dst_iview;
 };
 
@@ -173,9 +172,9 @@ struct panvk_cmd_graphics_state {
    /* PANVK_PASS_STATS=1 per-pass bookkeeping. */
    struct panvk_pass_stats {
       uint32_t draws;
+      uint32_t clean_tile_skip;
       uint8_t pre_color, pre_zs;
       bool clean_tile, frame_shaders_set;
-      uint32_t clean_tile_skip;
    } pass_stats;
    /* PANVK_RP_MERGE=1: a render pass that ends with a compatible pass right
     * behind it is kept open (suspended) and the next one resumes it, so the
@@ -210,6 +209,7 @@ struct panvk_cmd_graphics_state {
       uint64_t queries[4];
    } xfb;
 #endif
+
    struct panvk_graphics_sysvals sysvals;
 
 #if PAN_ARCH < 9
@@ -220,6 +220,8 @@ struct panvk_cmd_graphics_state {
       const struct panvk_shader *shader;
       struct panvk_shader_desc_state desc;
       uint64_t blend_descs[MAX_RTS];
+      /* blend_descs changed since cmd_prepare_draw_sysvals last copied them. */
+      bool blend_descs_dirty;
       uint64_t push_uniforms;
       bool required;
 #if PAN_ARCH < 9

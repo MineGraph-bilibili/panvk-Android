@@ -164,7 +164,7 @@ panvk_meta_cmd_bind_map_buffer(struct vk_command_buffer *cmd,
       panvk_cmd_alloc_dev_mem(cmdbuf, desc, buffer->vk.size, 64);
 
    if (!mem.gpu)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return panvk_diag_result(VK_ERROR_OUT_OF_DEVICE_MEMORY, __FILE__, __LINE__);
 
    assert(buffer->vk.device_address == 0);
    buffer->vk.device_address = mem.gpu;
@@ -615,6 +615,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
    panvk_device_init_mempools(device);
    simple_mtx_init(&device->tls.lock, mtx_plain);
+   simple_mtx_init(&device->bc_pipeline_mtx, mtx_plain);
    util_dynarray_init(&device->tls.bos, NULL);
 
 #if PAN_ARCH >= 9
@@ -865,6 +866,8 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
 #endif
    if (device->depth_bounds_fs)
       vk_shader_destroy(&device->vk, &device->depth_bounds_fs->vk, NULL);
+   panvk_per_arch(bc_prewarm_finish)(device);
+   simple_mtx_destroy(&device->bc_pipeline_mtx);
    panvk_meta_cleanup(device);
    vk_pipeline_cache_destroy(device->vk.mem_cache, NULL);
    pan_kmod_bo_put(device->sparse_mem.blackhole);
