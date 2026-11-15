@@ -188,6 +188,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `012-panvk-cmd-path` | 命令流路径对齐本地：clean-tile 跳过 preload、BC 转码管线后台预热、blend 描述符脏标记、null descriptor 修正。 |
 | `013-diagnostics-cleanup` | 统一 `PANVK_DIAG_PRINTF` / `panvk_diag_result` 诊断层（含 Android logcat），utrace 堆按需缩小，JM 侧补齐位置信息与 VS 未写 POS 的绘制保护。 |
 | `014-kraid-default-on` | 默认启用 Kraid 编译器：`PAN_USE_KRAID` 默认值从 0 改为 `all`（vs/fs/cs/internal 全阶段），仍可用 `PAN_USE_KRAID=0` 关闭。 |
+| `015-wsi-zerocopy-present` | Android WSI 恢复 zero-copy：通过 `ANativeWindow_dequeueBuffer/queueBuffer` 直接把窗口的 AHB 交给渲染，present 只做一次 `queueBuffer`；每帧 `DeviceWaitIdle` 改为等待该图像的 present fence，`minImageCount` 提到 3。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -697,3 +698,19 @@ GPU 侧实验补丁，仅做归档：**不在 `scripts/apply-patches.sh` 的 SER
   vs/fs/cs/internal 全阶段启用 Kraid。
 * **收益**：与本地 rc62 之后的行为一致，设备无需额外设置环境变量即可使用 Kraid 代码生成。
 * **风险/注意**：仍可用 `PAN_USE_KRAID=0` 或按阶段组合（`vs`/`fs`/`cs`/`internal`）关闭，便于 A/B。
+
+#### `015-wsi-zerocopy-present`（1 文件）
+
+* **机制**：`panvk_wsi.c` 恢复仓库原有的 Android zero-copy 路径——swapchain 通过
+  `ANativeWindow_dequeueBuffer` 取得窗口自己的 `AHardwareBuffer`，格式匹配时把该 AHB
+  直接作为图像内存，渲染写入后 present 只调用一次 `ANativeWindow_queueBuffer`；格式不匹配
+  或 producer 符号不可用时回退到 AHB→窗口缓冲的 CPU 拷贝路径。
+* **延迟修复**：`queue_present` 不再调用 `DeviceWaitIdle`，改为等待
+  `wsi_common_queue_present()` 已与该图像 present 信号量一起提交的
+  `swapchain->fences[image_index]`，只阻塞这一帧的渲染完成，其他队列工作仍可并行。
+  `minImageCount` 从 2 提到 3，避免 mailbox 下缓冲不足。
+* **收益**：present 延迟从“等整设备空闲 + 全屏 CPU 拷贝”降到“等本帧 fence + 一次
+  queueBuffer”，高分辨率下每帧少一次约 8–15 MiB 的 CPU 拷贝。
+* **风险/注意**：零拷贝要求窗口格式与 swapchain 格式一致（日志会打印
+  `present is a single queueBuffer` 或 `zero-copy unavailable: ...`）；回退路径仍保留，
+  合成器几何信息异常时可能出现过期帧。
