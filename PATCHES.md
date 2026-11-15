@@ -187,6 +187,7 @@ CSF 前端接入：把 CSF 的队列提交与 csif 调用点切换到 kbase 助�
 | `011-kbase-backend` | kbase 后端对齐本地：丢弃无效的 tiler OOM CSI handler、`pan_kmod` 增加直写 logcat 的诊断输出、物理设备设置 gralloc usage 位并放开 v10 `robustBufferAccess2`。 |
 | `012-panvk-cmd-path` | 命令流路径对齐本地：clean-tile 跳过 preload、BC 转码管线后台预热、blend 描述符脏标记、null descriptor 修正。 |
 | `013-diagnostics-cleanup` | 统一 `PANVK_DIAG_PRINTF` / `panvk_diag_result` 诊断层（含 Android logcat），utrace 堆按需缩小，JM 侧补齐位置信息与 VS 未写 POS 的绘制保护。 |
+| `014-kraid-default-on` | 默认启用 Kraid 编译器：`PAN_USE_KRAID` 默认值从 0 改为 `all`（vs/fs/cs/internal 全阶段），仍可用 `PAN_USE_KRAID=0` 关闭。 |
 
 ### 本地树同步 `007`–`013`
 
@@ -688,3 +689,11 @@ GPU 侧实验补丁，仅做归档：**不在 `scripts/apply-patches.sh` 的 SER
 | --- | --- |
 | `001-afrc-opt-in.patch` | `PANVK_AFRC=16\|24\|32` 时，应用自建彩色图像在 AFBC 优先的自动 modifier 列表之前尝试 AFRC 固定率压缩；默认 0（关闭）时 modifier 选择路径不变，WSI/CRC、sparse、mutable、cube、block-texel、storage、host-transfer 图像均排除。实验性，尚未真机验证。 |
 
+
+#### `014-kraid-default-on`（1 文件）
+
+* **机制**：`pan_compiler.c` 中 `DEBUG_GET_ONCE_FLAGS_OPTION(use_kraid, "PAN_USE_KRAID",
+  pan_use_kraid_flags, ...)` 的默认值由 `0` 改为 `USE_KRAID_ALL`，即 arch ≥ 9 时默认对
+  vs/fs/cs/internal 全阶段启用 Kraid。
+* **收益**：与本地 rc62 之后的行为一致，设备无需额外设置环境变量即可使用 Kraid 代码生成。
+* **风险/注意**：仍可用 `PAN_USE_KRAID=0` 或按阶段组合（`vs`/`fs`/`cs`/`internal`）关闭，便于 A/B。
