@@ -1,0 +1,17 @@
+{
+  "profile": "g1-v14-csf",
+  "gpu": "Mali-G1 series (G1-Ultra / G1-Premium / G1-Pro)",
+  "gpuId": "0xe8800010",
+  "gpuIdNote": "G1-Ultra id observed in a beta.15 log; G1-Premium/Pro variants exist in the Mesa model table but their ids are unconfirmed",
+  "panArch": 14,
+  "frontend": "CSF",
+  "kernelInterface": "mali_kbase",
+  "kbaseUapi": "unconfirmed (MEM_ALLOC_EX may be absent)",
+  "selectionKey": {
+    "pan_arch": 14,
+    "gpu_id": "0xe8800010",
+    "frontend": "CSF",
+    "kbase_uapi": "unconfirmed"
+  },
+  "status": "profile added; built but not device-validated"
+}
