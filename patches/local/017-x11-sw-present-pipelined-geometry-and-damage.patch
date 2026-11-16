@@ -1,0 +1,126 @@
+--- /tmp/b2/src/vulkan/wsi/wsi_common_x11.c	2026-11-16 13:55:41.320846123 +0800
++++ src/vulkan/wsi/wsi_common_x11.c	2026-11-16 13:54:18.529174217 +0800
+@@ -1245,6 +1245,11 @@
+    /* sw present via MIT-SHM AttachFd: memfd copy target for ShmPutImage */
+    void *                                    sw_shm_map;
+    size_t                                    sw_shm_size;
++   /* Geometry request issued by the previous present of this image. Its reply
++    * is consumed at the start of the next one, so the server round-trip is off
++    * the critical path while still proving the server read the segment. */
++   xcb_get_geometry_cookie_t                 sw_geom_cookie;
++   bool                                      sw_geom_pending;
+    uint64_t                                  present_id;
+    VkPresentModeKHR                          present_mode;
+    xcb_rectangle_t                           rects[MAX_DAMAGE_RECTS];
+@@ -1888,6 +1893,27 @@
+ {
+    assert(!chain->base.image_info.explicit_sync);
+    struct x11_image *image = &chain->images[image_index];
++   VkResult pending_result = VK_SUCCESS;
++
++   /* Consume the geometry reply of this image's previous present before
++    * touching its segment again. The request was issued a whole frame ago, so
++    * this normally returns immediately, and its reply still proves the server
++    * finished reading the segment before the copy below overwrites it. */
++   if (chain->sw_shm && image->sw_geom_pending) {
++      xcb_generic_error_t *err = NULL;
++      xcb_get_geometry_reply_t *prev =
++         xcb_get_geometry_reply(chain->conn, image->sw_geom_cookie, &err);
++      if (prev) {
++         if (chain->extent.width != prev->width ||
++             chain->extent.height != prev->height)
++            pending_result = VK_ERROR_OUT_OF_DATE_KHR;
++      } else {
++         pending_result = VK_ERROR_SURFACE_LOST_KHR;
++      }
++      free(err);
++      free(prev);
++      image->sw_geom_pending = false;
++   }
+ 
+    /* Begin querying this before submitting the frame for improved async performance.
+     * In this _sw() mode we're expecting network round-trip delay, not just UNIX socket delay.
+@@ -1935,7 +1961,11 @@
+                                     image->shmseg, 0);
+          xcb_discard_reply(chain->conn, cookie.sequence);
+       }
+-      geom_cookie = xcb_get_geometry(chain->conn, chain->window);
++      /* Ask for the geometry now and read it at the next present of this
++       * image; blocking on it here would serialise present on a full server
++       * round-trip. */
++      image->sw_geom_cookie = xcb_get_geometry(chain->conn, chain->window);
++      image->sw_geom_pending = true;
+    } else if (image->rectangle_count > 0) {
+       for (int i = 0; i < image->rectangle_count; i++) {
+          xcb_rectangle_t rect = chain->images[image_index].rects[i];
+@@ -1988,19 +2018,23 @@
+    /* We don't have queued present here.
+     * Immediately let application acquire again, but query geometry first so
+     * we can report OUT_OF_DATE on resize. */
+-   xcb_generic_error_t *err;
++   VkResult result = pending_result;
+ 
+-   xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(chain->conn, geom_cookie, &err);
+-   VkResult result = VK_SUCCESS;
+-   if (geom) {
+-      if (chain->extent.width != geom->width ||
+-          chain->extent.height != geom->height)
+-         result = VK_ERROR_OUT_OF_DATE_KHR;
+-   } else {
+-      result = VK_ERROR_SURFACE_LOST_KHR;
++   if (!chain->sw_shm) {
++      xcb_generic_error_t *err;
++
++      xcb_get_geometry_reply_t *geom =
++         xcb_get_geometry_reply(chain->conn, geom_cookie, &err);
++      if (geom) {
++         if (chain->extent.width != geom->width ||
++             chain->extent.height != geom->height)
++            result = VK_ERROR_OUT_OF_DATE_KHR;
++      } else {
++         result = VK_ERROR_SURFACE_LOST_KHR;
++      }
++      free(err);
++      free(geom);
+    }
+-   free(err);
+-   free(geom);
+ 
+    if (image->present_id) {
+       mtx_lock(&chain->present_progress_mutex);
+@@ -2300,18 +2334,20 @@
+ {
+    struct x11_swapchain *chain = (struct x11_swapchain *)wsi_chain;
+    xcb_xfixes_region_t update_area = 0;
++   const bool sw_shm = chain->sw_shm;
+ 
+    /* If the swapchain is in an error state, don't go any further. */
+    VkResult status = x11_swapchain_read_status_atomic(chain);
+    if (status < 0)
+       return status;
+ 
+-   if (chain->images[image_index].update_region != None &&
++   if ((chain->images[image_index].update_region != None || sw_shm) &&
+        damage && damage->pRectangles && damage->rectangleCount > 0 &&
+        damage->rectangleCount <= MAX_DAMAGE_RECTS) {
+       xcb_rectangle_t *rects = chain->images[image_index].rects;
+ 
+-      update_area = chain->images[image_index].update_region;
++      if (!sw_shm)
++         update_area = chain->images[image_index].update_region;
+       for (unsigned i = 0; i < damage->rectangleCount; i++) {
+          const VkRectLayerKHR *rect = &damage->pRectangles[i];
+          assert(rect->layer == 0);
+@@ -2320,7 +2356,11 @@
+          rects[i].width = rect->extent.width;
+          rects[i].height = rect->extent.height;
+       }
+-      xcb_xfixes_set_region(chain->conn, update_area, damage->rectangleCount, rects);
++      /* Only the pixmap present needs an X region; the ShmPutImage path reads
++       * the rectangle array directly, so create nothing extra for it. */
++      if (!sw_shm)
++         xcb_xfixes_set_region(chain->conn, update_area, damage->rectangleCount,
++                               rects);
+       chain->images[image_index].rectangle_count = damage->rectangleCount;
+    } else {
+       chain->images[image_index].rectangle_count = 0;
