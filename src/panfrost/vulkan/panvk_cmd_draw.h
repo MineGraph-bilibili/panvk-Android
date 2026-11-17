@@ -578,6 +578,9 @@ struct panvk_draw_info {
    } indirect;
 
    enum mesa_prim prim;
+   /* The individual draws folded into this indirect multi-draw were separate
+    * vkCmdDraw* calls, which all have gl_DrawID == 0. */
+   bool zero_draw_id;
    bool gpu_prerast_generated;
    /* INDEX_COUNT and INDEX_OFFSET were loaded from a GPU run header. */
    bool index_sr_set;

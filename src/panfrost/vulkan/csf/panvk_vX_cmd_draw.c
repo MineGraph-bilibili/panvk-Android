@@ -3767,7 +3767,7 @@ launch_draw(struct panvk_cmd_buffer *cmdbuf,
    {
       struct cs_index draw_id = cs_undef();
 
-      if (draw->indirect.draw_index) {
+      if (draw->indirect.draw_index && !draw->zero_draw_id) {
          draw_id = cs_scratch_reg32(b, 5);
          cs_move32_to(b, draw_id, draw->indirect.draw_index);
       }
@@ -4076,7 +4076,9 @@ launch_indirect_draw(struct panvk_cmd_buffer *cmdbuf,
       }
 
       cs_add_imm32(b, draw_count, draw_count, -1);
-      cs_add_imm32(b, draw_id, draw_id, 1);
+      /* A batch of separate draws keeps gl_DrawID at 0. */
+      if (!draw->zero_draw_id)
+         cs_add_imm32(b, draw_id, draw_id, 1);
       cs_add_imm64(b, draw_params_addr, draw_params_addr,
                    draw->indirect.stride);
 
@@ -4690,7 +4692,8 @@ gpu_prerast_vs(struct panvk_cmd_buffer *cmdbuf,
    STORE_PARAM32(record_capacity,
                  panvk_gpu_prerast_record_capacity(
                     shader->gpu_prerast.io.record_stride));
-   STORE_PARAM32(draw_id, source->indirect.draw_index);
+   STORE_PARAM32(draw_id,
+                 source->zero_draw_id ? 0 : source->indirect.draw_index);
    if (chunk_addr) {
       cs_move64_to(compute, addr, chunk_addr);
       cs_load32_to(compute, value, addr, 0);
@@ -6723,12 +6726,6 @@ draw_batch_state_ok(struct panvk_cmd_buffer *cmdbuf)
    if (gfx->gs.shader || gfx->tes.shader)
       return false;
 
-   /* gl_DrawID is the index inside the indirect buffer: merging separate
-    * draws into one multi-draw would turn 0 into 0,1,2,... */
-   if ((gfx->vs.shader && gfx->vs.shader->uses_draw_id) ||
-       (gfx->fs.shader && gfx->fs.shader->uses_draw_id))
-      return false;
-
    /* Internal meta draws have their own state and must not be folded in. */
    if (gfx->vk_meta)
       return false;
@@ -6811,6 +6808,10 @@ panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
       return;
    }
 
+   /* The draws were separate vkCmdDrawIndexed calls, so they all see
+    * gl_DrawID == 0 even though they land at different indices of the
+    * indirect buffer.
+    */
    const size_t cmds_size = draw_count * sizeof(VkDrawIndexedIndirectCommand);
    struct pan_ptr cmds = panvk_cmd_alloc_dev_mem(cmdbuf, desc, cmds_size, 16);
 
@@ -6840,6 +6841,7 @@ panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
       .indirect.draw_count = draw_count,
       .indirect.stride = sizeof(VkDrawIndexedIndirectCommand),
       .prim = batch->prim,
+      .zero_draw_id = true,
    };
 
    panvk_cmd_draw(cmdbuf, draw);

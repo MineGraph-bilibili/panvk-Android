@@ -1,0 +1,149 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+index 2da57fd..f6511d4 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -3767,7 +3767,7 @@ launch_draw(struct panvk_cmd_buffer *cmdbuf,
+    {
+       struct cs_index draw_id = cs_undef();
+ 
+-      if (draw->indirect.draw_index) {
++      if (draw->indirect.draw_index && !draw->zero_draw_id) {
+          draw_id = cs_scratch_reg32(b, 5);
+          cs_move32_to(b, draw_id, draw->indirect.draw_index);
+       }
+@@ -4076,7 +4076,9 @@ launch_indirect_draw(struct panvk_cmd_buffer *cmdbuf,
+       }
+ 
+       cs_add_imm32(b, draw_count, draw_count, -1);
+-      cs_add_imm32(b, draw_id, draw_id, 1);
++      /* A batch of separate draws keeps gl_DrawID at 0. */
++      if (!draw->zero_draw_id)
++         cs_add_imm32(b, draw_id, draw_id, 1);
+       cs_add_imm64(b, draw_params_addr, draw_params_addr,
+                    draw->indirect.stride);
+ 
+@@ -4690,7 +4692,8 @@ gpu_prerast_vs(struct panvk_cmd_buffer *cmdbuf,
+    STORE_PARAM32(record_capacity,
+                  panvk_gpu_prerast_record_capacity(
+                     shader->gpu_prerast.io.record_stride));
+-   STORE_PARAM32(draw_id, source->indirect.draw_index);
++   STORE_PARAM32(draw_id,
++                 source->zero_draw_id ? 0 : source->indirect.draw_index);
+    if (chunk_addr) {
+       cs_move64_to(compute, addr, chunk_addr);
+       cs_load32_to(compute, value, addr, 0);
+@@ -6723,12 +6726,6 @@ draw_batch_state_ok(struct panvk_cmd_buffer *cmdbuf)
+    if (gfx->gs.shader || gfx->tes.shader)
+       return false;
+ 
+-   /* gl_DrawID is the index inside the indirect buffer: merging separate
+-    * draws into one multi-draw would turn 0 into 0,1,2,... */
+-   if ((gfx->vs.shader && gfx->vs.shader->uses_draw_id) ||
+-       (gfx->fs.shader && gfx->fs.shader->uses_draw_id))
+-      return false;
+-
+    /* Internal meta draws have their own state and must not be folded in. */
+    if (gfx->vk_meta)
+       return false;
+@@ -6811,6 +6808,10 @@ panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
+       return;
+    }
+ 
++   /* The draws were separate vkCmdDrawIndexed calls, so they all see
++    * gl_DrawID == 0 even though they land at different indices of the
++    * indirect buffer.
++    */
+    const size_t cmds_size = draw_count * sizeof(VkDrawIndexedIndirectCommand);
+    struct pan_ptr cmds = panvk_cmd_alloc_dev_mem(cmdbuf, desc, cmds_size, 16);
+ 
+@@ -6840,6 +6841,7 @@ panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
+       .indirect.draw_count = draw_count,
+       .indirect.stride = sizeof(VkDrawIndexedIndirectCommand),
+       .prim = batch->prim,
++      .zero_draw_id = true,
+    };
+ 
+    panvk_cmd_draw(cmdbuf, draw);
+diff --git a/src/panfrost/vulkan/panvk_cmd_draw.h b/src/panfrost/vulkan/panvk_cmd_draw.h
+index 22f6228..ddf8336 100644
+--- a/src/panfrost/vulkan/panvk_cmd_draw.h
++++ b/src/panfrost/vulkan/panvk_cmd_draw.h
+@@ -578,6 +578,9 @@ struct panvk_draw_info {
+    } indirect;
+ 
+    enum mesa_prim prim;
++   /* The individual draws folded into this indirect multi-draw were separate
++    * vkCmdDraw* calls, which all have gl_DrawID == 0. */
++   bool zero_draw_id;
+    bool gpu_prerast_generated;
+    /* INDEX_COUNT and INDEX_OFFSET were loaded from a GPU run header. */
+    bool index_sr_set;
+diff --git a/src/panfrost/vulkan/panvk_shader.h b/src/panfrost/vulkan/panvk_shader.h
+index b2a801b..30bf712 100644
+--- a/src/panfrost/vulkan/panvk_shader.h
++++ b/src/panfrost/vulkan/panvk_shader.h
+@@ -501,11 +501,6 @@ struct panvk_shader {
+ 
+    struct panvk_shader_desc_info desc_info;
+ 
+-   /* The application shader reads gl_DrawID. Folding several draws into one
+-    * multi-draw would change the value for the second and later draws, so
+-    * panvk_cmd_draw_batch must stay disabled for this shader. */
+-   bool uses_draw_id;
+-
+ #if PAN_ARCH >= 9
+    struct panvk_gpu_prerast_shader gpu_prerast;
+ #endif
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+index 2a03b90..1c5cc83 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+@@ -1042,7 +1042,8 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
+    set_gfx_sysval(cmdbuf, dirty_sysvals, layer_id, info->layer_id);
+ #endif
+ #if PAN_ARCH == 9
+-   set_gfx_sysval(cmdbuf, dirty_sysvals, draw_id, info->indirect.draw_index);
++   set_gfx_sysval(cmdbuf, dirty_sysvals, draw_id,
++                  info->zero_draw_id ? 0 : info->indirect.draw_index);
+ #endif
+ 
+    if (dyn_gfx_state_dirty(cmdbuf, CB_BLEND_CONSTANTS)) {
+diff --git a/src/panfrost/vulkan/panvk_vX_shader.c b/src/panfrost/vulkan/panvk_vX_shader.c
+index 6279d15..14d0283 100644
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -3472,25 +3472,6 @@ panvk_lower_cull_dist_flags_intr(nir_builder *b, nir_intrinsic_instr *intr,
+    return true;
+ }
+ 
+-static bool
+-panvk_nir_uses_draw_id(nir_shader *nir)
+-{
+-   nir_foreach_function_impl(impl, nir) {
+-      nir_foreach_block(block, impl) {
+-         nir_foreach_instr(instr, block) {
+-            if (instr->type != nir_instr_type_intrinsic)
+-               continue;
+-
+-            if (nir_instr_as_intrinsic(instr)->intrinsic ==
+-                nir_intrinsic_load_draw_id)
+-               return true;
+-         }
+-      }
+-   }
+-
+-   return false;
+-}
+-
+ static const struct vk_shader_ops panvk_shader_ops;
+ 
+ static VkResult
+@@ -3517,8 +3498,6 @@ panvk_compile_shader(struct panvk_device *dev,
+    if (shader == NULL)
+       return panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
+-   shader->uses_draw_id = panvk_nir_uses_draw_id(info->nir);
+-
+ #if PAN_ARCH >= 9
+    shader->gpu_prerast.io.abi_version = PANVK_GPU_PRERAST_ABI_VERSION;
+ 
