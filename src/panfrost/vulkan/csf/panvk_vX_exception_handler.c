@@ -269,6 +269,7 @@ generate_tiler_oom_handler(struct panvk_device *dev,
 
          copy_fbd(&b, has_zs_ext, rt_count, current_fbd_ptr_reg, ir_descs_ptr,
                   scratch_fbd_ptr_reg);
+         cs_flush_stores(&b);
 
 #if PAN_ARCH >= 14
          /* Emit the scratch fbd layer state. */
@@ -347,6 +348,7 @@ generate_tiler_oom_handler(struct panvk_device *dev,
 
       /* We need to flush the texture caches so future preloads see the new
        * content. */
+      cs_move32_to(&b, flush_id, 0);
       cs_flush_caches(&b, MALI_CS_FLUSH_MODE_NONE, MALI_CS_FLUSH_MODE_NONE,
                       MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
                       cs_defer(SB_IMM_MASK, SB_ID(IMM_FLUSH)));
