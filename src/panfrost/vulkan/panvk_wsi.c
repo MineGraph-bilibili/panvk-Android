@@ -51,6 +51,7 @@ panvk_can_present_on_device(VkPhysicalDevice pdevice, int fd)
 #include <android/native_window.h>
 #include <android/hardware_buffer.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <poll.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -84,6 +85,9 @@ struct panvk_android_swapchain {
    /* Zero-copy: the images wrap the window's own buffers, present only
     * queues them back. */
    bool zero_copy;
+   /* Copy path: the window is always RGBA_8888, so a BGRA image needs a
+    * swizzle during the copy or red and blue come out swapped. */
+   bool bgra;
    struct panvk_android_swapchain_image images[4];
 };
 
@@ -153,17 +157,23 @@ panvk_android_anw_resolve(void)
       panvk_android_anw_sym(lib, "ANativeWindow_query");
 }
 
-static void
+static bool
 panvk_android_anw_wait_fence(int fence_fd)
 {
    if (fence_fd < 0)
-      return;
+      return true;
 
-   /* The fence only says when the previous owner stopped touching the buffer;
-    * wait for it, but never let a wedged consumer hang acquire forever. */
+   /* The fence only says when the previous owner stopped touching the buffer.
+    * A timeout means the consumer still owns it, so the caller must not render
+    * into it; report that instead of carrying on regardless. */
    struct pollfd pfd = {.fd = fence_fd, .events = POLLIN};
-   poll(&pfd, 1, 1000);
+   int ret;
+   do {
+      ret = poll(&pfd, 1, 1000);
+   } while (ret < 0 && errno == EINTR);
    close(fence_fd);
+
+   return ret > 0;
 }
 
 static bool
@@ -302,6 +312,9 @@ panvk_android_swapchain_init_copy(struct panvk_android_swapchain *chain,
                                   uint32_t num_images)
 {
    VkResult result = VK_SUCCESS;
+
+   chain->bgra = pCreateInfo->imageFormat == VK_FORMAT_B8G8R8A8_UNORM ||
+                 pCreateInfo->imageFormat == VK_FORMAT_B8G8R8A8_SRGB;
 
    for (uint32_t i = 0; i < num_images; i++) {
       AHardwareBuffer_Desc desc = {
@@ -664,7 +677,12 @@ panvk_android_swapchain_acquire_next_image(
          continue;
       }
 
-      panvk_android_anw_wait_fence(fence_fd);
+      if (!panvk_android_anw_wait_fence(fence_fd)) {
+         /* The consumer never released the buffer; hand it back and let the
+          * next attempt pick a different one. */
+         panvk_android_anw.cancel_buffer(chain->window, anb, -1);
+         continue;
+      }
       chain->images[idx].held = true;
       chain->next_image = (idx + 1) % chain->base.image_count;
       *image_index = (uint32_t)idx;
@@ -757,11 +775,14 @@ panvk_android_swapchain_queue_present(
     * device. wsi_common_queue_present() signals swapchain->fences[image_index]
     * together with the app's present wait semaphores, so this is exactly the
     * fence that orders rendering against the buffer hand-off, and other queue
-    * work can still overlap. */
-   const struct wsi_device *wsi = swapchain->wsi;
-   if (swapchain->fences[image_index] != VK_NULL_HANDLE)
-      wsi->WaitForFences(swapchain->device, 1,
-                         &swapchain->fences[image_index], true, ~0ull);
+    * work can still overlap.
+    *
+    * The software WSI path already waits on this same fence before calling
+    * here, so only the hardware path has to do it itself. */
+   if (!swapchain->wsi->sw && swapchain->fences[image_index] != VK_NULL_HANDLE)
+      swapchain->wsi->WaitForFences(swapchain->device, 1,
+                                    &swapchain->fences[image_index], true,
+                                    ~0ull);
 
    if (chain->zero_copy) {
       struct panvk_android_swapchain_image *img = &chain->images[image_index];
@@ -792,7 +813,21 @@ panvk_android_swapchain_queue_present(
                                   -1, NULL, &ahb_data) == 0) {
             uint32_t copy_w = MIN2((uint32_t)win_buf.width, img->width);
             uint32_t copy_h = MIN2((uint32_t)win_buf.height, img->height);
-            if (win_buf.stride == (int32_t)img->stride && copy_w == img->width) {
+            if (chain->bgra) {
+               /* The window only takes RGBA_8888, so swap R and B here. */
+               for (uint32_t y = 0; y < copy_h; y++) {
+                  const uint32_t *src = (const uint32_t *)
+                     ((const char *)ahb_data + y * img->stride * 4);
+                  uint32_t *dst =
+                     (uint32_t *)((char *)win_buf.bits + y * win_buf.stride * 4);
+                  for (uint32_t x = 0; x < copy_w; x++) {
+                     uint32_t px = src[x];
+                     dst[x] = (px & 0xff00ff00u) | ((px & 0x00ff0000u) >> 16) |
+                              ((px & 0x000000ffu) << 16);
+                  }
+               }
+            } else if (win_buf.stride == (int32_t)img->stride &&
+                       copy_w == img->width) {
                /* Both sides are row-contiguous: copy in one go. */
                memcpy(win_buf.bits, ahb_data, (size_t)copy_h * img->stride * 4);
             } else {

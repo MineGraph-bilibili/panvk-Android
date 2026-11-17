@@ -1,0 +1,246 @@
+diff --git a/src/panfrost/vulkan/panvk_wsi.c b/src/panfrost/vulkan/panvk_wsi.c
+index f0b68eb..c1d85a0 100644
+--- a/src/panfrost/vulkan/panvk_wsi.c
++++ b/src/panfrost/vulkan/panvk_wsi.c
+@@ -51,6 +51,7 @@ panvk_can_present_on_device(VkPhysicalDevice pdevice, int fd)
+ #include <android/native_window.h>
+ #include <android/hardware_buffer.h>
+ #include <dlfcn.h>
++#include <errno.h>
+ #include <poll.h>
+ #include <pthread.h>
+ #include <unistd.h>
+@@ -84,6 +85,9 @@ struct panvk_android_swapchain {
+    /* Zero-copy: the images wrap the window's own buffers, present only
+     * queues them back. */
+    bool zero_copy;
++   /* Copy path: the window is always RGBA_8888, so a BGRA image needs a
++    * swizzle during the copy or red and blue come out swapped. */
++   bool bgra;
+    struct panvk_android_swapchain_image images[4];
+ };
+ 
+@@ -153,17 +157,23 @@ panvk_android_anw_resolve(void)
+       panvk_android_anw_sym(lib, "ANativeWindow_query");
+ }
+ 
+-static void
++static bool
+ panvk_android_anw_wait_fence(int fence_fd)
+ {
+    if (fence_fd < 0)
+-      return;
++      return true;
+ 
+-   /* The fence only says when the previous owner stopped touching the buffer;
+-    * wait for it, but never let a wedged consumer hang acquire forever. */
++   /* The fence only says when the previous owner stopped touching the buffer.
++    * A timeout means the consumer still owns it, so the caller must not render
++    * into it; report that instead of carrying on regardless. */
+    struct pollfd pfd = {.fd = fence_fd, .events = POLLIN};
+-   poll(&pfd, 1, 1000);
++   int ret;
++   do {
++      ret = poll(&pfd, 1, 1000);
++   } while (ret < 0 && errno == EINTR);
+    close(fence_fd);
++
++   return ret > 0;
+ }
+ 
+ static bool
+@@ -303,6 +313,9 @@ panvk_android_swapchain_init_copy(struct panvk_android_swapchain *chain,
+ {
+    VkResult result = VK_SUCCESS;
+ 
++   chain->bgra = pCreateInfo->imageFormat == VK_FORMAT_B8G8R8A8_UNORM ||
++                 pCreateInfo->imageFormat == VK_FORMAT_B8G8R8A8_SRGB;
++
+    for (uint32_t i = 0; i < num_images; i++) {
+       AHardwareBuffer_Desc desc = {
+          .width = pCreateInfo->imageExtent.width,
+@@ -664,7 +677,12 @@ panvk_android_swapchain_acquire_next_image(
+          continue;
+       }
+ 
+-      panvk_android_anw_wait_fence(fence_fd);
++      if (!panvk_android_anw_wait_fence(fence_fd)) {
++         /* The consumer never released the buffer; hand it back and let the
++          * next attempt pick a different one. */
++         panvk_android_anw.cancel_buffer(chain->window, anb, -1);
++         continue;
++      }
+       chain->images[idx].held = true;
+       chain->next_image = (idx + 1) % chain->base.image_count;
+       *image_index = (uint32_t)idx;
+@@ -757,11 +775,14 @@ panvk_android_swapchain_queue_present(
+     * device. wsi_common_queue_present() signals swapchain->fences[image_index]
+     * together with the app's present wait semaphores, so this is exactly the
+     * fence that orders rendering against the buffer hand-off, and other queue
+-    * work can still overlap. */
+-   const struct wsi_device *wsi = swapchain->wsi;
+-   if (swapchain->fences[image_index] != VK_NULL_HANDLE)
+-      wsi->WaitForFences(swapchain->device, 1,
+-                         &swapchain->fences[image_index], true, ~0ull);
++    * work can still overlap.
++    *
++    * The software WSI path already waits on this same fence before calling
++    * here, so only the hardware path has to do it itself. */
++   if (!swapchain->wsi->sw && swapchain->fences[image_index] != VK_NULL_HANDLE)
++      swapchain->wsi->WaitForFences(swapchain->device, 1,
++                                    &swapchain->fences[image_index], true,
++                                    ~0ull);
+ 
+    if (chain->zero_copy) {
+       struct panvk_android_swapchain_image *img = &chain->images[image_index];
+@@ -792,7 +813,21 @@ panvk_android_swapchain_queue_present(
+                                   -1, NULL, &ahb_data) == 0) {
+             uint32_t copy_w = MIN2((uint32_t)win_buf.width, img->width);
+             uint32_t copy_h = MIN2((uint32_t)win_buf.height, img->height);
+-            if (win_buf.stride == (int32_t)img->stride && copy_w == img->width) {
++            if (chain->bgra) {
++               /* The window only takes RGBA_8888, so swap R and B here. */
++               for (uint32_t y = 0; y < copy_h; y++) {
++                  const uint32_t *src = (const uint32_t *)
++                     ((const char *)ahb_data + y * img->stride * 4);
++                  uint32_t *dst =
++                     (uint32_t *)((char *)win_buf.bits + y * win_buf.stride * 4);
++                  for (uint32_t x = 0; x < copy_w; x++) {
++                     uint32_t px = src[x];
++                     dst[x] = (px & 0xff00ff00u) | ((px & 0x00ff0000u) >> 16) |
++                              ((px & 0x000000ffu) << 16);
++                  }
++               }
++            } else if (win_buf.stride == (int32_t)img->stride &&
++                       copy_w == img->width) {
+                /* Both sides are row-contiguous: copy in one go. */
+                memcpy(win_buf.bits, ahb_data, (size_t)copy_h * img->stride * 4);
+             } else {
+diff --git a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+index eb1801f..a73e61f 100644
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -1245,6 +1245,11 @@ struct x11_image {
+    /* sw present via MIT-SHM AttachFd: memfd copy target for ShmPutImage */
+    void *                                    sw_shm_map;
+    size_t                                    sw_shm_size;
++   /* Geometry request issued by the previous present of this image. Its reply
++    * is consumed at the start of the next one, so the server round-trip is off
++    * the critical path while still proving the server read the segment. */
++   xcb_get_geometry_cookie_t                 sw_geom_cookie;
++   bool                                      sw_geom_pending;
+    uint64_t                                  present_id;
+    VkPresentModeKHR                          present_mode;
+    xcb_rectangle_t                           rects[MAX_DAMAGE_RECTS];
+@@ -1888,6 +1893,27 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
+ {
+    assert(!chain->base.image_info.explicit_sync);
+    struct x11_image *image = &chain->images[image_index];
++   VkResult pending_result = VK_SUCCESS;
++
++   /* Consume the geometry reply of this image's previous present before
++    * touching its segment again. The request was issued a whole frame ago, so
++    * this normally returns immediately, and its reply still proves the server
++    * finished reading the segment before the copy below overwrites it. */
++   if (chain->sw_shm && image->sw_geom_pending) {
++      xcb_generic_error_t *err = NULL;
++      xcb_get_geometry_reply_t *prev =
++         xcb_get_geometry_reply(chain->conn, image->sw_geom_cookie, &err);
++      if (prev) {
++         if (chain->extent.width != prev->width ||
++             chain->extent.height != prev->height)
++            pending_result = VK_ERROR_OUT_OF_DATE_KHR;
++      } else {
++         pending_result = VK_ERROR_SURFACE_LOST_KHR;
++      }
++      free(err);
++      free(prev);
++      image->sw_geom_pending = false;
++   }
+ 
+    /* Begin querying this before submitting the frame for improved async performance.
+     * In this _sw() mode we're expecting network round-trip delay, not just UNIX socket delay.
+@@ -1935,7 +1961,11 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
+                                     image->shmseg, 0);
+          xcb_discard_reply(chain->conn, cookie.sequence);
+       }
+-      geom_cookie = xcb_get_geometry(chain->conn, chain->window);
++      /* Ask for the geometry now and read it at the next present of this
++       * image; blocking on it here would serialise present on a full server
++       * round-trip. */
++      image->sw_geom_cookie = xcb_get_geometry(chain->conn, chain->window);
++      image->sw_geom_pending = true;
+    } else if (image->rectangle_count > 0) {
+       for (int i = 0; i < image->rectangle_count; i++) {
+          xcb_rectangle_t rect = chain->images[image_index].rects[i];
+@@ -1988,19 +2018,23 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
+    /* We don't have queued present here.
+     * Immediately let application acquire again, but query geometry first so
+     * we can report OUT_OF_DATE on resize. */
+-   xcb_generic_error_t *err;
++   VkResult result = pending_result;
+ 
+-   xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(chain->conn, geom_cookie, &err);
+-   VkResult result = VK_SUCCESS;
+-   if (geom) {
+-      if (chain->extent.width != geom->width ||
+-          chain->extent.height != geom->height)
+-         result = VK_ERROR_OUT_OF_DATE_KHR;
+-   } else {
+-      result = VK_ERROR_SURFACE_LOST_KHR;
++   if (!chain->sw_shm) {
++      xcb_generic_error_t *err;
++
++      xcb_get_geometry_reply_t *geom =
++         xcb_get_geometry_reply(chain->conn, geom_cookie, &err);
++      if (geom) {
++         if (chain->extent.width != geom->width ||
++             chain->extent.height != geom->height)
++            result = VK_ERROR_OUT_OF_DATE_KHR;
++      } else {
++         result = VK_ERROR_SURFACE_LOST_KHR;
++      }
++      free(err);
++      free(geom);
+    }
+-   free(err);
+-   free(geom);
+ 
+    if (image->present_id) {
+       mtx_lock(&chain->present_progress_mutex);
+@@ -2300,18 +2334,20 @@ x11_queue_present(struct wsi_swapchain *wsi_chain,
+ {
+    struct x11_swapchain *chain = (struct x11_swapchain *)wsi_chain;
+    xcb_xfixes_region_t update_area = 0;
++   const bool sw_shm = chain->sw_shm;
+ 
+    /* If the swapchain is in an error state, don't go any further. */
+    VkResult status = x11_swapchain_read_status_atomic(chain);
+    if (status < 0)
+       return status;
+ 
+-   if (chain->images[image_index].update_region != None &&
++   if ((chain->images[image_index].update_region != None || sw_shm) &&
+        damage && damage->pRectangles && damage->rectangleCount > 0 &&
+        damage->rectangleCount <= MAX_DAMAGE_RECTS) {
+       xcb_rectangle_t *rects = chain->images[image_index].rects;
+ 
+-      update_area = chain->images[image_index].update_region;
++      if (!sw_shm)
++         update_area = chain->images[image_index].update_region;
+       for (unsigned i = 0; i < damage->rectangleCount; i++) {
+          const VkRectLayerKHR *rect = &damage->pRectangles[i];
+          assert(rect->layer == 0);
+@@ -2320,7 +2356,11 @@ x11_queue_present(struct wsi_swapchain *wsi_chain,
+          rects[i].width = rect->extent.width;
+          rects[i].height = rect->extent.height;
+       }
+-      xcb_xfixes_set_region(chain->conn, update_area, damage->rectangleCount, rects);
++      /* Only the pixmap present needs an X region; the ShmPutImage path reads
++       * the rectangle array directly, so create nothing extra for it. */
++      if (!sw_shm)
++         xcb_xfixes_set_region(chain->conn, update_area, damage->rectangleCount,
++                               rects);
+       chain->images[image_index].rectangle_count = damage->rectangleCount;
+    } else {
+       chain->images[image_index].rectangle_count = 0;
