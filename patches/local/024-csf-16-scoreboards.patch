@@ -1,0 +1,52 @@
+diff --git a/src/panfrost/drm-shim/panfrost_noop.c b/src/panfrost/drm-shim/panfrost_noop.c
+index a8f6481..d716d5f 100644
+--- a/src/panfrost/drm-shim/panfrost_noop.c
++++ b/src/panfrost/drm-shim/panfrost_noop.c
+@@ -203,7 +203,7 @@ panthor_ioctl_dev_query(int fd, unsigned long request, void *arg)
+       csif_info->csg_slot_count = 8;
+       csif_info->cs_slot_count = 8;
+       csif_info->cs_reg_count = arch >= 12 ? 128 : 96;
+-      csif_info->scoreboard_slot_count = 8;
++      csif_info->scoreboard_slot_count = arch >= 11 ? 16 : 8;
+       csif_info->unpreserved_cs_reg_count = 4;
+       return 0;
+    }
+diff --git a/src/panfrost/vulkan/csf/panvk_cmd_buffer.h b/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
+index 7270b07..7b4e440 100644
+--- a/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
++++ b/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
+@@ -299,7 +299,7 @@ enum panvk_sb_ids {
+    PANVK_SB_DEFERRED_SYNC = 1,
+    PANVK_SB_DEFERRED_FLUSH = 2,
+    PANVK_SB_ITER_START = 3,
+-   PANVK_SB_ITER_COUNT = 5,
++   PANVK_SB_ITER_COUNT = CS_MAX_SB_COUNT - PANVK_SB_ITER_START,
+ };
+ 
+ #define SB_IMM_MASK     0
+diff --git a/src/panfrost/vulkan/csf/panvk_instr.h b/src/panfrost/vulkan/csf/panvk_instr.h
+index 34d2070..f5c31b0 100644
+--- a/src/panfrost/vulkan/csf/panvk_instr.h
++++ b/src/panfrost/vulkan/csf/panvk_instr.h
+@@ -25,7 +25,7 @@ struct panvk_instr_end_args {
+    /* Depending on which work type is ended, one of the options below is valid. */
+    union {
+       struct {
+-         uint8_t wait_sb_mask;
++         uint16_t wait_sb_mask;
+          uint8_t wait_subqueue_mask;
+       } barrier;
+ 
+diff --git a/src/panfrost/vulkan/panvk_vX_device.c b/src/panfrost/vulkan/panvk_vX_device.c
+index c7b5ea9..892fe18 100644
+--- a/src/panfrost/vulkan/panvk_vX_device.c
++++ b/src/panfrost/vulkan/panvk_vX_device.c
+@@ -569,6 +569,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
+    device->csf.sb.count = csif_info->scoreboard_slot_count;
+    device->csf.sb.all_mask = (uint16_t)BITFIELD_MASK(csif_info->scoreboard_slot_count);
+ 
++   static_assert(PANVK_SB_ITER_START < CS_MAX_SB_COUNT,
++                 "Insufficient SB count");
+    assert(device->csf.sb.count > PANVK_SB_ITER_START);
+    device->csf.sb.iter_count = device->csf.sb.count - PANVK_SB_ITER_START;
+ 
