@@ -1,0 +1,40 @@
+diff --git a/src/panfrost/vulkan/panvk_vX_shader.c b/src/panfrost/vulkan/panvk_vX_shader.c
+index 62012dc..ae21432 100644
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -4011,15 +4011,16 @@ panvk_compile_shader(struct panvk_device *dev,
+ 
+       nir_shader *nir = info->nir;
+ 
++      bool allow_merging_workgroups = false;
+ #if PAN_ARCH >= 9
+       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+-      variant->info.cs.allow_merging_workgroups =
++      allow_merging_workgroups =
+          valhall_can_merge_workgroups(nir);
+ 
+       /* With merged workgroups, we need to use different divergence analysis
+        * options to take into account that threads from different workgroups
+        * may be in the same subgroup */
+-      if (variant->info.cs.allow_merging_workgroups) {
++      if (allow_merging_workgroups) {
+          nir->options = pan_get_nir_shader_compiler_options(
+             PAN_ARCH, MESA_SHADER_COMPUTE, true);
+          /* Invalidate the old divergence analysis */
+@@ -4030,7 +4031,7 @@ panvk_compile_shader(struct panvk_device *dev,
+ 
+       panvk_lower_nir(dev, nir, info->set_layout_count, info->set_layouts,
+                       info->robustness, state, &shader->desc_info,
+-                      variant->info.cs.allow_merging_workgroups);
++                      allow_merging_workgroups);
+ 
+       variant->own_bin = true;
+ 
+@@ -4041,6 +4042,7 @@ panvk_compile_shader(struct panvk_device *dev,
+          panvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
+          return result;
+       }
++      variant->info.cs.allow_merging_workgroups = allow_merging_workgroups;
+       break;
+    }
+ 
