@@ -1,0 +1,32 @@
+diff --git a/PATCHES.md b/PATCHES.md
+index a0c876c..2c35101 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -714,3 +714,27 @@ GPU 侧实验补丁，仅做归档：**不在 `scripts/apply-patches.sh` 的 SER
+ * **风险/注意**：零拷贝要求窗口格式与 swapchain 格式一致（日志会打印
+   `present is a single queueBuffer` 或 `zero-copy unavailable: ...`）；回退路径仍保留，
+   合成器几何信息异常时可能出现过期帧。
++
++## 15. panvk 性能波次（2026-11-18）
++
++本轮本地优化共 13 个补丁，按提交顺序编号；均只改源码，不改变默认构建配置。
++kbase tiler heap 回退已由远程提交 `b6365fa` 收录，因此本地序列从 `019` 开始。
++
++| 补丁 | 作用 |
++| --- | --- |
++| `031-draw-batch.patch` | 合并状态相同的连续 `vkCmdDrawIndexed` 为一次多绘制间接绘制，减少 CS 作业与状态切换。 |
++| `030-fan-chunks.patch` | 大三角扇（含间接扇）在 GPU 上按块拆分（`fan_chunks.cl` / `fan_chunks.h`），避免单次绘制超出 gpu_prerast arena。 |
++| `029-gpu-prerast-lazy-arena.patch` | gpu_prerast 与细分 arena 改为首次使用时才分配并提交（v10+），避免每个 VkDevice 预占 64 + 96 MiB。 |
++| `028-bc-decode-barrier-scope.patch` | 收窄 BC 解码屏障的源/目标阶段与访问掩码，不再等待无关的顶点/tiler 工作。 |
++| `027-multidraw-one-indirect.patch` | `CmdDrawMultiEXT` / `CmdDrawMultiIndexedEXT` 折叠为一次间接绘制，N 个作业变 1 个。 |
++| `024-csf-16-scoreboards.patch` | v11 支持 16 个 scoreboard，迭代槽位数按 `CS_MAX_SB_COUNT - PANVK_SB_ITER_START` 计算。 |
++| `025-tiler-oom-store-flush.patch` | tiler OOM 异常处理路径先刷新挂起的存储，再上报错误。 |
++| `026-wsi-present-pipeline.patch` | X11 软件呈现流水化几何回复并遵循 damage 区域，减少每帧等待。 |
++| `022-depth-bounds-robustness.patch` | 内部 depth-bounds FS 显式传入 DISABLED 的 robustness 状态，避免缓冲区地址助手拒绝零值（DEVICE_DEFAULT）。 |
++| `023-merged-workgroups-variant.patch` | 合并 workgroup 的决策保存在 shader variant 上，编译结束后不再丢失。 |
++| `021-bifrost-nir-loop.patch` | bifrost 降低流程中保留 NIR 循环结构。 |
++| `020-kraid-branch-fusion.patch` | Kraid 增加分支对合并优化。 |
++| `019-uqueue-fork-restart.patch` | fork 子进程中重启 u_queue 工作线程，避免继承父进程的线程状态。 |
++
++注意：`PANVK_DRAW_BATCH` 为可选开关，源码中默认关闭（需 `PANVK_DRAW_BATCH=1`，
++Android 为 `debug.mesa.panvk.draw.batch=1` 才启用），不影响默认行为。
