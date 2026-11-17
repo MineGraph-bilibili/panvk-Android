@@ -1,0 +1,102 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+index 3f1520a..b21f315 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -6591,6 +6591,46 @@ panvk_per_arch(CmdDrawMultiEXT)(VkCommandBuffer commandBuffer,
+    assert(firstInstance < INT32_MAX);
+ 
+    const uint8_t *cursor = (const uint8_t *)pVertexInfo;
++
++   /* Batch the whole multi-draw into one indirect draw when the hardware
++    * path can handle it. This turns N command-stream jobs into one job and
++    * keeps the per-draw parameters (firstVertex/firstInstance) in the
++    * indirect buffer, so primitive and draw ID semantics are unchanged.
++    */
++   if (drawCount > 1 && !cmdbuf->state.gfx.gs.shader &&
++       !cmdbuf->state.gfx.tes.shader) {
++      const size_t cmds_size = drawCount * sizeof(VkDrawIndirectCommand);
++      struct pan_ptr cmds = panvk_cmd_alloc_dev_mem(cmdbuf, desc, cmds_size, 16);
++
++      if (cmds.gpu) {
++         VkDrawIndirectCommand *out = cmds.cpu;
++
++         for (uint32_t i = 0; i < drawCount; i++) {
++            const VkMultiDrawInfoEXT *info =
++               (const VkMultiDrawInfoEXT *)cursor;
++
++            out[i] = (VkDrawIndirectCommand){
++               .vertexCount = info->vertexCount,
++               .instanceCount = instanceCount,
++               .firstVertex = info->firstVertex,
++               .firstInstance = firstInstance,
++            };
++
++            cursor += stride;
++         }
++
++         struct panvk_draw_info draw = {
++            .indirect.buffer_dev_addr = cmds.gpu,
++            .indirect.draw_count = drawCount,
++            .indirect.stride = sizeof(VkDrawIndirectCommand),
++            .prim = panvk_get_client_prim(cmdbuf),
++         };
++
++         panvk_cmd_draw(cmdbuf, draw);
++      }
++      return;
++   }
++
+    for (uint32_t i = 0; i < drawCount; i++) {
+       const VkMultiDrawInfoEXT *info = (const VkMultiDrawInfoEXT *)cursor;
+ 
+@@ -6630,6 +6670,50 @@ panvk_per_arch(CmdDrawMultiIndexedEXT)(VkCommandBuffer commandBuffer,
+    assert(firstInstance < INT32_MAX);
+ 
+    const uint8_t *cursor = (const uint8_t *)pIndexInfo;
++
++   /* Same as CmdDrawMultiEXT: keep all draws in one indirect buffer so the
++    * vertex/tiler queue processes them in a single job. GS/TES keep the
++    * per-draw path because they need the polygon pipeline per draw.
++    */
++   if (drawCount > 1 && !cmdbuf->state.gfx.gs.shader &&
++       !cmdbuf->state.gfx.tes.shader) {
++      const size_t cmds_size =
++         drawCount * sizeof(VkDrawIndexedIndirectCommand);
++      struct pan_ptr cmds = panvk_cmd_alloc_dev_mem(cmdbuf, desc, cmds_size, 16);
++
++      if (!cmds.gpu)
++         return;
++
++      VkDrawIndexedIndirectCommand *out = cmds.cpu;
++
++      for (uint32_t i = 0; i < drawCount; i++) {
++         const VkMultiDrawIndexedInfoEXT *info =
++            (const VkMultiDrawIndexedInfoEXT *)cursor;
++
++         out[i] = (VkDrawIndexedIndirectCommand){
++            .indexCount = info->indexCount,
++            .instanceCount = instanceCount,
++            .firstIndex = info->firstIndex,
++            .vertexOffset =
++               pVertexOffset != NULL ? *pVertexOffset : info->vertexOffset,
++            .firstInstance = firstInstance,
++         };
++
++         cursor += stride;
++      }
++
++      struct panvk_draw_info draw = {
++         .index = panvk_draw_info_index(cmdbuf, 0),
++         .indirect.buffer_dev_addr = cmds.gpu,
++         .indirect.draw_count = drawCount,
++         .indirect.stride = sizeof(VkDrawIndexedIndirectCommand),
++         .prim = panvk_get_client_prim(cmdbuf),
++      };
++
++      panvk_cmd_draw(cmdbuf, draw);
++      return;
++   }
++
+    for (uint32_t i = 0; i < drawCount; i++) {
+       const VkMultiDrawIndexedInfoEXT *info =
+          (const VkMultiDrawIndexedInfoEXT *)cursor;
