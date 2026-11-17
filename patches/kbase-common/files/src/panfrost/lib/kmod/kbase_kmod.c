@@ -158,6 +158,11 @@ struct kbase_kmod_dev {
     * MEM_ALLOC path. */
    bool no_mem_alloc_ex;
 
+   /* Some vendor kernels report uAPI >= 1.14 but only implement the 1.13
+    * CS_TILER_HEAP_INIT layout.  Set on the first ENOTTY/EINVAL so later
+    * heap creations skip the modern ioctl. */
+   bool tiler_heap_legacy;
+
    /* CSF interface information (CSF only), queried from
     * KBASE_IOCTL_CS_GET_GLB_IFACE and stored in the panthor uAPI layout
     * so CSF-generic code can consume either backend. */
@@ -1275,12 +1280,18 @@ kbase_kmod_csf_tiler_heap_create(struct pan_kmod_dev *dev,
                                  uint64_t *heap_ctx_va,
                                  uint64_t *first_chunk_va)
 {
+   struct kbase_kmod_dev *kbase_dev =
+      container_of(dev, struct kbase_kmod_dev, base);
+
    STATIC_ASSERT(sizeof(union kbase_ioctl_cs_tiler_heap_init) == 24);
    STATIC_ASSERT(sizeof(union kbase_ioctl_cs_tiler_heap_init_1_13) == 16);
 
    /* On uAPI 1.14+, the ioctl layout contains buf_desc_va, which enables the
-    * kernel's automated hardware tiler chunk reclamation scanner. */
-   if (pan_kmod_driver_version_at_least(&dev->driver, 1, 14)) {
+    * kernel's automated hardware tiler chunk reclamation scanner.  Some
+    * vendor kernels advertise 1.18 but only implement the 1.13 layout, so
+    * cache the rejection and use the legacy ioctl directly from then on. */
+   if (!kbase_dev->tiler_heap_legacy &&
+       pan_kmod_driver_version_at_least(&dev->driver, 1, 14)) {
       union kbase_ioctl_cs_tiler_heap_init req = {
          .in = {
             .chunk_size = chunk_size,
@@ -1298,9 +1309,15 @@ kbase_kmod_csf_tiler_heap_create(struct pan_kmod_dev *dev,
          return 0;
       }
 
-      mesa_logw("kbase: modern CS_TILER_HEAP_INIT failed: %s; "
-                "falling back to 1.13 legacy layout",
-                strerror(errno));
+      int err = errno;
+      if (err == ENOTTY || err == EINVAL) {
+         kbase_dev->tiler_heap_legacy = true;
+         mesa_logi("kbase: modern CS_TILER_HEAP_INIT unsupported (%s); "
+                   "using 1.13 legacy layout", strerror(err));
+      } else {
+         mesa_logw("kbase: modern CS_TILER_HEAP_INIT failed: %s; "
+                   "falling back to 1.13 legacy layout", strerror(err));
+      }
    }
 
    /* Legacy 1.13 request for older kernels */
