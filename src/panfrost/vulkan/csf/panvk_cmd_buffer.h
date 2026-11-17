@@ -600,13 +600,14 @@ struct panvk_cond_render_state {
 /* Consecutive vkCmdDrawIndexed calls with the same state are collected and
  * emitted as one multi-draw. Any state-changing command flushes the batch;
  * the dynamic state and descriptor-update generation are also checked at
- * draw time so common-code setters cannot slip through.
+ * draw time so common-code setters cannot slip through. The per-draw
+ * arguments of vkCmdDrawIndexed (indexCount, instanceCount, firstIndex,
+ * vertexOffset, firstInstance) live in the indirect commands, so a batch may
+ * mix them.
  */
 struct panvk_draw_batch {
    bool active;
    uint32_t count;
-   uint32_t instance_count;
-   uint32_t first_instance;
    uint32_t index_size;
    enum mesa_prim prim;
    uint64_t desc_gen;
@@ -615,7 +616,7 @@ struct panvk_draw_batch {
       struct vk_vertex_input_state vi;
       struct vk_sample_locations_state sl;
    } dynamic;
-   VkMultiDrawIndexedInfoEXT draws[PANVK_DRAW_BATCH_MAX];
+   VkDrawIndexedIndirectCommand draws[PANVK_DRAW_BATCH_MAX];
 };
 
 struct panvk_cmd_buffer {
