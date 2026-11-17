@@ -595,6 +595,29 @@ struct panvk_cond_render_state {
    enum mali_cs_condition exec_cond;
 };
 
+#define PANVK_DRAW_BATCH_MAX 64
+
+/* Consecutive vkCmdDrawIndexed calls with the same state are collected and
+ * emitted as one multi-draw. Any state-changing command flushes the batch;
+ * the dynamic state and descriptor-update generation are also checked at
+ * draw time so common-code setters cannot slip through.
+ */
+struct panvk_draw_batch {
+   bool active;
+   uint32_t count;
+   uint32_t instance_count;
+   uint32_t first_instance;
+   uint32_t index_size;
+   enum mesa_prim prim;
+   uint64_t desc_gen;
+   struct vk_dynamic_graphics_state dyn;
+   struct {
+      struct vk_vertex_input_state vi;
+      struct vk_sample_locations_state sl;
+   } dynamic;
+   VkMultiDrawIndexedInfoEXT draws[PANVK_DRAW_BATCH_MAX];
+};
+
 struct panvk_cmd_buffer {
    struct vk_command_buffer vk;
    VkCommandBufferUsageFlags flags;
@@ -602,6 +625,8 @@ struct panvk_cmd_buffer {
    struct panvk_pool desc_pool;
    struct panvk_pool tls_pool;
    struct list_head push_sets;
+
+   struct panvk_draw_batch draw_batch;
 
    struct {
       struct u_trace uts[PANVK_SUBQUEUE_COUNT];
@@ -647,6 +672,9 @@ struct panvk_cmd_buffer {
     * freed, so outgrown device TLS BOs can go. */
    struct util_dynarray dev_tls_refs;
 };
+
+void panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf);
+void panvk_per_arch(cmd_draw_batch_reset)(struct panvk_cmd_buffer *cmdbuf);
 
 struct panvk_vmr_segment {
    uint64_t addr[PANVK_SUBQUEUE_COUNT];

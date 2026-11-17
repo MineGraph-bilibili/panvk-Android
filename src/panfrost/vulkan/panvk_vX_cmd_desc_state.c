@@ -391,6 +391,9 @@ panvk_per_arch(CmdBindDescriptorSets2KHR)(
    const VkBindDescriptorSetsInfoKHR *pBindDescriptorSetsInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
 
    /* TODO: Invalidate only if the shader tables are disturbed */
    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
@@ -446,6 +449,9 @@ panvk_per_arch(CmdPushDescriptorSet2KHR)(
    const VkPushDescriptorSetInfoKHR *pPushDescriptorSetInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
 
    if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
       push_desc_set_write(cmdbuf, &cmdbuf->state.gfx.desc_state,
@@ -470,6 +476,9 @@ panvk_per_arch(CmdPushDescriptorSetWithTemplate2KHR)(
    VK_FROM_HANDLE(vk_descriptor_update_template, template,
                   pPushDescriptorSetWithTemplateInfo->descriptorUpdateTemplate);
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
    VK_FROM_HANDLE(vk_pipeline_layout, playout,
                   pPushDescriptorSetWithTemplateInfo->layout);
    const uint32_t set = pPushDescriptorSetWithTemplateInfo->set;

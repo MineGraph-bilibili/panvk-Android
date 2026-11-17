@@ -317,6 +317,9 @@ panvk_per_arch(CmdBlitImage2)(VkCommandBuffer commandBuffer,
                               const VkBlitImageInfo2 *pBlitImageInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
    panvk_diag_blits++;
    if (panvk_import_probe_is_image(pBlitImageInfo->dstImage)) {
       panvk_diag_present_writes++;
@@ -341,6 +344,9 @@ panvk_per_arch(CmdResolveImage2)(VkCommandBuffer commandBuffer,
                                  const VkResolveImageInfo2 *pResolveImageInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -361,6 +367,9 @@ panvk_per_arch(CmdClearAttachments)(VkCommandBuffer commandBuffer,
                                     const VkClearRect *pRects)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct panvk_cmd_meta_graphics_save_ctx save = {0};
    struct vk_meta_rendering_info render = {
@@ -403,6 +412,9 @@ panvk_per_arch(CmdClearDepthStencilImage)(
    const VkImageSubresourceRange *pRanges)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -426,6 +438,9 @@ panvk_per_arch(CmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image,
                                    const VkImageSubresourceRange *pRanges)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
    panvk_diag_clears++;
    if (panvk_import_probe_is_image(image))
       panvk_diag_present_clears++;
@@ -454,6 +469,9 @@ panvk_per_arch(CmdCopyMemoryKHR)(VkCommandBuffer commandBuffer,
                                  const VkCopyDeviceMemoryInfoKHR* pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -1294,6 +1312,9 @@ panvk_per_arch(CmdCopyMemoryToImageKHR)(
 
    if (bc_img->bc_afrc) {
       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+      #if PAN_ARCH >= 10
+      panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+      #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -1329,6 +1350,9 @@ panvk_per_arch(CmdCopyMemoryToImageKHR)(
 
    if (bc_img->bc_emul) {
       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+      #if PAN_ARCH >= 10
+      panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+      #endif
       struct panvk_cmd_meta_compute_save_ctx save = {0};
       const uint32_t blk_B = vk_format_get_blocksize(bc_img->vk.format);
 
@@ -1365,6 +1389,9 @@ copy_memory_to_image_raw(
    const VkCopyDeviceMemoryImageInfoKHR* pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    VK_FROM_HANDLE(panvk_image, img, pCopyMemoryInfo->image);
 
@@ -1410,6 +1437,9 @@ panvk_per_arch(CmdCopyImageToMemoryKHR)(
    const VkCopyDeviceMemoryImageInfoKHR* pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -1444,6 +1474,9 @@ panvk_per_arch(CmdFillBuffer)(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
                               uint32_t data)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -1499,6 +1532,9 @@ panvk_per_arch(CmdUpdateBuffer)(VkCommandBuffer commandBuffer,
                                 VkDeviceSize dataSize, const void *pData)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -1738,6 +1774,9 @@ panvk_per_arch(CmdCopyImage2)(VkCommandBuffer commandBuffer,
 
    if (bc_src->bc_noraw || bc_dst->bc_noraw) {
       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+      #if PAN_ARCH >= 10
+      panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+      #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -1752,6 +1791,9 @@ panvk_per_arch(CmdCopyImage2)(VkCommandBuffer commandBuffer,
       return;
 
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
    const bool src_blocks = vk_format_is_compressed(bc_src->vk.format);
 
    if (bc_dst->bc_afrc) {
@@ -1800,6 +1842,9 @@ copy_image_raw(VkCommandBuffer commandBuffer,
                const VkCopyImageInfo2 *pCopyImageInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    VK_FROM_HANDLE(panvk_image, src_img, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(panvk_image, dst_img, pCopyImageInfo->dstImage);
@@ -2010,6 +2055,9 @@ panvk_per_arch(CmdCopyMemoryIndirectKHR)(
    const VkCopyMemoryIndirectInfoKHR *pCopyMemoryIndirectInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   #if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+   #endif
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);

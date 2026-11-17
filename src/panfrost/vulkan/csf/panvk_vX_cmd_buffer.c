@@ -623,6 +623,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 panvk_per_arch(EndCommandBuffer)(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_END);
 
@@ -1604,6 +1605,7 @@ panvk_per_arch(CmdPipelineBarrier2)(VkCommandBuffer commandBuffer,
                                     const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    struct panvk_cs_deps deps = {0};
 
    {
@@ -1822,6 +1824,7 @@ panvk_reset_cmdbuf(struct vk_command_buffer *vk_cmdbuf,
       cs_builder_fini(&cmdbuf->state.cs[i].builder);
 
    memset(&cmdbuf->state, 0, sizeof(cmdbuf->state));
+   panvk_per_arch(cmd_draw_batch_reset)(cmdbuf);
    util_dynarray_clear(&cmdbuf->vmr_segs);
    init_cs_builders(cmdbuf);
 }
@@ -1936,6 +1939,7 @@ panvk_per_arch(BeginCommandBuffer)(VkCommandBuffer commandBuffer,
 
    vk_command_buffer_begin(&cmdbuf->vk, pBeginInfo);
    cmdbuf->flags = pBeginInfo->flags;
+   panvk_per_arch(cmd_draw_batch_reset)(cmdbuf);
 
    /* Warm the BC transcode pipelines off-thread before the first upload. */
    panvk_per_arch(bc_prewarm)(to_panvk_device(cmdbuf->vk.base.device));
@@ -1993,6 +1997,7 @@ panvk_per_arch(CmdExecuteCommands)(VkCommandBuffer commandBuffer,
                                    const VkCommandBuffer *pCommandBuffers)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, primary, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(primary);
    panvk_cmd_rp_merge_flush_pending(primary);
    panvk_cmd_lazy_vt_flush_pending(primary, PANVK_LAZY_VT_EXEC);
 

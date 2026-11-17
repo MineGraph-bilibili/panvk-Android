@@ -6664,6 +6664,7 @@ panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
                         uint32_t firstInstance)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    if (instanceCount == 0 || vertexCount == 0)
       return;
@@ -6692,6 +6693,176 @@ panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
    panvk_cmd_draw(cmdbuf, draw);
 }
 
+static bool
+draw_batch_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_DRAW_BATCH", false);
+
+   return enabled;
+}
+
+void
+panvk_per_arch(cmd_draw_batch_reset)(struct panvk_cmd_buffer *cmdbuf)
+{
+   cmdbuf->draw_batch.active = false;
+   cmdbuf->draw_batch.count = 0;
+}
+
+static bool
+draw_batch_state_ok(struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct panvk_cmd_graphics_state *gfx = &cmdbuf->state.gfx;
+
+   if (!draw_batch_enabled())
+      return false;
+
+   /* The multi-draw path has no GS/TES support in the indirect lowering. */
+   if (gfx->gs.shader || gfx->tes.shader)
+      return false;
+
+   /* gl_DrawID is the index inside the indirect buffer: merging separate
+    * draws into one multi-draw would turn 0 into 0,1,2,... */
+   if ((gfx->vs.shader && gfx->vs.shader->uses_draw_id) ||
+       (gfx->fs.shader && gfx->fs.shader->uses_draw_id))
+      return false;
+
+   /* Internal meta draws have their own state and must not be folded in. */
+   if (gfx->vk_meta)
+      return false;
+
+   /* A query or transform feedback write between draws is observable. */
+   if (gfx->xfb.active)
+      return false;
+   if (gfx->occlusion_query.ptr)
+      return false;
+   if (gfx->prims_generated_query.ptr)
+      return false;
+   if (gfx->pstats_query.report || gfx->pstats_query.mask)
+      return false;
+
+   if (cmdbuf->state.cond_render.enabled ||
+       cmdbuf->state.cond_render.inherited)
+      return false;
+
+   return true;
+}
+
+static void
+draw_batch_begin(struct panvk_cmd_buffer *cmdbuf, uint32_t instance_count,
+                 uint32_t first_instance)
+{
+   struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
+   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+
+   batch->active = true;
+   batch->count = 0;
+   batch->instance_count = instance_count;
+   batch->first_instance = first_instance;
+   batch->index_size = cmdbuf->state.gfx.ib.index_size;
+   batch->prim = panvk_get_client_prim(cmdbuf);
+   batch->desc_gen = dev->desc_update_gen;
+   memcpy(&batch->dyn, &cmdbuf->vk.dynamic_graphics_state,
+          sizeof(batch->dyn));
+   memcpy(&batch->dynamic, &cmdbuf->state.gfx.dynamic,
+          sizeof(batch->dynamic));
+}
+
+static bool
+draw_batch_matches(struct panvk_cmd_buffer *cmdbuf, uint32_t instance_count,
+                   uint32_t first_instance)
+{
+   struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
+   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+
+   return batch->instance_count == instance_count &&
+          batch->first_instance == first_instance &&
+          batch->index_size == cmdbuf->state.gfx.ib.index_size &&
+          batch->prim == panvk_get_client_prim(cmdbuf) &&
+          batch->desc_gen == dev->desc_update_gen &&
+          memcmp(&batch->dyn, &cmdbuf->vk.dynamic_graphics_state,
+                 sizeof(batch->dyn)) == 0 &&
+          memcmp(&batch->dynamic, &cmdbuf->state.gfx.dynamic,
+                 sizeof(batch->dynamic)) == 0;
+}
+
+void
+panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
+{
+   struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
+
+   if (!batch->count)
+      return;
+
+   const uint32_t draw_count = batch->count;
+
+   batch->active = false;
+   batch->count = 0;
+
+   if (draw_count == 1) {
+      const VkMultiDrawIndexedInfoEXT *info = &batch->draws[0];
+
+      struct panvk_draw_info draw = {
+         .index = panvk_draw_info_index(cmdbuf, info->firstIndex),
+         .vertex.base = info->vertexOffset,
+         .vertex.count = info->indexCount,
+         .instance.count = batch->instance_count,
+         .instance.base = batch->first_instance,
+         .prim = batch->prim,
+      };
+
+      panvk_cmd_draw(cmdbuf, draw);
+      return;
+   }
+
+   const size_t cmds_size = draw_count * sizeof(VkDrawIndexedIndirectCommand);
+   struct pan_ptr cmds = panvk_cmd_alloc_dev_mem(cmdbuf, desc, cmds_size, 16);
+
+   if (!cmds.gpu) {
+      for (uint32_t i = 0; i < draw_count; i++) {
+         const VkMultiDrawIndexedInfoEXT *info = &batch->draws[i];
+
+         struct panvk_draw_info draw = {
+            .index = panvk_draw_info_index(cmdbuf, info->firstIndex),
+            .vertex.base = info->vertexOffset,
+            .vertex.count = info->indexCount,
+            .instance.count = batch->instance_count,
+            .instance.base = batch->first_instance,
+            .prim = batch->prim,
+         };
+
+         panvk_cmd_draw(cmdbuf, draw);
+      }
+      return;
+   }
+
+   VkDrawIndexedIndirectCommand *out = cmds.cpu;
+
+   for (uint32_t i = 0; i < draw_count; i++) {
+      const VkMultiDrawIndexedInfoEXT *info = &batch->draws[i];
+
+      out[i] = (VkDrawIndexedIndirectCommand){
+         .indexCount = info->indexCount,
+         .instanceCount = batch->instance_count,
+         .firstIndex = info->firstIndex,
+         .vertexOffset = info->vertexOffset,
+         .firstInstance = batch->first_instance,
+      };
+   }
+
+   struct panvk_draw_info draw = {
+      .index = panvk_draw_info_index(cmdbuf, 0),
+      .indirect.buffer_dev_addr = cmds.gpu,
+      .indirect.draw_count = draw_count,
+      .indirect.stride = sizeof(VkDrawIndexedIndirectCommand),
+      .prim = batch->prim,
+   };
+
+   panvk_cmd_draw(cmdbuf, draw);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
                                uint32_t indexCount, uint32_t instanceCount,
@@ -6711,6 +6882,27 @@ panvk_per_arch(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
    /* gl_BaseInstance is a signed integer, and it should expose the value of
     * firstInstnace. */
    assert(firstInstance < INT32_MAX);
+
+   if (draw_batch_state_ok(cmdbuf)) {
+      struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
+
+      if (batch->active &&
+          (!draw_batch_matches(cmdbuf, instanceCount, firstInstance) ||
+           batch->count == PANVK_DRAW_BATCH_MAX))
+         panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+
+      if (!batch->active)
+         draw_batch_begin(cmdbuf, instanceCount, firstInstance);
+
+      batch->draws[batch->count++] = (VkMultiDrawIndexedInfoEXT){
+         .firstIndex = firstIndex,
+         .indexCount = indexCount,
+         .vertexOffset = vertexOffset,
+      };
+      return;
+   }
+
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    struct panvk_draw_info draw = {
       .index = panvk_draw_info_index(cmdbuf, firstIndex),
@@ -6733,6 +6925,7 @@ panvk_per_arch(CmdDrawMultiEXT)(VkCommandBuffer commandBuffer,
                                 uint32_t stride)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    if (instanceCount == 0 || drawCount == 0)
       return;
@@ -6812,6 +7005,7 @@ panvk_per_arch(CmdDrawMultiIndexedEXT)(VkCommandBuffer commandBuffer,
                                        const int32_t *pVertexOffset)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    if (instanceCount == 0 || drawCount == 0)
       return;
@@ -6894,6 +7088,7 @@ panvk_per_arch(CmdDrawIndirect)(VkCommandBuffer commandBuffer, VkBuffer _buffer,
                                 uint32_t stride)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(panvk_buffer, buffer, _buffer);
 
    if (drawCount == 0)
@@ -6917,6 +7112,7 @@ panvk_per_arch(CmdDrawIndexedIndirect)(VkCommandBuffer commandBuffer,
                                        uint32_t drawCount, uint32_t stride)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(panvk_buffer, buffer, _buffer);
 
    if (drawCount == 0)
@@ -6943,6 +7139,7 @@ panvk_per_arch(CmdDrawIndirectCount)(VkCommandBuffer commandBuffer,
                                      uint32_t stride)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(panvk_buffer, buffer, _buffer);
    VK_FROM_HANDLE(panvk_buffer, count_buffer, countBuffer);
 
@@ -6971,6 +7168,7 @@ panvk_per_arch(CmdDrawIndexedIndirectCount)(VkCommandBuffer commandBuffer,
                                             uint32_t stride)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(panvk_buffer, buffer, _buffer);
    VK_FROM_HANDLE(panvk_buffer, count_buffer, countBuffer);
 
@@ -7211,6 +7409,7 @@ panvk_per_arch(CmdBeginRendering)(VkCommandBuffer commandBuffer,
                                   const VkRenderingInfo *pRenderingInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    panvk_diag_renders++;
    {
       extern void panvk_import_probe_set_render_target(VkImage img);
@@ -8271,6 +8470,7 @@ VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdEndRendering)(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    struct panvk_rp_merge *rp_merge = &cmdbuf->state.gfx.rp_merge;
    VkResult result;
 
@@ -8585,6 +8785,7 @@ panvk_per_arch(CmdBindTransformFeedbackBuffersEXT)(
    const VkDeviceSize *pSizes)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    for (uint32_t i = 0; i < bindingCount; i++) {
       VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
@@ -8618,6 +8819,7 @@ panvk_per_arch(CmdBeginTransformFeedbackEXT)(
    const VkDeviceSize *pCounterBufferOffsets)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    struct pan_ptr offsets = panvk_cmd_alloc_dev_mem(
       cmdbuf, desc, PANLIB_XFB_MAX_BUFFERS * sizeof(uint32_t), 16);
 
@@ -8658,6 +8860,7 @@ panvk_per_arch(CmdEndTransformFeedbackEXT)(
    const VkDeviceSize *pCounterBufferOffsets)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    const uint64_t offsets = cmdbuf->state.gfx.xfb.offsets;
 
@@ -8697,6 +8900,7 @@ panvk_per_arch(CmdDrawIndirectByteCountEXT)(
    uint32_t vertexStride)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(panvk_buffer, counter, counterBuffer);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
 
@@ -8735,6 +8939,7 @@ panvk_per_arch(CmdBindDescriptorBuffersEXT)(
    const VkDescriptorBufferBindingInfoEXT *pBindingInfos)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    for (uint32_t i = 0; i < MIN2(bufferCount, MAX_SETS); i++) {
       cmdbuf->state.bound_desc_buffers[i] = pBindingInfos[i].address;
@@ -8752,6 +8957,7 @@ panvk_per_arch(CmdSetDescriptorBufferOffsetsEXT)(
    const VkDeviceSize *pOffsets)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(vk_pipeline_layout, playout, layout);
    struct panvk_descriptor_state *desc_state =
       panvk_cmd_get_desc_state(cmdbuf, pipelineBindPoint);
@@ -8793,6 +8999,7 @@ panvk_per_arch(CmdBindDescriptorBufferEmbeddedSamplersEXT)(
    uint32_t set)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(vk_pipeline_layout, playout, layout);
    struct panvk_descriptor_state *desc_state =
       panvk_cmd_get_desc_state(cmdbuf, pipelineBindPoint);

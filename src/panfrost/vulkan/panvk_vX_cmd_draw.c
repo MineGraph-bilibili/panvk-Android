@@ -1214,6 +1214,9 @@ panvk_per_arch(CmdBindVertexBuffers2)(VkCommandBuffer commandBuffer,
                                       const VkDeviceSize *pStrides)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
 
    assert(firstBinding + bindingCount <= MAX_VBS);
 
@@ -1249,6 +1252,9 @@ panvk_per_arch(CmdBindIndexBuffer2)(VkCommandBuffer commandBuffer,
                                     VkDeviceSize size, VkIndexType indexType)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
    VK_FROM_HANDLE(panvk_buffer, buf, buffer);
 
    if (buf) {

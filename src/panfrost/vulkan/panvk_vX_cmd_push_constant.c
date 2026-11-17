@@ -101,6 +101,9 @@ panvk_per_arch(CmdPushConstants2KHR)(
    const VkPushConstantsInfoKHR *pPushConstantsInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
 
    if (pPushConstantsInfo->stageFlags &
        (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |

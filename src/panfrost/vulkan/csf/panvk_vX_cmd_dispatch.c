@@ -437,6 +437,7 @@ panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
                                 uint32_t groupCountY, uint32_t groupCountZ)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    const struct panvk_shader_variant *shader =
       panvk_shader_only_variant(cmdbuf->state.compute.shader);
    struct panvk_dispatch_info info = {
@@ -473,6 +474,7 @@ panvk_per_arch(CmdDispatchIndirect)(VkCommandBuffer commandBuffer,
                                     VkBuffer _buffer, VkDeviceSize offset)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    VK_FROM_HANDLE(panvk_buffer, buffer, _buffer);
    uint64_t buffer_gpu = panvk_buffer_gpu_ptr(buffer, offset);
    struct panvk_dispatch_info info = {

@@ -3472,6 +3472,25 @@ panvk_lower_cull_dist_flags_intr(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+static bool
+panvk_nir_uses_draw_id(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            if (nir_instr_as_intrinsic(instr)->intrinsic ==
+                nir_intrinsic_load_draw_id)
+               return true;
+         }
+      }
+   }
+
+   return false;
+}
+
 static const struct vk_shader_ops panvk_shader_ops;
 
 static VkResult
@@ -3497,6 +3516,8 @@ panvk_compile_shader(struct panvk_device *dev,
                              pAllocator, size);
    if (shader == NULL)
       return panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   shader->uses_draw_id = panvk_nir_uses_draw_id(info->nir);
 
 #if PAN_ARCH >= 9
    shader->gpu_prerast.io.abi_version = PANVK_GPU_PRERAST_ABI_VERSION;
@@ -5105,6 +5126,10 @@ panvk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
 {
    struct panvk_cmd_buffer *cmd =
       container_of(vk_cmd, struct panvk_cmd_buffer, vk);
+
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmd);
+#endif
 
    for (uint32_t i = 0; i < stage_count; i++) {
       struct panvk_shader *shader =

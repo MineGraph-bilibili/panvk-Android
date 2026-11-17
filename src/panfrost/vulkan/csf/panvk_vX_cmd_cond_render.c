@@ -12,6 +12,7 @@ panvk_per_arch(CmdBeginConditionalRendering2EXT)(
    const VkConditionalRenderingBeginInfo2EXT *pConditionalRenderingBegin)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    assert(!cmdbuf->state.cond_render.enabled);
    cmdbuf->state.cond_render.enabled = true;
@@ -33,6 +34,7 @@ VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdEndConditionalRenderingEXT)(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    assert(cmdbuf->state.cond_render.enabled);
    cmdbuf->state.cond_render.enabled = false;

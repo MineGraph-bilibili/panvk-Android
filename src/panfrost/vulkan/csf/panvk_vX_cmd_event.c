@@ -16,6 +16,7 @@ panvk_per_arch(CmdResetEvent2)(VkCommandBuffer commandBuffer, VkEvent _event,
                                VkPipelineStageFlags2 stageMask)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_EVENT);
    VK_FROM_HANDLE(panvk_event, event, _event);
@@ -93,6 +94,7 @@ panvk_per_arch(CmdSetEvent2)(VkCommandBuffer commandBuffer, VkEvent _event,
                              const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_EVENT);
    VK_FROM_HANDLE(panvk_event, event, _event);
@@ -263,6 +265,7 @@ panvk_per_arch(CmdWaitEvents2)(VkCommandBuffer commandBuffer,
                                const VkDependencyInfo *pDependencyInfos)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_EVENT);
 

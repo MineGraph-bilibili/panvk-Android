@@ -1222,6 +1222,7 @@ panvk_per_arch(CmdResetQueryPool)(VkCommandBuffer commandBuffer,
                                   uint32_t queryCount)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmd, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmd);
    panvk_cmd_rp_merge_flush_pending(cmd);
    VK_FROM_HANDLE(panvk_query_pool, pool, queryPool);
 
@@ -1252,6 +1253,7 @@ panvk_per_arch(CmdBeginQueryIndexedEXT)(VkCommandBuffer commandBuffer,
                                         uint32_t index)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmd, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmd);
    panvk_cmd_rp_merge_flush_pending(cmd);
    VK_FROM_HANDLE(panvk_query_pool, pool, queryPool);
 
@@ -1286,6 +1288,7 @@ panvk_per_arch(CmdEndQueryIndexedEXT)(VkCommandBuffer commandBuffer,
                                       uint32_t index)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmd, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmd);
    panvk_cmd_rp_merge_flush_pending(cmd);
    VK_FROM_HANDLE(panvk_query_pool, pool, queryPool);
 
@@ -1320,6 +1323,7 @@ panvk_per_arch(CmdWriteTimestamp2)(VkCommandBuffer commandBuffer,
                                    VkQueryPool queryPool, uint32_t query)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmd, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmd);
    panvk_cmd_rp_merge_flush_pending(cmd);
    VK_FROM_HANDLE(panvk_query_pool, pool, queryPool);
 
@@ -1333,6 +1337,7 @@ panvk_per_arch(CmdCopyQueryPoolResults)(
    VkDeviceSize stride, VkQueryResultFlags flags)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmd, commandBuffer);
+   panvk_per_arch(cmd_draw_batch_flush)(cmd);
    panvk_cmd_rp_merge_flush_pending(cmd);
    VK_FROM_HANDLE(panvk_query_pool, pool, queryPool);
    VK_FROM_HANDLE(panvk_buffer, dst_buffer, dstBuffer);

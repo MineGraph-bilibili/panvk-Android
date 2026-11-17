@@ -20,6 +20,7 @@
 #include "vk_util.h"
 
 #include "util/bitset.h"
+#include "util/u_atomic.h"
 
 #include "genxml/gen_macros.h"
 
@@ -815,6 +816,9 @@ panvk_per_arch(UpdateDescriptorSets)(
    const VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount,
    const VkCopyDescriptorSet *pDescriptorCopies)
 {
+   VK_FROM_HANDLE(panvk_device, dev, _device);
+   p_atomic_inc_return(&dev->desc_update_gen);
+
    for (uint32_t i = 0; i < descriptorWriteCount; i++) {
       VK_FROM_HANDLE(panvk_descriptor_set, set, pDescriptorWrites[i].dstSet);
 
@@ -934,6 +938,9 @@ panvk_per_arch(UpdateDescriptorSetWithTemplate)(
    VkDevice _device, VkDescriptorSet descriptorSet,
    VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void *pData)
 {
+   VK_FROM_HANDLE(panvk_device, dev, _device);
+   p_atomic_inc_return(&dev->desc_update_gen);
+
    VK_FROM_HANDLE(panvk_descriptor_set, set, descriptorSet);
    VK_FROM_HANDLE(vk_descriptor_update_template, template,
                   descriptorUpdateTemplate);

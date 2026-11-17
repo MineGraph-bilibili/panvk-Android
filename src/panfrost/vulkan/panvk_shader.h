@@ -501,6 +501,11 @@ struct panvk_shader {
 
    struct panvk_shader_desc_info desc_info;
 
+   /* The application shader reads gl_DrawID. Folding several draws into one
+    * multi-draw would change the value for the second and later draws, so
+    * panvk_cmd_draw_batch must stay disabled for this shader. */
+   bool uses_draw_id;
+
 #if PAN_ARCH >= 9
    struct panvk_gpu_prerast_shader gpu_prerast;
 #endif
