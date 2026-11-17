@@ -1,0 +1,84 @@
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_meta.c b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+index 90ae1a9..90fc68a 100644
+--- a/src/panfrost/vulkan/panvk_vX_cmd_meta.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+@@ -982,10 +982,12 @@ bc_raw_plane_src(const struct panvk_image *img,
+  * dispatches can outlive a cross-CSG SYNC_WAIT of the other subqueues and
+  * get the CSG killed by the firmware (CSF group fatal, status 0x72/0x41);
+  * keeping every job short avoids that trigger. */
++DEBUG_GET_ONCE_NUM_OPTION(bc_chunk_opt, "PANVK_BC_CHUNK", 256)
++
+ static uint32_t
+ bc_chunk_texels(void)
+ {
+-   const int64_t chunk = debug_get_num_option("PANVK_BC_CHUNK", 256);
++   const int64_t chunk = debug_get_option_bc_chunk_opt();
+ 
+    if (chunk <= 0)
+       return 0; /* no chunking */
+@@ -993,7 +995,6 @@ bc_chunk_texels(void)
+    return MAX2((uint32_t)chunk & ~3u, 4u);
+ }
+ 
+-static uint32_t bc_trace_count;
+ 
+ /* Transcode the BC blocks of one copy region into bc_decoded. They come
+  * from src (block at the region origin, row and layer/slice strides) or,
+@@ -1094,16 +1095,6 @@ bc_decode_region(struct panvk_cmd_buffer *cmdbuf, struct panvk_image *img,
+    const uint32_t chunk_w = chunk ? chunk : w;
+    const uint32_t chunk_h = chunk ? chunk : h;
+ 
+-   const int64_t trace = debug_get_num_option("PANVK_BC_TRACE", 0);
+-   if (trace > 0 && p_atomic_inc_return(&bc_trace_count) <= (uint32_t)trace) {
+-      const uint32_t cw = MIN2(chunk_w, w);
+-      const uint32_t ch = MIN2(chunk_h, h);
+-
+-      mesa_logi("bctrace: fmt=0x%x mip=%u extent=%ux%ux%u chunk=%u grid=%ux%u",
+-                img->vk.format, level, w, h, d, chunk,
+-                DIV_ROUND_UP(DIV_ROUND_UP(cw, 4), 8),
+-                DIV_ROUND_UP(DIV_ROUND_UP(ch, 4), 8));
+-   }
+ 
+    for (uint32_t cy = 0; cy < h; cy += chunk_h) {
+       const uint32_t ch = MIN2(chunk_h, h - cy);
+@@ -1151,8 +1142,21 @@ bc_decode_barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 dst_stage,
+ {
+    const VkMemoryBarrier2 mem_barrier = {
+       .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+-      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+-      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
++      /* The decode reads the raw BC plane (written by a transfer, a compute
++       * shader, a colour attachment resolve or the host) and writes either
++       * the compute-decoded plane or the AFRC shadow. Keep those writers in
++       * the source scope, but don't make the decode wait for unrelated
++       * vertex/tiler work.
++       */
++      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
++                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
++                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
++                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
++                      VK_PIPELINE_STAGE_2_HOST_BIT,
++      .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT |
++                       VK_ACCESS_2_SHADER_WRITE_BIT |
++                       VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
++                       VK_ACCESS_2_HOST_WRITE_BIT,
+       .dstStageMask = dst_stage,
+       .dstAccessMask = dst_access,
+    };
+@@ -1269,8 +1273,14 @@ panvk_per_arch(cmd_bc_decode_zero_initialized)(
+ 
+    if (started || any_afrc)
+       bc_decode_barrier(panvk_cmd_buffer_to_handle(cmdbuf),
+-                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+-                        VK_ACCESS_2_MEMORY_READ_BIT);
++                        VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
++                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
++                           VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
++                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
++                           VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
++                           VK_ACCESS_2_TRANSFER_READ_BIT |
++                           VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
++                           VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
