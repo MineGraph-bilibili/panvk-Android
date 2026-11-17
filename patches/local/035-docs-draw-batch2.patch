@@ -1,0 +1,21 @@
+diff --git a/PATCHES.md b/PATCHES.md
+index 2c35101..eb48a93 100644
+--- a/PATCHES.md
++++ b/PATCHES.md
+@@ -722,6 +722,8 @@ kbase tiler heap 回退已由远程提交 `b6365fa` 收录，因此本地序列
+ 
+ | 补丁 | 作用 |
+ | --- | --- |
++| `034-draw-batch-zero-draw-id.patch` | 合批后的多绘制统一把 `gl_DrawID` 读作 0（索引与非索引间接循环、gpu_prerast 参数、v9 sysval），并移除「着色器读取 gl_DrawID 就禁用合批」的限制。 |
++| `033-draw-batch-per-draw-args.patch` | 合批条目直接保存 `VkDrawIndexedIndirectCommand`，连续 draw 的 `indexCount` / `instanceCount` / `firstIndex` / `vertexOffset` / `firstInstance` 可以各不相同。 |
+ | `031-draw-batch.patch` | 合并状态相同的连续 `vkCmdDrawIndexed` 为一次多绘制间接绘制，减少 CS 作业与状态切换。 |
+ | `030-fan-chunks.patch` | 大三角扇（含间接扇）在 GPU 上按块拆分（`fan_chunks.cl` / `fan_chunks.h`），避免单次绘制超出 gpu_prerast arena。 |
+ | `029-gpu-prerast-lazy-arena.patch` | gpu_prerast 与细分 arena 改为首次使用时才分配并提交（v10+），避免每个 VkDevice 预占 64 + 96 MiB。 |
+@@ -737,4 +739,6 @@ kbase tiler heap 回退已由远程提交 `b6365fa` 收录，因此本地序列
+ | `019-uqueue-fork-restart.patch` | fork 子进程中重启 u_queue 工作线程，避免继承父进程的线程状态。 |
+ 
+ 注意：`PANVK_DRAW_BATCH` 为可选开关，源码中默认关闭（需 `PANVK_DRAW_BATCH=1`，
+-Android 为 `debug.mesa.panvk.draw.batch=1` 才启用），不影响默认行为。
++Android 为 `debug.mesa.panvk.draw.batch=1` 才启用），不影响默认行为。合批只改变
++命令提交粒度，合批后的每次绘制仍按各自动作（实例数、基实例、索引偏移等）执行，
++`gl_DrawID` 保持 0，与逐条 `vkCmdDrawIndexed` 一致。
