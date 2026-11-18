@@ -499,27 +499,27 @@ kbase_subqueue_reserve_ring(struct panvk_gpu_queue *queue,
  * tiler_heap.desc (the geometry buffer starts at +4096). */
 #define KBASE_HEAP_DESC_SLOT_STRIDE 64
 
-/* Per-heap chunk limit: the configured count, but never below 200 MiB. The
- * panthor-derived limit of 64 chunks stranded large geometry workloads on
- * the tiler iterator, and the floor is kept in bytes so that larger chunks
- * do not raise it. */
+/* Per-heap chunk defaults.  With the default 8 MiB chunk size the initial
+ * heap is 24 chunks (192 MiB) and may grow to 400 chunks (3200 MiB).  The
+ * initial count must cover the largest single submission: the GPU waits on
+ * the tiler iterator (and eventually hits the 10s job timeout) if a frame's
+ * polygon list does not fit. */
+#define KBASE_TILER_HEAP_INITIAL_CHUNKS 24u
+#define KBASE_TILER_HEAP_MAX_CHUNKS 400u
+
+/* Per-heap chunk limit: the configured count, but never below the default
+ * cap.  The panthor-derived limit of 64 chunks stranded large geometry
+ * workloads on the tiler iterator. */
 static uint32_t
 kbase_tiler_heap_max_chunks(const struct panvk_physical_device *phys_dev)
 {
-   return MAX2(phys_dev->csf.tiler.max_chunks,
-               DIV_ROUND_UP(200u << 20, phys_dev->csf.tiler.chunk_size));
+   return MAX2(phys_dev->csf.tiler.max_chunks, KBASE_TILER_HEAP_MAX_CHUNKS);
 }
-/* Initial heap must cover the largest single submission: the GPU waits on
- * the tiler iterator (and eventually hits the 10s job timeout) if a frame's
- * polygon list does not fit.  The old 10 MiB budget (2 chunks of 8 MiB) hung
- * on a test frame drawing 2.4M+ vertices in one submit, so budget 48 MiB,
- * which covers roughly 12M vertices at the observed ~4B/vertex. */
-#define KBASE_TILER_HEAP_INITIAL_BYTES (48u << 20)
 
 /* Heap geometry used by the kbase backend, overridable with
- * PANVK_KBASE_HEAP_CHUNKS=<initial>[,<max>].  The panthor defaults were sized
- * for a much larger heap and leave several MiB resident per context; the
- * initial chunk count is what matters for memory while idle. */
+ * PANVK_KBASE_HEAP_CHUNKS=<initial>[,<max>].  Defaults are 24 initial and
+ * 400 max chunks; the initial chunk count is what matters for memory while
+ * idle. */
 static void
 kbase_heap_chunks(const struct panvk_physical_device *phys_dev,
                   uint32_t *initial_chunks, uint32_t *max_chunks)
@@ -527,8 +527,7 @@ kbase_heap_chunks(const struct panvk_physical_device *phys_dev,
    static uint32_t initial, max;
 
    if (!initial) {
-      uint32_t initial_opt = DIV_ROUND_UP(KBASE_TILER_HEAP_INITIAL_BYTES,
-                                          phys_dev->csf.tiler.chunk_size);
+      uint32_t initial_opt = KBASE_TILER_HEAP_INITIAL_CHUNKS;
       uint32_t max_opt = kbase_tiler_heap_max_chunks(phys_dev);
       const char *str = debug_get_option("PANVK_KBASE_HEAP_CHUNKS", NULL);
 
