@@ -1791,6 +1791,7 @@ vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
     */
    vk_dynamic_graphics_state_dirty_all(&cmdbuf->vk.dynamic_graphics_state);
    gfx_state_set_all_dirty(cmdbuf);
+   panvk_per_arch(cmd_draw_static_cache_reset)(cmdbuf);
 }
 
 static void
@@ -1989,6 +1990,7 @@ panvk_cmd_invalidate_state(struct panvk_cmd_buffer *cmdbuf)
 
    vk_dynamic_graphics_state_dirty_all(&cmdbuf->vk.dynamic_graphics_state);
    gfx_state_set_all_dirty(cmdbuf);
+   panvk_per_arch(cmd_draw_static_cache_reset)(cmdbuf);
 }
 
 VKAPI_ATTR void VKAPI_CALL

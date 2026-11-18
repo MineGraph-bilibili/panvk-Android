@@ -3353,15 +3353,48 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf,
    }
 }
 
+/* IDVS system registers keep their value across jobs on a subqueue, so a draw
+ * that would write the same value again can skip the store. The cache is reset
+ * whenever the register file may have been changed behind our back (new CS
+ * stream, secondary command buffer).
+ */
+static inline void
+cs_move32_cached(struct cs_builder *b, struct cs_index reg, uint32_t value,
+                 bool *valid, uint32_t *cached)
+{
+   if (*valid && *cached == value)
+      return;
+
+   *valid = true;
+   *cached = value;
+   cs_move32_to(b, reg, value);
+}
+
+static inline void
+cs_move64_cached(struct cs_builder *b, struct cs_index reg, uint64_t value,
+                 bool *valid, uint64_t *cached)
+{
+   if (*valid && *cached == value)
+      return;
+
+   *valid = true;
+   *cached = value;
+   cs_move64_to(b, reg, value);
+}
+
 static void
-prepare_index_buffer(struct cs_builder *b,
+prepare_index_buffer(struct panvk_cmd_buffer *cmdbuf, struct cs_builder *b,
                      const struct panvk_draw_info *draw)
 {
    if (draw->index.index_size) {
-      cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_BUFFER_SIZE),
-                   draw->index.buffer_size);
-      cs_move64_to(b, cs_sr_reg64(b, IDVS, INDEX_BUFFER),
-                   draw->index.buffer_dev_addr);
+      cs_move32_cached(b, cs_sr_reg32(b, IDVS, INDEX_BUFFER_SIZE),
+                       draw->index.buffer_size,
+                       &cmdbuf->vt_sr_cache.ib_valid,
+                       &cmdbuf->vt_sr_cache.ib_size);
+      cs_move64_cached(b, cs_sr_reg64(b, IDVS, INDEX_BUFFER),
+                       draw->index.buffer_dev_addr,
+                       &cmdbuf->vt_sr_cache.ib_valid,
+                       &cmdbuf->vt_sr_cache.ib_addr);
    }
 }
 
@@ -3555,12 +3588,14 @@ prepare_draw(struct panvk_cmd_buffer *cmdbuf,
    prepare_fs(cmdbuf, fs);
 
    cs_update_vt_ctx(b) {
-      prepare_index_buffer(b, draw);
+      prepare_index_buffer(cmdbuf, b, draw);
 
       set_tiler_idvs_flags(b, cmdbuf, draw);
 
-      cs_move32_to(b, cs_sr_reg32(b, IDVS, VARY_SIZE),
-                   vs->info.varyings.formats.generic_size_B);
+      cs_move32_cached(b, cs_sr_reg32(b, IDVS, VARY_SIZE),
+                       vs->info.varyings.formats.generic_size_B,
+                       &cmdbuf->vt_sr_cache.vary_size_valid,
+                       &cmdbuf->vt_sr_cache.vary_size);
 
       struct pan_earlyzs_state earlyzs = {0};
 
@@ -3730,7 +3765,9 @@ launch_draw(struct panvk_cmd_buffer *cmdbuf,
    struct cs_index tracing_scratch_regs = cs_scratch_reg_tuple(b, 0, 4);
 
    cs_update_vt_ctx(b) {
-      cs_move32_to(b, cs_sr_reg32(b, IDVS, GLOBAL_ATTRIBUTE_OFFSET), 0);
+      cs_move32_cached(b, cs_sr_reg32(b, IDVS, GLOBAL_ATTRIBUTE_OFFSET), 0,
+                       &cmdbuf->vt_sr_cache.ga_offset_valid,
+                       &cmdbuf->vt_sr_cache.ga_offset);
       if (!draw->index_sr_set) {
          cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_COUNT), draw->vertex.count);
          cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_OFFSET), draw->index.offset);
@@ -3743,7 +3780,9 @@ launch_draw(struct panvk_cmd_buffer *cmdbuf,
        * zero-based to work around Mali's limitation on non-zero firstInstance
        * when a instance divisor is used.
        */
-      cs_move32_to(b, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), 0);
+      cs_move32_cached(b, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), 0,
+                       &cmdbuf->vt_sr_cache.instance_offset_valid,
+                       &cmdbuf->vt_sr_cache.instance_offset);
    }
 
    struct mali_primitive_flags_packed flags_override =
@@ -6733,10 +6772,17 @@ draw_batch_enabled(void)
 }
 
 void
+panvk_per_arch(cmd_draw_static_cache_reset)(struct panvk_cmd_buffer *cmdbuf)
+{
+   memset(&cmdbuf->vt_sr_cache, 0, sizeof(cmdbuf->vt_sr_cache));
+}
+
+void
 panvk_per_arch(cmd_draw_batch_reset)(struct panvk_cmd_buffer *cmdbuf)
 {
    cmdbuf->draw_batch.active = false;
    cmdbuf->draw_batch.count = 0;
+   panvk_per_arch(cmd_draw_static_cache_reset)(cmdbuf);
 }
 
 static bool

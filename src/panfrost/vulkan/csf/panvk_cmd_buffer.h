@@ -633,6 +633,23 @@ struct panvk_cmd_buffer {
 
    struct panvk_draw_batch draw_batch;
 
+   /* Values last written to the static IDVS system registers by this command
+    * buffer's CS. Draws that reuse the same pipeline and index buffer skip the
+    * redundant register writes. Invalidated whenever a new CS stream starts or
+    * another command buffer may have changed the register file.
+    */
+   struct {
+      bool ga_offset_valid;
+      uint32_t ga_offset;
+      bool instance_offset_valid;
+      uint32_t instance_offset;
+      bool vary_size_valid;
+      uint32_t vary_size;
+      bool ib_valid;
+      uint64_t ib_addr;
+      uint32_t ib_size;
+   } vt_sr_cache;
+
    struct {
       struct u_trace uts[PANVK_SUBQUEUE_COUNT];
    } utrace;
@@ -680,6 +697,7 @@ struct panvk_cmd_buffer {
 
 void panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf);
 void panvk_per_arch(cmd_draw_batch_reset)(struct panvk_cmd_buffer *cmdbuf);
+void panvk_per_arch(cmd_draw_static_cache_reset)(struct panvk_cmd_buffer *cmdbuf);
 
 struct panvk_vmr_segment {
    uint64_t addr[PANVK_SUBQUEUE_COUNT];
