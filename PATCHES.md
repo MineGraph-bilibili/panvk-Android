@@ -717,11 +717,15 @@ GPU 侧实验补丁，仅做归档：**不在 `scripts/apply-patches.sh` 的 SER
 
 ## 15. panvk 性能波次（2026-11-18）
 
-本轮本地优化共 13 个补丁，按提交顺序编号；均只改源码，不改变默认构建配置。
+本轮本地优化共 17 个补丁，按提交顺序编号；均只改源码，不改变默认构建配置。
 kbase tiler heap 回退已由远程提交 `b6365fa` 收录，因此本地序列从 `019` 开始。
 
 | 补丁 | 作用 |
 | --- | --- |
+| `039-submit-wait-dedup.patch` | 单次提交内对相同 `(sync, wait_value)` 的重复等待去重，避免重复的 CPU 等待。 |
+| `038-cs-static-sr-cache.patch` | 缓存每个命令缓冲最后写入的 `VARY_SIZE`、`INDEX_BUFFER`/`INDEX_BUFFER_SIZE`、`GLOBAL_ATTRIBUTE_OFFSET`、`INSTANCE_OFFSET`，同 pipeline/索引缓冲的连续绘制跳过重复 SR 写；命令缓冲开始、VMR 分段切割与执行 secondary 后失效。 |
+| `037-bind-noop.patch` | `vkCmdBindVertexBuffers2` / `vkCmdBindIndexBuffer2` 在地址、大小、stride、索引类型都未变化时直接返回，不打断合批也不重建顶点描述符。 |
+| `036-draw-batch-nonindexed.patch` | 自动合批扩展到非索引 `vkCmdDraw`；索引与非索引使用各自的间接命令格式，互不混合。 |
 | `034-draw-batch-zero-draw-id.patch` | 合批后的多绘制统一把 `gl_DrawID` 读作 0（索引与非索引间接循环、gpu_prerast 参数、v9 sysval），并移除「着色器读取 gl_DrawID 就禁用合批」的限制。 |
 | `033-draw-batch-per-draw-args.patch` | 合批条目直接保存 `VkDrawIndexedIndirectCommand`，连续 draw 的 `indexCount` / `instanceCount` / `firstIndex` / `vertexOffset` / `firstInstance` 可以各不相同。 |
 | `031-draw-batch.patch` | 合并状态相同的连续 `vkCmdDrawIndexed` 为一次多绘制间接绘制，减少 CS 作业与状态切换。 |
@@ -741,4 +745,5 @@ kbase tiler heap 回退已由远程提交 `b6365fa` 收录，因此本地序列�
 注意：`PANVK_DRAW_BATCH` 为可选开关，源码中默认关闭（需 `PANVK_DRAW_BATCH=1`，
 Android 为 `debug.mesa.panvk.draw.batch=1` 才启用），不影响默认行为。合批只改变
 命令提交粒度，合批后的每次绘制仍按各自动作（实例数、基实例、索引偏移等）执行，
-`gl_DrawID` 保持 0，与逐条 `vkCmdDrawIndexed` 一致。
+`gl_DrawID` 保持 0，与逐条 `vkCmdDraw` / `vkCmdDrawIndexed` 一致。静态 SR 缓存与
+绑定去重对所有绘制生效，不依赖该开关。
