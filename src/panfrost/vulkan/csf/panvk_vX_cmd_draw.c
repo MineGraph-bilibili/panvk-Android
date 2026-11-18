@@ -6661,13 +6661,16 @@ panvk_per_arch(cmd_prepare_exec_cmd_for_draws)(
    return prepare_oq(primary);
 }
 
+static bool draw_batch_state_ok(struct panvk_cmd_buffer *cmdbuf);
+static void draw_batch_begin(struct panvk_cmd_buffer *cmdbuf, bool indexed);
+static bool draw_batch_matches(struct panvk_cmd_buffer *cmdbuf, bool indexed);
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
                         uint32_t instanceCount, uint32_t firstVertex,
                         uint32_t firstInstance)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
-   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    if (instanceCount == 0 || vertexCount == 0)
       return;
@@ -6684,6 +6687,28 @@ panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
    /* gl_BaseInstance is a signed integer, and it should expose the value of
     * firstInstnace. */
    assert(firstInstance < INT32_MAX);
+
+   if (draw_batch_state_ok(cmdbuf)) {
+      struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
+
+      if (batch->active &&
+          (!draw_batch_matches(cmdbuf, false) ||
+           batch->count == PANVK_DRAW_BATCH_MAX))
+         panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+
+      if (!batch->active)
+         draw_batch_begin(cmdbuf, false);
+
+      batch->draws.nonindexed[batch->count++] = (VkDrawIndirectCommand){
+         .vertexCount = vertexCount,
+         .instanceCount = instanceCount,
+         .firstVertex = firstVertex,
+         .firstInstance = firstInstance,
+      };
+      return;
+   }
+
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
    struct panvk_draw_info draw = {
       .vertex.base = firstVertex,
@@ -6748,14 +6773,15 @@ draw_batch_state_ok(struct panvk_cmd_buffer *cmdbuf)
 }
 
 static void
-draw_batch_begin(struct panvk_cmd_buffer *cmdbuf)
+draw_batch_begin(struct panvk_cmd_buffer *cmdbuf, bool indexed)
 {
    struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
 
    batch->active = true;
+   batch->indexed = indexed;
    batch->count = 0;
-   batch->index_size = cmdbuf->state.gfx.ib.index_size;
+   batch->index_size = indexed ? cmdbuf->state.gfx.ib.index_size : 0;
    batch->prim = panvk_get_client_prim(cmdbuf);
    batch->desc_gen = dev->desc_update_gen;
    memcpy(&batch->dyn, &cmdbuf->vk.dynamic_graphics_state,
@@ -6765,12 +6791,15 @@ draw_batch_begin(struct panvk_cmd_buffer *cmdbuf)
 }
 
 static bool
-draw_batch_matches(struct panvk_cmd_buffer *cmdbuf)
+draw_batch_matches(struct panvk_cmd_buffer *cmdbuf, bool indexed)
 {
    struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+   const uint32_t index_size =
+      indexed ? cmdbuf->state.gfx.ib.index_size : 0;
 
-   return batch->index_size == cmdbuf->state.gfx.ib.index_size &&
+   return batch->indexed == indexed &&
+          batch->index_size == index_size &&
           batch->prim == panvk_get_client_prim(cmdbuf) &&
           batch->desc_gen == dev->desc_update_gen &&
           memcmp(&batch->dyn, &cmdbuf->vk.dynamic_graphics_state,
@@ -6779,21 +6808,12 @@ draw_batch_matches(struct panvk_cmd_buffer *cmdbuf)
                  sizeof(batch->dynamic)) == 0;
 }
 
-void
-panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
+static void
+draw_batch_emit_one(struct panvk_cmd_buffer *cmdbuf,
+                    const struct panvk_draw_batch *batch, uint32_t i)
 {
-   struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
-
-   if (!batch->count)
-      return;
-
-   const uint32_t draw_count = batch->count;
-
-   batch->active = false;
-   batch->count = 0;
-
-   if (draw_count == 1) {
-      const VkDrawIndexedIndirectCommand *cmd = &batch->draws[0];
+   if (batch->indexed) {
+      const VkDrawIndexedIndirectCommand *cmd = &batch->draws.indexed[i];
 
       struct panvk_draw_info draw = {
          .index = panvk_draw_info_index(cmdbuf, cmd->firstIndex),
@@ -6805,46 +6825,79 @@ panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
       };
 
       panvk_cmd_draw(cmdbuf, draw);
+   } else {
+      const VkDrawIndirectCommand *cmd = &batch->draws.nonindexed[i];
+
+      struct panvk_draw_info draw = {
+         .vertex.base = cmd->firstVertex,
+         .vertex.count = cmd->vertexCount,
+         .instance.count = cmd->instanceCount,
+         .instance.base = cmd->firstInstance,
+         .prim = batch->prim,
+      };
+
+      panvk_cmd_draw(cmdbuf, draw);
+   }
+}
+
+void
+panvk_per_arch(cmd_draw_batch_flush)(struct panvk_cmd_buffer *cmdbuf)
+{
+   struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
+
+   if (!batch->count)
+      return;
+
+   const uint32_t draw_count = batch->count;
+   const bool indexed = batch->indexed;
+
+   batch->active = false;
+   batch->count = 0;
+
+   if (draw_count == 1) {
+      draw_batch_emit_one(cmdbuf, batch, 0);
       return;
    }
 
-   /* The draws were separate vkCmdDrawIndexed calls, so they all see
+   /* The draws were separate vkCmdDraw* calls, so they all see
     * gl_DrawID == 0 even though they land at different indices of the
     * indirect buffer.
     */
-   const size_t cmds_size = draw_count * sizeof(VkDrawIndexedIndirectCommand);
+   const size_t cmd_size = indexed ? sizeof(VkDrawIndexedIndirectCommand)
+                                   : sizeof(VkDrawIndirectCommand);
+   const size_t cmds_size = draw_count * cmd_size;
    struct pan_ptr cmds = panvk_cmd_alloc_dev_mem(cmdbuf, desc, cmds_size, 16);
 
    if (!cmds.gpu) {
-      for (uint32_t i = 0; i < draw_count; i++) {
-         const VkDrawIndexedIndirectCommand *cmd = &batch->draws[i];
-
-         struct panvk_draw_info draw = {
-            .index = panvk_draw_info_index(cmdbuf, cmd->firstIndex),
-            .vertex.base = cmd->vertexOffset,
-            .vertex.count = cmd->indexCount,
-            .instance.count = cmd->instanceCount,
-            .instance.base = cmd->firstInstance,
-            .prim = batch->prim,
-         };
-
-         panvk_cmd_draw(cmdbuf, draw);
-      }
+      for (uint32_t i = 0; i < draw_count; i++)
+         draw_batch_emit_one(cmdbuf, batch, i);
       return;
    }
 
-   memcpy(cmds.cpu, batch->draws, cmds_size);
+   memcpy(cmds.cpu, &batch->draws, cmds_size);
 
-   struct panvk_draw_info draw = {
-      .index = panvk_draw_info_index(cmdbuf, 0),
-      .indirect.buffer_dev_addr = cmds.gpu,
-      .indirect.draw_count = draw_count,
-      .indirect.stride = sizeof(VkDrawIndexedIndirectCommand),
-      .prim = batch->prim,
-      .zero_draw_id = true,
-   };
+   if (indexed) {
+      struct panvk_draw_info draw = {
+         .index = panvk_draw_info_index(cmdbuf, 0),
+         .indirect.buffer_dev_addr = cmds.gpu,
+         .indirect.draw_count = draw_count,
+         .indirect.stride = cmd_size,
+         .prim = batch->prim,
+         .zero_draw_id = true,
+      };
 
-   panvk_cmd_draw(cmdbuf, draw);
+      panvk_cmd_draw(cmdbuf, draw);
+   } else {
+      struct panvk_draw_info draw = {
+         .indirect.buffer_dev_addr = cmds.gpu,
+         .indirect.draw_count = draw_count,
+         .indirect.stride = cmd_size,
+         .prim = batch->prim,
+         .zero_draw_id = true,
+      };
+
+      panvk_cmd_draw(cmdbuf, draw);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -6871,14 +6924,14 @@ panvk_per_arch(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
       struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
 
       if (batch->active &&
-          (!draw_batch_matches(cmdbuf) ||
+          (!draw_batch_matches(cmdbuf, true) ||
            batch->count == PANVK_DRAW_BATCH_MAX))
          panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 
       if (!batch->active)
-         draw_batch_begin(cmdbuf);
+         draw_batch_begin(cmdbuf, true);
 
-      batch->draws[batch->count++] = (VkDrawIndexedIndirectCommand){
+      batch->draws.indexed[batch->count++] = (VkDrawIndexedIndirectCommand){
          .indexCount = indexCount,
          .instanceCount = instanceCount,
          .firstIndex = firstIndex,
