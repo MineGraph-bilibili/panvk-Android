@@ -101,6 +101,15 @@ panvk_per_arch(CmdPushConstants2KHR)(
    const VkPushConstantsInfoKHR *pPushConstantsInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   uint8_t *data =
+      (uint8_t *)cmdbuf->state.push_constants.data + pPushConstantsInfo->offset;
+
+   /* Applications often push identical values again; that changes neither the
+    * push uniform blocks nor the pending draw batch. */
+   if (!pPushConstantsInfo->size ||
+       !memcmp(data, pPushConstantsInfo->pValues, pPushConstantsInfo->size))
+      return;
+
 #if PAN_ARCH >= 10
    panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 #endif
@@ -116,9 +125,6 @@ panvk_per_arch(CmdPushConstants2KHR)(
 
    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
       compute_state_set_dirty(cmdbuf, PUSH_UNIFORMS);
-
-   uint8_t *data =
-      (uint8_t *)cmdbuf->state.push_constants.data + pPushConstantsInfo->offset;
 
    memcpy(data, pPushConstantsInfo->pValues, pPushConstantsInfo->size);
 }

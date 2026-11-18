@@ -20,6 +20,11 @@
 #include "util/simple_mtx.h"
 #include "util/u_atomic.h"
 
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
+
+#include "panvk_device_memory.h"
+
 #include "bc/panvk_bc_s3tc_astc_spv.h"
 #include "bc/panvk_bc_bc7_astc_spv.h"
 #include "bc/panvk_bc_bc6_astc_spv.h"
@@ -42,6 +47,13 @@ extern unsigned long long panvk_diag_present_reads;
 extern unsigned long long panvk_diag_present_clears;
 extern bool panvk_import_probe_is_image(VkImage img);
 extern void panvk_import_probe_set_blit_src(VkImage src, VkImage dst);
+
+static void
+upload_src_hash_invalidate_subres(struct panvk_image *img,
+                                  const VkImageSubresourceLayers *subres);
+static void
+upload_src_hash_invalidate_range(struct panvk_image *img,
+                                 const VkImageSubresourceRange *range);
 
 static bool
 copy_to_image_use_gfx_pipeline(struct panvk_image *dst_img)
@@ -327,6 +339,10 @@ panvk_per_arch(CmdBlitImage2)(VkCommandBuffer commandBuffer,
                                       pBlitImageInfo->dstImage);
    } else if (panvk_import_probe_is_image(pBlitImageInfo->srcImage))
       panvk_diag_present_reads++;
+   VK_FROM_HANDLE(panvk_image, blit_dst, pBlitImageInfo->dstImage);
+   for (uint32_t i = 0; i < pBlitImageInfo->regionCount; i++)
+      upload_src_hash_invalidate_subres(
+         blit_dst, &pBlitImageInfo->pRegions[i].dstSubresource);
 #if PAN_ARCH >= 10
    panvk_cmd_rp_merge_flush_pending(cmdbuf);
    panvk_cmd_lazy_vt_flush_pending(cmdbuf, PANVK_LAZY_VT_META);
@@ -451,6 +467,9 @@ panvk_per_arch(CmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image,
    VK_FROM_HANDLE(panvk_image, img, image);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct panvk_cmd_meta_graphics_save_ctx save = {0};
+
+   for (uint32_t i = 0; i < rangeCount; i++)
+      upload_src_hash_invalidate_range(img, &pRanges[i]);
 
    /* Mali cannot render to R64; alias as RG32UI for vk_meta. */
    VkFormat view_format = img->vk.format;
@@ -1000,7 +1019,7 @@ bc_raw_plane_src(const struct panvk_image *img,
  * dispatches can outlive a cross-CSG SYNC_WAIT of the other subqueues and
  * get the CSG killed by the firmware (CSF group fatal, status 0x72/0x41);
  * keeping every job short avoids that trigger. */
-DEBUG_GET_ONCE_NUM_OPTION(bc_chunk_opt, "PANVK_BC_CHUNK", 256)
+DEBUG_GET_ONCE_NUM_OPTION(bc_chunk_opt, "PANVK_BC_CHUNK", 512)
 
 static uint32_t
 bc_chunk_texels(void)
@@ -1011,6 +1030,97 @@ bc_chunk_texels(void)
       return 0; /* no chunking */
 
    return MAX2((uint32_t)chunk & ~3u, 4u);
+}
+
+/* Caching uploads: when an application re-uploads identical bytes (static
+ * textures re-uploaded every frame by translation layers), skip the copy and,
+ * for BC-emulated images, the decode. Only full-mip copies from host-coherent
+ * memory that is currently mapped are tracked. PANVK_UPLOAD_CACHE=0 disables
+ * the cache. */
+DEBUG_GET_ONCE_BOOL_OPTION(upload_cache_opt, "PANVK_UPLOAD_CACHE", true)
+
+static uint32_t
+upload_src_hash_layer_count(const struct panvk_image *img)
+{
+   return img->vk.image_type == VK_IMAGE_TYPE_3D ? img->vk.extent.depth
+                                                 : img->vk.array_layers;
+}
+
+/* Slot for (level, layer), allocating the table on first use. */
+static uint64_t *
+upload_src_hash_slot(struct panvk_image *img, uint32_t level, uint32_t layer)
+{
+   const uint32_t layer_count = upload_src_hash_layer_count(img);
+
+   if (level >= img->vk.mip_levels || layer >= layer_count)
+      return NULL;
+
+   if (!img->upload_src_hash) {
+      struct panvk_device *dev = to_panvk_device(img->vk.base.device);
+      const size_t count = (size_t)img->vk.mip_levels * layer_count;
+
+      img->upload_src_hash = vk_zalloc2(&dev->vk.alloc, NULL,
+                                        count * sizeof(uint64_t), 8,
+                                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!img->upload_src_hash)
+         return NULL;
+   }
+
+   return &img->upload_src_hash[(size_t)level * layer_count + layer];
+}
+
+/* Anything that rewrites the image content invalidates its source hash. */
+static void
+upload_src_hash_invalidate(struct panvk_image *img, uint32_t level,
+                           uint32_t first_layer, uint32_t layer_count)
+{
+   if (!img->upload_src_hash)
+      return;
+
+   for (uint32_t i = 0; i < layer_count; i++) {
+      uint64_t *slot = upload_src_hash_slot(img, level, first_layer + i);
+
+      if (slot)
+         *slot = 0;
+   }
+}
+
+/* Conservative invalidation of a whole subresource (all layers/slices). */
+static void
+upload_src_hash_invalidate_subres(struct panvk_image *img,
+                                  const VkImageSubresourceLayers *subres)
+{
+   if (!img->upload_src_hash)
+      return;
+
+   if (img->vk.image_type == VK_IMAGE_TYPE_3D) {
+      upload_src_hash_invalidate(img, subres->mipLevel, 0,
+                                 img->vk.extent.depth);
+   } else {
+      upload_src_hash_invalidate(
+         img, subres->mipLevel, subres->baseArrayLayer,
+         vk_image_subresource_layer_count(&img->vk, subres));
+   }
+}
+
+static void
+upload_src_hash_invalidate_range(struct panvk_image *img,
+                                 const VkImageSubresourceRange *range)
+{
+   if (!img->upload_src_hash)
+      return;
+
+   const bool is_3d = img->vk.image_type == VK_IMAGE_TYPE_3D;
+   const uint32_t level_count =
+      vk_image_subresource_level_count(&img->vk, range);
+   const uint32_t first_layer = is_3d ? 0 : range->baseArrayLayer;
+   const uint32_t layer_count =
+      is_3d ? img->vk.extent.depth
+            : vk_image_subresource_layer_count(&img->vk, range);
+
+   for (uint32_t l = 0; l < level_count; l++)
+      upload_src_hash_invalidate(img, range->baseMipLevel + l, first_layer,
+                                 layer_count);
 }
 
 
@@ -1058,6 +1168,9 @@ bc_decode_region(struct panvk_cmd_buffer *cmdbuf, struct panvk_image *img,
 
    if (!w || !h || !d)
       return;
+
+   /* This decode rewrites these layers: drop any cached source hash. */
+   upload_src_hash_invalidate(img, level, z0, d);
 
    const uint64_t src = src_in ? src_in->addr
                                : img->planes[0].plane.base + ss->offset_B +
@@ -1310,6 +1423,10 @@ panvk_per_arch(CmdCopyMemoryToImageKHR)(
    if (panvk_import_probe_is_image(pCopyMemoryInfo->image))
       panvk_diag_present_writes++;
 
+   for (uint32_t i = 0; i < pCopyMemoryInfo->regionCount; i++)
+      upload_src_hash_invalidate_subres(
+         bc_img, &pCopyMemoryInfo->pRegions[i].imageSubresource);
+
    if (bc_img->bc_afrc) {
       VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
       #if PAN_ARCH >= 10
@@ -1381,6 +1498,385 @@ panvk_per_arch(CmdCopyMemoryToImageKHR)(
    }
 
    copy_memory_to_image_raw(commandBuffer, pCopyMemoryInfo);
+}
+
+/* True when the region rewrites every texel of the layers it names, which is
+ * what makes skipping its decode safe. */
+static bool
+upload_region_layout(const struct panvk_image *img,
+                        const VkBufferImageCopy2 *r, uint32_t *out_level,
+                        uint32_t *out_first_layer, uint32_t *out_layer_count,
+                        uint64_t *out_slice_B)
+{
+   const VkImageSubresourceLayers *subres = &r->imageSubresource;
+   const VkExtent3D mip = vk_image_mip_level_extent(&img->vk, subres->mipLevel);
+
+   if (subres->aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+       r->imageOffset.x || r->imageOffset.y ||
+       r->imageExtent.width < mip.width || r->imageExtent.height < mip.height)
+      return false;
+
+   if (img->vk.image_type == VK_IMAGE_TYPE_3D) {
+      if (r->imageOffset.z || r->imageExtent.depth < mip.depth)
+         return false;
+      *out_first_layer = 0;
+      *out_layer_count = mip.depth;
+   } else if (img->vk.image_type == VK_IMAGE_TYPE_2D) {
+      *out_first_layer = subres->baseArrayLayer;
+      *out_layer_count = vk_image_subresource_layer_count(&img->vk, subres);
+   } else {
+      return false;
+   }
+
+   /* BC formats address 4x4 blocks; everything else addresses texels. */
+   const uint32_t unit = panvk_format_is_bc(img->vk.format) ? 4 : 1;
+   const uint32_t blk_B = vk_format_get_blocksize(img->vk.format);
+   const uint32_t row_px =
+      r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width;
+   const uint32_t col_px =
+      r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
+   const uint64_t row_B = DIV_ROUND_UP(row_px, unit) * (uint64_t)blk_B;
+
+   *out_level = subres->mipLevel;
+   *out_slice_B = DIV_ROUND_UP(col_px, unit) * row_B;
+   return true;
+}
+
+/* Host address of the copy source, or NULL when the bytes are not in memory
+ * the CPU can read coherently right now. */
+static const void *
+upload_src_host(const struct panvk_buffer *buffer,
+                const VkBufferImageCopy2 *r, uint64_t size_B)
+{
+   const struct panvk_device_memory *mem = buffer->bind_mem;
+
+   if (!mem || !mem->addr.host)
+      return NULL;
+
+   struct panvk_device *dev = to_panvk_device(buffer->vk.base.device);
+   const struct panvk_physical_device *pdev =
+      to_panvk_physical_device(dev->vk.physical);
+   const VkMemoryPropertyFlags props =
+      pdev->memory.types[mem->vk.memory_type_index].propertyFlags;
+   const VkMemoryPropertyFlags needed = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+   if ((props & needed) != needed ||
+       r->bufferOffset + size_B > buffer->vk.size)
+      return NULL;
+
+   return (const char *)mem->addr.host + buffer->bind_mem_offset +
+          r->bufferOffset;
+}
+
+static bool
+bc_can_copy_decoded(const struct panvk_image *src,
+                    const struct panvk_image *dst);
+static void
+bc_copy_decoded_region(struct panvk_cmd_buffer *cmdbuf,
+                       const struct panvk_image *src, struct panvk_image *dst,
+                       const VkImageCopy2 *r);
+
+/* Cross-image decode reuse: translation layers recreate textures every frame
+ * from identical bytes, so a later image can copy the decoded texels of an
+ * earlier image instead of running the transcoder again. Only full-mip 2D
+ * uploads from host-coherent memory are tracked. PANVK_TEXTURE_CACHE=0
+ * disables the reuse. */
+DEBUG_GET_ONCE_BOOL_OPTION(texture_cache_opt, "PANVK_TEXTURE_CACHE", true)
+
+struct bc_global_hit {
+   struct panvk_image *src;
+   uint32_t level;
+   uint32_t layer;
+   uint32_t dst_level;
+   uint32_t dst_layer;
+   uint64_t hash;
+};
+
+static bool
+bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
+                           struct panvk_image *img,
+                           const VkCopyBufferToImageInfo2 *info)
+{
+   if (!debug_get_option_texture_cache_opt() ||
+       img->vk.image_type != VK_IMAGE_TYPE_2D || !img->bc_emul ||
+       img->bc_afrc || !info->regionCount)
+      return false;
+
+   VK_FROM_HANDLE(panvk_buffer, src_buffer, info->srcBuffer);
+   uint32_t total = 0;
+
+   for (uint32_t i = 0; i < info->regionCount; i++) {
+      const VkBufferImageCopy2 *r = &info->pRegions[i];
+      uint32_t level, first_layer, layer_count;
+      uint64_t slice_B;
+
+      if (!upload_region_layout(img, r, &level, &first_layer, &layer_count,
+                                &slice_B) ||
+          !upload_src_host(src_buffer, r, slice_B * layer_count))
+         return false;
+
+      total += layer_count;
+   }
+
+   if (!total || total > 16384)
+      return false;
+
+   STACK_ARRAY(VkBufferImageCopy2, misses, total);
+   STACK_ARRAY(struct bc_global_hit, hits, total);
+   if (!misses || !hits) {
+      STACK_ARRAY_FINISH(misses);
+      STACK_ARRAY_FINISH(hits);
+      return false;
+   }
+
+   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+   uint32_t miss_count = 0, hit_count = 0;
+
+   for (uint32_t i = 0; i < info->regionCount; i++) {
+      const VkBufferImageCopy2 *r = &info->pRegions[i];
+      uint32_t level, first_layer, layer_count;
+      uint64_t slice_B;
+
+      if (!upload_region_layout(img, r, &level, &first_layer, &layer_count,
+                                &slice_B))
+         continue;
+
+      const void *host =
+         upload_src_host(src_buffer, r, slice_B * layer_count);
+      if (!host)
+         continue;
+
+      const VkExtent3D mip = vk_image_mip_level_extent(&img->vk, level);
+
+      for (uint32_t l = 0; l < layer_count; l++) {
+         const uint64_t hash =
+            XXH3_64bits((const char *)host + (uint64_t)l * slice_B, slice_B);
+         struct panvk_image *src_img = NULL;
+         uint32_t src_level = 0, src_layer = 0;
+         bool hit = panvk_upload_cache_lookup(dev, hash, img->vk.format,
+                                              mip.width, mip.height, &src_img,
+                                              &src_level, &src_layer);
+
+         if (hit) {
+            const VkExtent3D smip =
+               vk_image_mip_level_extent(&src_img->vk, src_level);
+
+            hit = src_img != img && src_img->vk.format == img->vk.format &&
+                  smip.width == mip.width && smip.height == mip.height &&
+                  bc_can_copy_decoded(src_img, img);
+         }
+
+         if (hit) {
+            hits[hit_count++] = (struct bc_global_hit){
+               .src = src_img,
+               .level = src_level,
+               .layer = src_layer,
+               .dst_level = level,
+               .dst_layer = first_layer + l,
+               .hash = hash,
+            };
+         } else {
+            VkBufferImageCopy2 mr = *r;
+
+            mr.imageSubresource.baseArrayLayer = first_layer + l;
+            mr.imageSubresource.layerCount = 1;
+            mr.bufferOffset = r->bufferOffset + (uint64_t)l * slice_B;
+            misses[miss_count++] = mr;
+         }
+      }
+   }
+
+   if (!hit_count) {
+      STACK_ARRAY_FINISH(misses);
+      STACK_ARRAY_FINISH(hits);
+      return false;
+   }
+
+   struct panvk_cmd_meta_compute_save_ctx save = {0};
+   bc_decode_begin(cmdbuf, &save);
+   for (uint32_t i = 0; i < hit_count; i++) {
+      const struct bc_global_hit *h = &hits[i];
+      const VkExtent3D mip = vk_image_mip_level_extent(&img->vk, h->dst_level);
+      const VkImageCopy2 r = {
+         .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = h->level,
+            .baseArrayLayer = h->layer,
+            .layerCount = 1,
+         },
+         .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = h->dst_level,
+            .baseArrayLayer = h->dst_layer,
+            .layerCount = 1,
+         },
+         .extent = mip,
+      };
+
+      bc_copy_decoded_region(cmdbuf, h->src, img, &r);
+
+      uint64_t *slot = upload_src_hash_slot(img, h->dst_level, h->dst_layer);
+
+      if (slot)
+         *slot = h->hash;
+   }
+   meta_compute_end(cmdbuf, &save);
+
+   if (miss_count) {
+      VkCopyBufferToImageInfo2 filtered = *info;
+      filtered.regionCount = miss_count;
+      filtered.pRegions = misses;
+
+      STACK_ARRAY(VkDeviceMemoryImageCopyKHR, regions, miss_count);
+      if (!regions) {
+         vk_command_buffer_set_error(&cmdbuf->vk,
+                                     VK_ERROR_OUT_OF_HOST_MEMORY);
+         STACK_ARRAY_FINISH(misses);
+         STACK_ARRAY_FINISH(hits);
+         return true;
+      }
+
+      const VkCopyDeviceMemoryImageInfoKHR finfo =
+         vk_upgrade_copy_buffer_to_image2(&filtered, regions);
+      panvk_per_arch(CmdCopyMemoryToImageKHR)(commandBuffer, &finfo);
+      STACK_ARRAY_FINISH(regions);
+   }
+
+   /* Publish the freshly produced content for the other images. */
+   for (uint32_t i = 0; i < info->regionCount; i++) {
+      const VkBufferImageCopy2 *r = &info->pRegions[i];
+      uint32_t level, first_layer, layer_count;
+      uint64_t slice_B;
+
+      if (!upload_region_layout(img, r, &level, &first_layer, &layer_count,
+                                &slice_B))
+         continue;
+
+      const void *host =
+         upload_src_host(src_buffer, r, slice_B * layer_count);
+      if (!host)
+         continue;
+
+      const VkExtent3D mip = vk_image_mip_level_extent(&img->vk, level);
+
+      for (uint32_t l = 0; l < layer_count; l++) {
+         const uint64_t hash =
+            XXH3_64bits((const char *)host + (uint64_t)l * slice_B, slice_B);
+         uint64_t *slot = upload_src_hash_slot(img, level, first_layer + l);
+
+         if (!slot)
+            continue;
+
+         *slot = hash;
+         panvk_upload_cache_touch(dev, img, slot, hash, img->vk.format, level,
+                                  first_layer + l, mip.width, mip.height);
+      }
+   }
+
+   STACK_ARRAY_FINISH(misses);
+   STACK_ARRAY_FINISH(hits);
+   return true;
+}
+
+/* Skip the upload when a full-mip copy repeats the bytes that are already in
+ * the image: static textures re-uploaded every frame only pay the hash. */
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(CmdCopyBufferToImage2)(
+   VkCommandBuffer commandBuffer,
+   const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
+{
+   VK_FROM_HANDLE(panvk_image, img, pCopyBufferToImageInfo->dstImage);
+   const bool cacheable =
+      ((img->bc_emul && !img->bc_afrc) || img->upload_cache) &&
+      pCopyBufferToImageInfo->regionCount &&
+      debug_get_option_upload_cache_opt();
+
+   if (cacheable) {
+      VK_FROM_HANDLE(panvk_buffer, src_buffer,
+                     pCopyBufferToImageInfo->srcBuffer);
+      bool all_cached = true;
+
+      for (uint32_t i = 0; i < pCopyBufferToImageInfo->regionCount; i++) {
+         const VkBufferImageCopy2 *r = &pCopyBufferToImageInfo->pRegions[i];
+         uint32_t level, first_layer, layer_count;
+         uint64_t slice_B;
+
+         if (!upload_region_layout(img, r, &level, &first_layer,
+                                      &layer_count, &slice_B)) {
+            all_cached = false;
+            break;
+         }
+
+         const void *host =
+            upload_src_host(src_buffer, r, slice_B * layer_count);
+         if (!host) {
+            all_cached = false;
+            break;
+         }
+
+         for (uint32_t l = 0; l < layer_count; l++) {
+            const uint64_t *slot =
+               upload_src_hash_slot(img, level, first_layer + l);
+            const uint64_t hash =
+               XXH3_64bits((const char *)host + (uint64_t)l * slice_B, slice_B);
+
+            if (!slot || *slot != hash) {
+               all_cached = false;
+               break;
+            }
+         }
+
+         if (!all_cached)
+            break;
+      }
+
+      if (all_cached)
+         return;
+   }
+
+   if (cacheable && bc_upload_global_cache_try(commandBuffer, img,
+                                               pCopyBufferToImageInfo))
+      return;
+
+   STACK_ARRAY(VkDeviceMemoryImageCopyKHR, regions,
+               pCopyBufferToImageInfo->regionCount);
+   const VkCopyDeviceMemoryImageInfoKHR info =
+      vk_upgrade_copy_buffer_to_image2(pCopyBufferToImageInfo, regions);
+
+   panvk_per_arch(CmdCopyMemoryToImageKHR)(commandBuffer, &info);
+
+   STACK_ARRAY_FINISH(regions);
+
+   /* The decode invalidated the old hashes; record what it consumed. */
+   if (cacheable) {
+      VK_FROM_HANDLE(panvk_buffer, src_buffer,
+                     pCopyBufferToImageInfo->srcBuffer);
+
+      for (uint32_t i = 0; i < pCopyBufferToImageInfo->regionCount; i++) {
+         const VkBufferImageCopy2 *r = &pCopyBufferToImageInfo->pRegions[i];
+         uint32_t level, first_layer, layer_count;
+         uint64_t slice_B;
+
+         if (!upload_region_layout(img, r, &level, &first_layer,
+                                      &layer_count, &slice_B))
+            continue;
+
+         const void *host =
+            upload_src_host(src_buffer, r, slice_B * layer_count);
+         if (!host)
+            continue;
+
+         for (uint32_t l = 0; l < layer_count; l++) {
+            uint64_t *slot = upload_src_hash_slot(img, level, first_layer + l);
+
+            if (slot)
+               *slot = XXH3_64bits((const char *)host + (uint64_t)l * slice_B,
+                             slice_B);
+         }
+      }
+   }
 }
 
 static void
@@ -1654,7 +2150,7 @@ bc_decoded_base(const struct panvk_image *img,
 static void
 bc_copy_decoded_region(struct panvk_cmd_buffer *cmdbuf,
                        const struct panvk_image *src,
-                       const struct panvk_image *dst, const VkImageCopy2 *r)
+                       struct panvk_image *dst, const VkImageCopy2 *r)
 {
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    const struct vk_device_dispatch_table *disp = &dev->vk.dispatch_table;
@@ -1676,6 +2172,12 @@ bc_copy_decoded_region(struct panvk_cmd_buffer *cmdbuf,
    const uint32_t depth = is_3d ? r->extent.depth
                                 : vk_image_subresource_layer_count(&dst->vk,
                                                                    &r->dstSubresource);
+
+   /* The copy rewrites these decoded texels without a decode. */
+   upload_src_hash_invalidate(dst, r->dstSubresource.mipLevel,
+                          is_3d ? r->dstOffset.z
+                                : r->dstSubresource.baseArrayLayer,
+                          depth);
    uint32_t src_z_B, dst_z_B;
    const uint64_t sbase =
       bc_decoded_base(src, &r->srcSubresource, r->srcOffset.z, &src_z_B);
@@ -1760,12 +2262,79 @@ bc_copy_image_noraw(struct panvk_cmd_buffer *cmdbuf,
    meta_compute_end(cmdbuf, &save);
 }
 
+/* True when every region of a BC->BC copy rewrites a full mip that was last
+ * populated from exactly the bytes the source image was populated from, so
+ * both decoded planes already match. Requires identical formats and mip
+ * extents; a hit skips both the raw-block copy and the decode. */
+static bool
+bc_copy_image_all_cached(const struct panvk_image *src,
+                         const struct panvk_image *dst,
+                         const VkCopyImageInfo2 *info)
+{
+   if (!debug_get_option_upload_cache_opt() ||
+       src->vk.format != dst->vk.format ||
+       src->vk.image_type != dst->vk.image_type ||
+       src->bc_afrc || dst->bc_afrc ||
+       !src->upload_src_hash || !dst->upload_src_hash)
+      return false;
+
+   for (uint32_t i = 0; i < info->regionCount; i++) {
+      const VkImageCopy2 *r = &info->pRegions[i];
+      const VkExtent3D mip =
+         vk_image_mip_level_extent(&dst->vk, r->dstSubresource.mipLevel);
+      const VkExtent3D smip =
+         vk_image_mip_level_extent(&src->vk, r->srcSubresource.mipLevel);
+
+      if (r->srcSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+          r->dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+          r->srcOffset.x || r->srcOffset.y || r->dstOffset.x ||
+          r->dstOffset.y || r->extent.width < mip.width ||
+          r->extent.height < mip.height || mip.width != smip.width ||
+          mip.height != smip.height)
+         return false;
+
+      const bool is_3d = dst->vk.image_type == VK_IMAGE_TYPE_3D;
+      const uint32_t src_first = is_3d ? r->srcOffset.z
+                                       : r->srcSubresource.baseArrayLayer;
+      const uint32_t dst_first = is_3d ? r->dstOffset.z
+                                       : r->dstSubresource.baseArrayLayer;
+      const uint32_t layers =
+         is_3d ? mip.depth
+               : vk_image_subresource_layer_count(&dst->vk,
+                                                  &r->dstSubresource);
+
+      if (is_3d && (r->extent.depth < mip.depth || mip.depth != smip.depth))
+         return false;
+
+      for (uint32_t l = 0; l < layers; l++) {
+         const uint64_t *ss = upload_src_hash_slot((struct panvk_image *)src,
+                                                   r->srcSubresource.mipLevel,
+                                                   src_first + l);
+         const uint64_t *ds = upload_src_hash_slot((struct panvk_image *)dst,
+                                                   r->dstSubresource.mipLevel,
+                                                   dst_first + l);
+
+         if (!ss || !ds || !*ss || *ss != *ds)
+            return false;
+      }
+   }
+
+   return info->regionCount != 0;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdCopyImage2)(VkCommandBuffer commandBuffer,
                               const VkCopyImageInfo2 *pCopyImageInfo)
 {
    VK_FROM_HANDLE(panvk_image, bc_src, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(panvk_image, bc_dst, pCopyImageInfo->dstImage);
+
+   if (bc_src->bc_emul && bc_dst->bc_emul &&
+       bc_copy_image_all_cached(bc_src, bc_dst, pCopyImageInfo))
+      return;
+   for (uint32_t i = 0; i < pCopyImageInfo->regionCount; i++)
+      upload_src_hash_invalidate_subres(
+         bc_dst, &pCopyImageInfo->pRegions[i].dstSubresource);
    panvk_diag_copies++;
    if (panvk_import_probe_is_image(pCopyImageInfo->dstImage))
       panvk_diag_present_writes++;

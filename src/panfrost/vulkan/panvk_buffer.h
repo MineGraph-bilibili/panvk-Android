@@ -12,9 +12,15 @@
 
 struct panvk_priv_bo;
 struct pan_kmod_bo;
+struct panvk_device_memory;
 
 struct panvk_buffer {
    struct vk_buffer vk;
+
+   /* Memory object the buffer is bound to and the offset inside it.  Used to
+    * locate host-mapped upload sources (see CmdCopyBufferToImage2). */
+   struct panvk_device_memory *bind_mem;
+   uint64_t bind_mem_offset;
 
    /* Real BO backing a sparse buffer on backends without native sparse VM
     * ops (kbase).  NULL for non-sparse buffers and for backends that support

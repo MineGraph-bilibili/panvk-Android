@@ -54,6 +54,8 @@ enum panvk_queue_family {
    PANVK_QUEUE_FAMILY_COUNT,
 };
 
+struct panvk_upload_cache_entry;
+
 struct panvk_device {
    struct vk_device vk;
 
@@ -88,6 +90,14 @@ struct panvk_device {
    struct util_queue bc_prewarm;
    simple_mtx_t bc_pipeline_mtx;
    bool bc_prewarm_started;
+
+   /* Content-addressed decoded-BC cache: source-content hash -> an image whose
+    * decoded plane still holds those texels, so a second image receiving the
+    * same bytes copies decoded data instead of re-running the transcoder.
+    * Guarded by upload_cache_lock; entries are dropped when the image dies. */
+   struct panvk_upload_cache_entry *upload_cache;
+   unsigned upload_cache_count;
+   simple_mtx_t upload_cache_lock;
 
    struct {
       struct panvk_priv_bo *handlers_bo;

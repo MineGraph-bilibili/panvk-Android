@@ -36,8 +36,10 @@ cmd_desc_state_bind_sets(struct panvk_descriptor_state *desc_state,
 
       /* Invalidate the push set. */
       if (desc_state->sets[set_idx] &&
-          desc_state->sets[set_idx] == desc_state->push_sets[set_idx])
+          desc_state->sets[set_idx] == desc_state->push_sets[set_idx]) {
          desc_state->push_sets[set_idx]->descs.dev = 0;
+         desc_state->last_push.len = 0;
+      }
 
       desc_state->sets[set_idx] = set;
       desc_state->desc_buffer_sets[set_idx].dev_addr = 0;
@@ -391,29 +393,36 @@ panvk_per_arch(CmdBindDescriptorSets2KHR)(
    const VkBindDescriptorSetsInfoKHR *pBindDescriptorSetsInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
-#if PAN_ARCH >= 10
-   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
-#endif
 
-   /* TODO: Invalidate only if the shader tables are disturbed */
-   if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
-      if (!cmd_desc_state_bind_is_noop(&cmdbuf->state.gfx.desc_state,
-                                       pBindDescriptorSetsInfo)) {
-         cmd_desc_state_bind_sets(&cmdbuf->state.gfx.desc_state,
+   /* Re-binding the sets that are already bound with the same dynamic offsets
+    * changes nothing the pending batch depends on, so it must not flush it. */
+   const bool gfx_noop =
+      !(pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) ||
+      cmd_desc_state_bind_is_noop(&cmdbuf->state.gfx.desc_state,
+                                  pBindDescriptorSetsInfo);
+   const bool compute_noop =
+      !(pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) ||
+      cmd_desc_state_bind_is_noop(&cmdbuf->state.compute.desc_state,
                                   pBindDescriptorSetsInfo);
 
-         gfx_state_set_dirty(cmdbuf, DESC_STATE);
-      }
+   if (!gfx_noop || !compute_noop) {
+#if PAN_ARCH >= 10
+      panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
    }
 
-   if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
-      if (!cmd_desc_state_bind_is_noop(&cmdbuf->state.compute.desc_state,
-                                       pBindDescriptorSetsInfo)) {
-         cmd_desc_state_bind_sets(&cmdbuf->state.compute.desc_state,
-                                  pBindDescriptorSetsInfo);
+   if (!gfx_noop) {
+      cmd_desc_state_bind_sets(&cmdbuf->state.gfx.desc_state,
+                               pBindDescriptorSetsInfo);
 
-         compute_state_set_dirty(cmdbuf, DESC_STATE);
-      }
+      gfx_state_set_dirty(cmdbuf, DESC_STATE);
+   }
+
+   if (!compute_noop) {
+      cmd_desc_state_bind_sets(&cmdbuf->state.compute.desc_state,
+                               pBindDescriptorSetsInfo);
+
+      compute_state_set_dirty(cmdbuf, DESC_STATE);
    }
 }
 
@@ -443,28 +452,101 @@ push_desc_set_write(struct panvk_cmd_buffer *cmd,
    push_set->layout = NULL;
 }
 
+/* Serialize what a push-descriptor update writes so a repeated identical push
+ * can skip both the batch flush and the write. Returns 0 when the payload is
+ * larger than the fingerprint buffer. */
+static uint32_t
+push_desc_serialize(uint8_t *dst, uint32_t cap,
+                    const VkPushDescriptorSetInfoKHR *info)
+{
+   uint32_t n = 0;
+
+#define PUSH_BYTES(ptr, sz)                                                    \
+   do {                                                                        \
+      if ((sz) > cap - n)                                                      \
+         return 0;                                                             \
+      memcpy(dst + n, (ptr), (sz));                                            \
+      n += (sz);                                                               \
+   } while (0)
+
+   PUSH_BYTES(&info->layout, sizeof(info->layout));
+   PUSH_BYTES(&info->set, sizeof(info->set));
+   PUSH_BYTES(&info->descriptorWriteCount, sizeof(info->descriptorWriteCount));
+
+   for (uint32_t i = 0; i < info->descriptorWriteCount; i++) {
+      const VkWriteDescriptorSet *w = &info->pDescriptorWrites[i];
+
+      PUSH_BYTES(&w->dstBinding, sizeof(w->dstBinding));
+      PUSH_BYTES(&w->dstArrayElement, sizeof(w->dstArrayElement));
+      PUSH_BYTES(&w->descriptorCount, sizeof(w->descriptorCount));
+      PUSH_BYTES(&w->descriptorType, sizeof(w->descriptorType));
+
+      if (w->pBufferInfo)
+         PUSH_BYTES(w->pBufferInfo, w->descriptorCount * sizeof(*w->pBufferInfo));
+      else if (w->pImageInfo)
+         PUSH_BYTES(w->pImageInfo, w->descriptorCount * sizeof(*w->pImageInfo));
+      else if (w->pTexelBufferView)
+         PUSH_BYTES(w->pTexelBufferView,
+                    w->descriptorCount * sizeof(*w->pTexelBufferView));
+   }
+
+   return n;
+#undef PUSH_BYTES
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdPushDescriptorSet2KHR)(
    VkCommandBuffer commandBuffer,
    const VkPushDescriptorSetInfoKHR *pPushDescriptorSetInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   struct panvk_descriptor_state *gfx_desc = &cmdbuf->state.gfx.desc_state;
+   struct panvk_descriptor_state *cs_desc = &cmdbuf->state.compute.desc_state;
+   uint8_t payload[256];
+   const uint32_t len =
+      push_desc_serialize(payload, sizeof(payload), pPushDescriptorSetInfo);
+
+   const bool gfx_push =
+      (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) != 0;
+   const bool cs_push =
+      (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+   const uint32_t set = pPushDescriptorSetInfo->set;
+
+   const bool gfx_noop =
+      !gfx_push ||
+      (len && gfx_desc->last_push.push_set == gfx_desc->push_sets[set] &&
+       gfx_desc->last_push.len == len &&
+       !memcmp(gfx_desc->last_push.data, payload, len));
+   const bool cs_noop =
+      !cs_push ||
+      (len && cs_desc->last_push.push_set == cs_desc->push_sets[set] &&
+       cs_desc->last_push.len == len &&
+       !memcmp(cs_desc->last_push.data, payload, len));
+
+   if (!gfx_noop || !cs_noop) {
 #if PAN_ARCH >= 10
-   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+      panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 #endif
-
-   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
-      push_desc_set_write(cmdbuf, &cmdbuf->state.gfx.desc_state,
-                          pPushDescriptorSetInfo);
-
-      gfx_state_set_dirty(cmdbuf, DESC_STATE);
    }
 
-   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
-      push_desc_set_write(cmdbuf, &cmdbuf->state.compute.desc_state,
-                          pPushDescriptorSetInfo);
+   if (!gfx_noop) {
+      push_desc_set_write(cmdbuf, gfx_desc, pPushDescriptorSetInfo);
+      gfx_state_set_dirty(cmdbuf, DESC_STATE);
 
+      gfx_desc->last_push.push_set = gfx_desc->push_sets[set];
+      gfx_desc->last_push.len = len;
+      if (len)
+         memcpy(gfx_desc->last_push.data, payload, len);
+   }
+
+   if (!cs_noop) {
+      push_desc_set_write(cmdbuf, cs_desc, pPushDescriptorSetInfo);
       compute_state_set_dirty(cmdbuf, DESC_STATE);
+
+      cs_desc->last_push.push_set = cs_desc->push_sets[set];
+      cs_desc->last_push.len = len;
+      if (len)
+         memcpy(cs_desc->last_push.data, payload, len);
    }
 }
 

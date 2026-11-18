@@ -120,6 +120,13 @@ struct panvk_rendering_state {
    /* True if the last render pass was suspended. */
    bool suspended;
 
+   /* PANVK_LOAD_DONTCARE: the color attachment loads/clears of this pass can
+    * be dropped if the first draw fully overwrites them.
+    * load_dontcare_pending is armed until the first draw, load_dontcare_mask
+    * has the render targets whose LOAD/CLEAR can be turned into DONT_CARE. */
+   bool load_dontcare_pending;
+   uint8_t load_dontcare_mask;
+
    /* Blocks that can patch to flip the provoking vertex mode if we need to
     * emit FBDs/TDs before we know which mode the application is using */
    struct cs_maybe *maybe_set_tds_provoking_vertex;

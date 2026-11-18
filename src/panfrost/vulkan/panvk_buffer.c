@@ -97,6 +97,9 @@ panvk_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
       buffer->diag_bo = mem->bo;
       buffer->diag_mem_off = pBindInfos[i].memoryOffset;
 
+      buffer->bind_mem = mem;
+      buffer->bind_mem_offset = pBindInfos[i].memoryOffset;
+
       panvk_import_probe_track_buffer(pBindInfos[i].buffer, mem->bo);
    }
    return VK_SUCCESS;

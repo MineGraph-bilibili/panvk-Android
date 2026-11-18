@@ -61,6 +61,8 @@ extern unsigned long long panvk_diag_renders;
 #include "util/os_time.h"
 #include "util/simple_mtx.h"
 #include "util/u_debug.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 #include "vk_meta.h"
 #include "vk_pipeline_layout.h"
 #include "vk_render_pass.h"
@@ -4144,6 +4146,8 @@ launch_indirect_draw(struct panvk_cmd_buffer *cmdbuf,
 
 static void panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf,
                            struct panvk_draw_info draw);
+static void draw_load_dontcare_maybe(struct panvk_cmd_buffer *cmdbuf,
+                                     const struct panvk_draw_info *draw);
 static void launch_draw(struct panvk_cmd_buffer *cmdbuf,
                         const struct panvk_draw_info *draw);
 static void gpu_prerast_draw_generated(
@@ -6471,6 +6475,86 @@ lazy_vt_draw_needs_wait(const struct panvk_cmd_buffer *cmdbuf,
    return false;
 }
 
+
+static bool
+draw_cull_empty_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_CULL_EMPTY_DRAW", true);
+
+   return enabled;
+}
+
+static bool
+draw_stage_writes_memory(const struct panvk_shader *shader)
+{
+   if (shader == NULL)
+      return false;
+
+   for (unsigned v = 0; v < panvk_shader_num_variants(shader->vk.stage); v++) {
+      if (shader->variants[v].writes_memory)
+         return true;
+   }
+
+   return false;
+}
+
+/* A draw is guaranteed to produce no fragments when every viewport is
+ * degenerate/NaN or every scissor box is empty. Dropping it is only safe if
+ * no stage can observe the missing invocations through memory.
+ */
+static bool
+panvk_draw_is_empty(const struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct vk_viewport_state *vp =
+      &cmdbuf->vk.dynamic_graphics_state.vp;
+   bool all_vp_empty = vp->viewport_count > 0;
+   bool all_sc_empty = vp->scissor_count > 0;
+
+   if (!draw_cull_empty_enabled() || cmdbuf->state.gfx.vk_meta)
+      return false;
+
+   /* Skip only draws whose invocations are unobservable. */
+   if (gpu_prerast_xfb_active(cmdbuf) ||
+       cmdbuf->state.gfx.prims_generated_query.ptr ||
+       cmdbuf->state.gfx.pstats_query.report ||
+       cmdbuf->state.gfx.pstats_query.mask)
+      return false;
+
+   if (draw_stage_writes_memory(cmdbuf->state.gfx.vs.shader) ||
+       draw_stage_writes_memory(cmdbuf->state.gfx.tes.shader) ||
+       draw_stage_writes_memory(cmdbuf->state.gfx.gs.shader) ||
+       draw_stage_writes_memory(cmdbuf->state.gfx.fs.shader))
+      return false;
+
+   for (unsigned i = 0; i < vp->viewport_count; i++) {
+      const VkViewport *v = &vp->viewports[i];
+
+      if (!isnan(v->x) && !isnan(v->y) && !isnan(v->width) &&
+          !isnan(v->height) && v->width > 0.0f && v->height > 0.0f) {
+         all_vp_empty = false;
+         break;
+      }
+   }
+
+   if (all_vp_empty)
+      return true;
+
+   for (unsigned i = 0; i < vp->scissor_count; i++) {
+      const VkRect2D *s = &vp->scissors[i];
+
+      if (s->extent.width != 0 && s->extent.height != 0) {
+         all_sc_empty = false;
+         break;
+      }
+   }
+
+   return all_sc_empty;
+}
+
+
 static unsigned long long rc38_draws_total;
 static unsigned long long rc38_draws_skipped;
 static unsigned long long rc38_draws_no_fs;
@@ -6560,6 +6644,9 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
                            rc38_draws_no_fs, panvk_diag_rt_other_draws());
    }
 
+   if (!draw.gpu_prerast_generated && panvk_draw_is_empty(cmdbuf))
+      return;
+
    if ((cmdbuf->state.lazy_wait[PANVK_SUBQUEUE_VERTEX_TILER].pending ||
         cmdbuf->state.lazy_wait[PANVK_SUBQUEUE_COMPUTE].pending) &&
        lazy_draw_is_complex(cmdbuf, &draw)) {
@@ -6582,6 +6669,10 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
       rc38_draws_skipped++;
       return;
    }
+
+   /* The first draw that is actually emitted decides whether the pass still
+    * needs its color preloads. */
+   draw_load_dontcare_maybe(cmdbuf, &draw);
 
    /* Count once per API draw, before gpu_prerast splits or lowers it. */
    if (!draw.gpu_prerast_generated && !draw.pstats_counted) {
@@ -6704,6 +6795,236 @@ static bool draw_batch_state_ok(struct panvk_cmd_buffer *cmdbuf);
 static void draw_batch_begin(struct panvk_cmd_buffer *cmdbuf, bool indexed);
 static bool draw_batch_matches(struct panvk_cmd_buffer *cmdbuf, bool indexed);
 
+static bool
+draw_dead_draw_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_DEAD_DRAW", true);
+
+   return enabled;
+}
+
+/* State with no color read, no depth/stencil and no blending: a draw in this
+ * state only overwrites color samples. */
+static bool
+draw_batch_color_only(const struct vk_dynamic_graphics_state *dyn,
+                      const struct panvk_rendering_state *render)
+{
+   if (!render->color_attachments.iviews[0])
+      return false;
+
+   if (dyn->rs.rasterizer_discard_enable ||
+       dyn->rs.cull_mode != VK_CULL_MODE_NONE ||
+       dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL)
+      return false;
+
+   if (dyn->ms.rasterization_samples != VK_SAMPLE_COUNT_1_BIT ||
+       dyn->ms.alpha_to_coverage_enable || !(dyn->ms.sample_mask & 1))
+      return false;
+
+   /* Color attachment reads (framebuffer fetch, feedback loops) make the
+    * draw depend on the pixels it would overwrite. */
+   if (dyn->feedback_loops || dyn->rasterization_order_access)
+      return false;
+
+   if (dyn->ds.depth.test_enable || dyn->ds.depth.write_enable ||
+       dyn->ds.stencil.test_enable || render->z_attachment.iview ||
+       render->s_attachment.iview)
+      return false;
+
+   if (dyn->cb.logic_op_enable)
+      return false;
+
+   for (uint32_t i = 0; i < MAX_RTS; i++) {
+      if (!render->color_attachments.iviews[i])
+         continue;
+
+      if (i >= dyn->cb.attachment_count ||
+          dyn->cb.attachments[i].blend_enable ||
+          dyn->cb.attachments[i].write_mask != 0xf)
+         return false;
+   }
+
+   return true;
+}
+
+/* The viewport and scissor span the whole render area. */
+static bool
+draw_batch_covers_area(const struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmdbuf->vk.dynamic_graphics_state;
+   const struct pan_fb_bbox *area =
+      &cmdbuf->state.gfx.render.fb.layout.render_area_px;
+
+   if (dyn->vp.viewport_count != 1 || dyn->vp.scissor_count != 1)
+      return false;
+
+   const VkViewport *vp = &dyn->vp.viewports[0];
+   const VkRect2D *sc = &dyn->vp.scissors[0];
+
+   return vp->x <= area->min_x && vp->y <= area->min_y &&
+          vp->x + vp->width >= area->max_x + 1 &&
+          vp->y + vp->height >= area->max_y + 1 &&
+          sc->offset.x <= area->min_x && sc->offset.y <= area->min_y &&
+          sc->offset.x + sc->extent.width >= area->max_x + 1 &&
+          sc->offset.y + sc->extent.height >= area->max_y + 1;
+}
+
+/* PANVK_LOAD_DONTCARE=0 disables the deferred color load elision. */
+static bool
+load_dontcare_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_LOAD_DONTCARE", true);
+
+   return enabled;
+}
+
+/* PANVK_CLEAR_ELIDE=0 keeps the color clears of fully overwritten passes. */
+static bool
+clear_elide_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_CLEAR_ELIDE", true);
+
+   return enabled;
+}
+
+/* A pass may still preload or clear its color attachments at the first draw
+ * that is actually emitted. There is nothing to load or clear when that draw
+ * is a canonical fullscreen triangle that writes every color sample: the
+ * previous contents are overwritten before anything reads them.
+ */
+static bool
+draw_load_dontcare_candidate(const struct panvk_cmd_buffer *cmdbuf,
+                             uint32_t vertex_count, uint32_t instance_count,
+                             uint32_t first_vertex, uint32_t first_instance)
+{
+   const struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+
+   if (!render->load_dontcare_mask || render->fbds.gpu)
+      return false;
+
+   if (vertex_count != 3 || instance_count != 1 || first_vertex != 0 ||
+       first_instance != 0)
+      return false;
+
+   if (cmdbuf->state.gfx.gs.shader || cmdbuf->state.gfx.tes.shader ||
+       !cmdbuf->state.gfx.fs.shader || cmdbuf->state.gfx.vk_meta)
+      return false;
+
+   /* A skipped conditional draw would leave the dropped contents in place. */
+   if (cmdbuf->state.cond_render.enabled ||
+       cmdbuf->state.cond_render.inherited)
+      return false;
+
+   return draw_batch_color_only(&cmdbuf->vk.dynamic_graphics_state, render) &&
+          draw_batch_covers_area(cmdbuf);
+}
+
+/* Take the pending preload decision with the pass's first emitted draw. */
+static void
+draw_load_dontcare_take(struct panvk_cmd_buffer *cmdbuf, bool candidate)
+{
+   struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+
+   if (!render->load_dontcare_pending)
+      return;
+
+   render->load_dontcare_pending = false;
+
+   if (!candidate)
+      return;
+
+   for (unsigned rt = 0; rt < MAX_RTS; rt++) {
+      if (!(render->load_dontcare_mask & BITFIELD_BIT(rt)))
+         continue;
+
+      struct pan_fb_load_target *load = &render->fb.load.rts[rt];
+
+      /* A dropped clear must also stop forcing the clean tile writes that
+       * make the clear visible where no geometry lands. */
+      if (load->in_bounds_load == PAN_FB_LOAD_CLEAR)
+         load->always = false;
+
+      load->in_bounds_load = PAN_FB_LOAD_NONE;
+   }
+   render->load_dontcare_mask = 0;
+}
+
+static void
+draw_load_dontcare_maybe(struct panvk_cmd_buffer *cmdbuf,
+                         const struct panvk_draw_info *draw)
+{
+   if (!cmdbuf->state.gfx.render.load_dontcare_pending)
+      return;
+
+   const bool candidate =
+      !draw->index.index_size && !draw->indirect.buffer_dev_addr &&
+      draw->prim == MESA_PRIM_TRIANGLES &&
+      draw_load_dontcare_candidate(cmdbuf, draw->vertex.count,
+                                   draw->instance.count, draw->vertex.base,
+                                   draw->instance.base);
+
+   draw_load_dontcare_take(cmdbuf, candidate);
+}
+
+/* At render pass begin, arm the deferred load decision for the color
+ * attachments that would preload their previous contents.
+ */
+static void
+load_dontcare_begin(struct panvk_cmd_buffer *cmdbuf, bool resuming)
+{
+   struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+
+   render->load_dontcare_pending = false;
+   render->load_dontcare_mask = 0;
+
+   if (resuming || !load_dontcare_enabled() || render->fbds.gpu ||
+       cmdbuf->vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY ||
+       cmdbuf->state.gfx.vk_meta || render->layer_count > 1 ||
+       render->view_mask || render->fb.nr_samples > 1 ||
+       cmdbuf->state.cond_render.enabled ||
+       cmdbuf->state.cond_render.inherited)
+      return;
+
+   for (unsigned rt = 0; rt < MAX_RTS; rt++) {
+      if (!render->color_attachments.iviews[rt])
+         continue;
+
+      /* A resolve reads the render target, so the preload must stay. */
+      if (render->fb.resolve.rts[rt].in_bounds.resolve != PAN_FB_RESOLVE_NONE ||
+          render->color_attachments.resolve[rt].dst_iview)
+         continue;
+
+      /* A LOAD preloads the previous contents, a CLEAR fills the area. Both
+       * are dead once the first draw overwrites every in-bounds pixel.
+       * DONT_CARE has nothing to drop, and storeOp NONE keeps the preload to
+       * preserve the contents outside a partial store.
+       */
+      const enum pan_fb_load_op op =
+         render->fb.load.rts[rt].in_bounds_load;
+
+      if (!render->fb.store.rts[rt].store)
+         continue;
+
+      if (op != PAN_FB_LOAD_IMAGE &&
+          !(op == PAN_FB_LOAD_CLEAR && clear_elide_enabled()))
+         continue;
+
+      render->load_dontcare_mask |= BITFIELD_BIT(rt);
+   }
+
+   render->load_dontcare_pending = render->load_dontcare_mask != 0;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
                         uint32_t instanceCount, uint32_t firstVertex,
@@ -6727,8 +7048,31 @@ panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
     * firstInstnace. */
    assert(firstInstance < INT32_MAX);
 
+   if (panvk_draw_is_empty(cmdbuf))
+      return;
+
    if (draw_batch_state_ok(cmdbuf)) {
       struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
+
+      /* The pending preload decision must be taken by the first draw of the
+       * pass, even when the draw is only queued in a batch. */
+      if (!batch->active && cmdbuf->state.gfx.render.load_dontcare_pending)
+         draw_load_dontcare_take(
+            cmdbuf, draw_load_dontcare_candidate(cmdbuf, vertexCount,
+                                                 instanceCount, firstVertex,
+                                                 firstInstance));
+
+      /* A canonical fullscreen triangle that writes every color sample makes
+       * the color-only draws already batched behind it dead. */
+      if (batch->active && batch->count && draw_dead_draw_enabled() &&
+          vertexCount == 3 && instanceCount == 1 && firstVertex == 0 &&
+          firstInstance == 0 && !cmdbuf->state.gfx.gs.shader &&
+          !cmdbuf->state.gfx.tes.shader && cmdbuf->state.gfx.fs.shader &&
+          draw_batch_color_only(&batch->dyn, &cmdbuf->state.gfx.render) &&
+          draw_batch_color_only(&cmdbuf->vk.dynamic_graphics_state,
+                                &cmdbuf->state.gfx.render) &&
+          draw_batch_covers_area(cmdbuf))
+         batch->count = 0;
 
       if (batch->active &&
           (!draw_batch_matches(cmdbuf, false) ||
@@ -6766,7 +7110,7 @@ draw_batch_enabled(void)
    static int enabled = -1;
 
    if (enabled < 0)
-      enabled = debug_get_bool_option("PANVK_DRAW_BATCH", false);
+      enabled = debug_get_bool_option("PANVK_DRAW_BATCH", true);
 
    return enabled;
 }
@@ -6844,12 +7188,27 @@ draw_batch_matches(struct panvk_cmd_buffer *cmdbuf, bool indexed)
    const uint32_t index_size =
       indexed ? cmdbuf->state.gfx.ib.index_size : 0;
 
-   return batch->indexed == indexed &&
-          batch->index_size == index_size &&
-          batch->prim == panvk_get_client_prim(cmdbuf) &&
-          batch->desc_gen == dev->desc_update_gen &&
-          memcmp(&batch->dyn, &cmdbuf->vk.dynamic_graphics_state,
-                 sizeof(batch->dyn)) == 0 &&
+   const struct vk_dynamic_graphics_state *d =
+      &cmdbuf->vk.dynamic_graphics_state;
+
+   if (batch->indexed != indexed || batch->index_size != index_size ||
+       batch->prim != panvk_get_client_prim(cmdbuf) ||
+       batch->desc_gen != dev->desc_update_gen)
+      return false;
+
+   /* Neither side has pending state changes: no setter ran since the batch
+    * began, so the values cannot differ. */
+   static const uint8_t zero_dirty[sizeof(d->dirty)] = {0};
+   if (!memcmp(d->dirty, zero_dirty, sizeof(d->dirty)) &&
+       !memcmp(batch->dyn.dirty, zero_dirty, sizeof(batch->dyn.dirty)) &&
+       !memcmp(&batch->dynamic, &cmdbuf->state.gfx.dynamic,
+               sizeof(batch->dynamic)))
+      return true;
+
+   /* Compare values only (the dirty bitset is the last member): a setter
+    * that rewrites an identical value must not break the batch. */
+   return memcmp(&batch->dyn, d,
+                 offsetof(struct vk_dynamic_graphics_state, dirty)) == 0 &&
           memcmp(&batch->dynamic, &cmdbuf->state.gfx.dynamic,
                  sizeof(batch->dynamic)) == 0;
 }
@@ -6965,6 +7324,9 @@ panvk_per_arch(CmdDrawIndexed)(VkCommandBuffer commandBuffer,
    /* gl_BaseInstance is a signed integer, and it should expose the value of
     * firstInstnace. */
    assert(firstInstance < INT32_MAX);
+
+   if (panvk_draw_is_empty(cmdbuf))
+      return;
 
    if (draw_batch_state_ok(cmdbuf)) {
       struct panvk_draw_batch *batch = &cmdbuf->draw_batch;
@@ -7471,6 +7833,9 @@ begin_rendering(struct panvk_cmd_buffer *cmdbuf,
       state->render.fb.nr_samples = suspended_sample_count;
    }
 
+   /* The first draw decides whether the color preloads are dead. */
+   load_dontcare_begin(cmdbuf, resuming);
+
    /* Renderpass lowering can fold an initial layout transition into
     * CmdBeginRendering() and report the old layout through
     * VkRenderingAttachmentInitialLayoutInfoMESA instead of an image barrier.
@@ -7598,6 +7963,10 @@ cmd_run_fullscreen(struct panvk_cmd_buffer *cmdbuf, uint64_t dcd,
       &cmdbuf->state.cs[PANVK_SUBQUEUE_VERTEX_TILER].tracing;
    struct cs_builder *b =
       panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER);
+
+   /* A meta draw writes color, so it takes the pass's preload decision even
+    * though it is not a candidate for the elision itself. */
+   cmdbuf->state.gfx.render.load_dontcare_pending = false;
 
    if (!inherits_render_ctx(cmdbuf)) {
       VkResult result = get_render_ctx(cmdbuf);
@@ -8733,6 +9102,10 @@ panvk_per_arch(cmd_draw_fullscreen)(struct vk_command_buffer *cmd,
    result = update_tls(cmdbuf);
    if (result != VK_SUCCESS)
       return;
+
+   /* A meta draw writes color, so it takes the pass's preload decision even
+    * though it is not a candidate for the elision itself. */
+   cmdbuf->state.gfx.render.load_dontcare_pending = false;
 
    if (!inherits_render_ctx(cmdbuf)) {
       result = get_render_ctx(cmdbuf);

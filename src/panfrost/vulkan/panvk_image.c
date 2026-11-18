@@ -355,7 +355,7 @@ panvk_image_get_mod(struct panvk_image *image,
    if (iusage.legacy_scanout || image->bc_emul)
       return DRM_FORMAT_MOD_LINEAR;
 
-   /* PANVK_AFRC is an experimental AFRC path, disabled by default. */
+   /* AFRC image compression is disabled; this always returns invalid. */
    uint64_t afrc_mod = panvk_image_try_afrc(image, &iusage);
    if (afrc_mod != DRM_FORMAT_MOD_INVALID)
       return afrc_mod;
@@ -461,14 +461,13 @@ panvk_should_checksum(struct panvk_image *image,
    return bytes_per_pixel <= 4;
 }
 
-/* PANVK_AFRC=16|24|32: opt-in fixed-rate lossy colour compression for
- * application-created images. 0 (default) keeps the existing modifier
- * selection untouched. */
+/* AFRC is currently unusable on this stack, so application images are never
+ * put into an AFRC modifier. The implementation below is kept for future
+ * hardware/bring-up work; a non-zero coding-unit size re-enables selection. */
 static unsigned
 panvk_afrc_cu_size(void)
 {
-   unsigned cu = debug_get_num_option("PANVK_AFRC", 0);
-   return (cu == 16 || cu == 24 || cu == 32) ? cu : 0;
+   return 0;
 }
 
 static uint64_t
@@ -532,7 +531,7 @@ panvk_image_try_afrc(struct panvk_image *image,
 static unsigned
 panvk_bc_afrc_cu_size(void)
 {
-   return debug_get_num_option("PANVK_BC_AFRC", 24);
+   return debug_get_num_option("PANVK_BC_AFRC", 0);
 }
 
 /* Internal RGBA8 colour image holding the decoded texels of a bc_afrc
@@ -680,6 +679,46 @@ panvk_bc_use_afrc(const struct panvk_image *image)
           !(image->vk.create_flags & (VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT |
                                       VK_IMAGE_CREATE_SPARSE_BINDING_BIT)) &&
           !PANVK_DEBUG(NO_GS);
+}
+
+/* Images whose content only transfers can change: a repeated upload of the
+ * same bytes can then skip the copy entirely. */
+static bool
+panvk_image_can_cache_uploads(const struct panvk_image *image,
+                              const VkImageCreateInfo *info)
+{
+   const VkImageUsageFlags allowed = VK_IMAGE_USAGE_SAMPLED_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+   if (image->bc_emul || image->plane_count != 1 ||
+       image->vk.image_type == VK_IMAGE_TYPE_1D ||
+       image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+       image->vk.external_handle_types ||
+       vk_format_is_compressed(image->vk.format) ||
+       vk_format_aspects(image->vk.format) != VK_IMAGE_ASPECT_COLOR_BIT ||
+       image->planes[0].image.props.crc ||
+       (info->usage & ~allowed) ||
+       !(info->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+      return false;
+
+   if (info->flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                      VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+                      VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
+                      VK_IMAGE_CREATE_ALIAS_BIT |
+                      VK_IMAGE_CREATE_DISJOINT_BIT |
+                      VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT |
+                      VK_IMAGE_CREATE_PROTECTED_BIT |
+                      VK_IMAGE_CREATE_EXTENDED_USAGE_BIT))
+      return false;
+
+   if (vk_find_struct_const(info->pNext, EXTERNAL_MEMORY_IMAGE_CREATE_INFO) ||
+       vk_find_struct_const(
+          info->pNext, IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT) ||
+       vk_find_struct_const(info->pNext, WSI_IMAGE_CREATE_INFO_MESA))
+      return false;
+
+   return true;
 }
 
 static VkResult
@@ -957,7 +996,12 @@ panvk_image_init(struct panvk_image *image,
     * we apply additional flags here. */
    panvk_image_post_mod_select_meta_adjustments(image);
 
-   return panvk_image_init_layouts(image, pCreateInfo);
+   VkResult result = panvk_image_init_layouts(image, pCreateInfo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   image->upload_cache = panvk_image_can_cache_uploads(image, pCreateInfo);
+   return VK_SUCCESS;
 }
 
 static void
@@ -1178,6 +1222,130 @@ err_destroy_image:
    return result;
 }
 
+struct panvk_upload_cache_entry {
+   struct panvk_upload_cache_entry *next;
+   struct panvk_image *img;
+   uint64_t *slot;
+   uint64_t hash;
+   VkFormat format;
+   uint32_t level;
+   uint32_t layer;
+   uint32_t width;
+   uint32_t height;
+};
+
+#define PANVK_UPLOAD_CACHE_MAX 4096
+
+void
+panvk_upload_cache_forget_image(struct panvk_image *img)
+{
+   struct panvk_device *dev = to_panvk_device(img->vk.base.device);
+   struct panvk_upload_cache_entry **link = &dev->upload_cache;
+
+   simple_mtx_lock(&dev->upload_cache_lock);
+   while (*link) {
+      struct panvk_upload_cache_entry *e = *link;
+
+      if (e->img == img) {
+         *link = e->next;
+         dev->upload_cache_count--;
+         vk_free(&dev->vk.alloc, e);
+      } else {
+         link = &e->next;
+      }
+   }
+   simple_mtx_unlock(&dev->upload_cache_lock);
+}
+
+bool
+panvk_upload_cache_lookup(struct panvk_device *dev, uint64_t hash,
+                          VkFormat format, uint32_t width, uint32_t height,
+                          struct panvk_image **out_img, uint32_t *out_level,
+                          uint32_t *out_layer)
+{
+   bool found = false;
+
+   simple_mtx_lock(&dev->upload_cache_lock);
+   for (struct panvk_upload_cache_entry *e = dev->upload_cache; e; e = e->next) {
+      if (e->hash != hash || e->format != format || e->width != width ||
+          e->height != height || *e->slot != hash)
+         continue;
+
+      *out_img = e->img;
+      *out_level = e->level;
+      *out_layer = e->layer;
+      found = true;
+      break;
+   }
+   simple_mtx_unlock(&dev->upload_cache_lock);
+
+   return found;
+}
+
+void
+panvk_upload_cache_touch(struct panvk_device *dev, struct panvk_image *img,
+                         uint64_t *slot, uint64_t hash, VkFormat format,
+                         uint32_t level, uint32_t layer, uint32_t width,
+                         uint32_t height)
+{
+   simple_mtx_lock(&dev->upload_cache_lock);
+
+   for (struct panvk_upload_cache_entry *e = dev->upload_cache; e; e = e->next) {
+      if (e->slot == slot)
+         e->hash = hash; /* keep it, the pointer and dims are unchanged */
+      if (e->hash == hash && e->format == format && e->width == width &&
+          e->height == height && *e->slot == hash) {
+         simple_mtx_unlock(&dev->upload_cache_lock);
+         return;
+      }
+   }
+
+   if (dev->upload_cache_count >= PANVK_UPLOAD_CACHE_MAX) {
+      simple_mtx_unlock(&dev->upload_cache_lock);
+      return;
+   }
+
+   struct panvk_upload_cache_entry *e =
+      vk_zalloc(&dev->vk.alloc, sizeof(*e), 8,
+                VK_SYSTEM_ALLOCATION_SCOPE_CACHE);
+   if (!e) {
+      simple_mtx_unlock(&dev->upload_cache_lock);
+      return;
+   }
+
+   *e = (struct panvk_upload_cache_entry){
+      .next = dev->upload_cache,
+      .img = img,
+      .slot = slot,
+      .hash = hash,
+      .format = format,
+      .level = level,
+      .layer = layer,
+      .width = width,
+      .height = height,
+   };
+   dev->upload_cache = e;
+   dev->upload_cache_count++;
+
+   simple_mtx_unlock(&dev->upload_cache_lock);
+}
+
+void
+panvk_upload_cache_fini(struct panvk_device *dev)
+{
+   struct panvk_upload_cache_entry *e = dev->upload_cache;
+
+   while (e) {
+      struct panvk_upload_cache_entry *next = e->next;
+
+      vk_free(&dev->vk.alloc, e);
+      e = next;
+   }
+   dev->upload_cache = NULL;
+   dev->upload_cache_count = 0;
+   simple_mtx_destroy(&dev->upload_cache_lock);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_DestroyImage(VkDevice _device, VkImage _image,
                    const VkAllocationCallbacks *pAllocator)
@@ -1189,6 +1357,9 @@ panvk_DestroyImage(VkDevice _device, VkImage _image,
       return;
 
    panvk_DestroyImage(_device, image->bc_shadow, pAllocator);
+
+   panvk_upload_cache_forget_image(image);
+   vk_free2(&device->vk.alloc, NULL, image->upload_src_hash);
 
    if (image->vk.create_flags &
        VK_IMAGE_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT) {

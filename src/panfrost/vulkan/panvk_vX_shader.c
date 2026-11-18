@@ -4165,6 +4165,28 @@ compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       use_static_noperspective = true;
    }
 
+   /* Cross-stage varying pruning: when the fragment shader is compiled
+    * together with its producer, drop varyings the FS never reads and rewrite
+    * FS inputs that only consume constants.  This must run before either stage
+    * is compiled so the producer's varying layout does not reserve dead slots.
+    */
+   if (shader_count >= 2 &&
+       infos[shader_count - 1].stage == MESA_SHADER_FRAGMENT &&
+       (infos[shader_count - 2].stage == MESA_SHADER_VERTEX ||
+        infos[shader_count - 2].stage == MESA_SHADER_TESS_EVAL)) {
+      nir_shader *producer = infos[shader_count - 2].nir;
+      nir_shader *consumer = infos[shader_count - 1].nir;
+
+      nir_link_opt_varyings(producer, consumer);
+
+      if (nir_remove_unused_varyings(producer, consumer)) {
+         nir_opt_dce(producer);
+         nir_opt_dce(consumer);
+         nir_shader_gather_info(producer, nir_shader_get_entrypoint(producer));
+         nir_shader_gather_info(consumer, nir_shader_get_entrypoint(consumer));
+      }
+   }
+
    /* Vulkan runtime passes us shaders in stage order */
    for (i = 0; i < shader_count; i++) {
       const uint32_t *noperspective_varyings_ptr =

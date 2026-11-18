@@ -100,6 +100,24 @@ panvk_afbc_reswizzle_border_color(VkClearColorValue *border_color, VkFormat fmt)
 }
 #endif
 
+/* Optional quality-reduction knobs. Both default to off/neutral so normal
+ * behavior is unchanged unless an application or user asks for it. */
+DEBUG_GET_ONCE_BOOL_OPTION(low_quality_opt, "PANVK_LOW_QUALITY", false)
+
+static float
+lod_bias_option(void)
+{
+   static int initialized;
+   static float bias;
+
+   if (!initialized) {
+      bias = (float)atof(debug_get_option("PANVK_LOD_BIAS", "0"));
+      initialized = 1;
+   }
+
+   return bias;
+}
+
 static void
 panvk_sampler_fill_desc(const struct VkSamplerCreateInfo *info,
                         struct mali_sampler_packed *desc,
@@ -109,6 +127,10 @@ panvk_sampler_fill_desc(const struct VkSamplerCreateInfo *info,
                         VkSamplerCreateFlags flags)
 {
    bool use_aniso = info->anisotropyEnable && info->maxAnisotropy > 1;
+   const float extra_lod_bias = lod_bias_option();
+
+   if (debug_get_option_low_quality_opt())
+      use_aniso = false;
    pan_pack(desc, SAMPLER, cfg) {
       cfg.magnify_nearest = mag_filter == VK_FILTER_NEAREST;
       cfg.minify_nearest = min_filter == VK_FILTER_NEAREST;
@@ -135,7 +157,7 @@ panvk_sampler_fill_desc(const struct VkSamplerCreateInfo *info,
           mag_filter == VK_FILTER_NEAREST)
          cfg.round_to_nearest_even = false;
 
-      cfg.lod_bias = info->mipLodBias;
+      cfg.lod_bias = info->mipLodBias + extra_lod_bias;
       cfg.minimum_lod = info->minLod;
       cfg.maximum_lod = info->maxLod;
       cfg.wrap_mode_s =

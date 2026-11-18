@@ -66,10 +66,31 @@ struct panvk_image {
    struct panvk_image_plane bc_decoded;
    uint64_t bc_decoded_offset;
    VkImage bc_shadow;
+
+   /* XXH64 of the bytes most recently uploaded into each (level, layer),
+    * 0 when unknown. Lazily allocated. Tracked for BC-emulated images and for
+    * upload-only sampled images, see panvk_per_arch(CmdCopyBufferToImage2). */
+   uint64_t *upload_src_hash;
+
+   /* Uploads can be skipped when the copied bytes did not change since the
+    * last upload. Only for images nothing but transfers can write. */
+   bool upload_cache;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_image, vk.base, VkImage,
                                VK_OBJECT_TYPE_IMAGE)
+
+/* Decoded-BC content cache, shared by all images of a device. */
+void panvk_upload_cache_fini(struct panvk_device *dev);
+void panvk_upload_cache_forget_image(struct panvk_image *img);
+bool panvk_upload_cache_lookup(struct panvk_device *dev, uint64_t hash,
+                               VkFormat format, uint32_t width, uint32_t height,
+                               struct panvk_image **out_img,
+                               uint32_t *out_level, uint32_t *out_layer);
+void panvk_upload_cache_touch(struct panvk_device *dev, struct panvk_image *img,
+                              uint64_t *slot, uint64_t hash, VkFormat format,
+                              uint32_t level, uint32_t layer, uint32_t width,
+                              uint32_t height);
 
 
 static inline void

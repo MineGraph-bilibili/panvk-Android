@@ -665,6 +665,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    panvk_device_init_mempools(device);
    simple_mtx_init(&device->tls.lock, mtx_plain);
    simple_mtx_init(&device->bc_pipeline_mtx, mtx_plain);
+   simple_mtx_init(&device->upload_cache_lock, mtx_plain);
    util_dynarray_init(&device->tls.bos, NULL);
 
 #if PAN_ARCH >= 9
@@ -910,6 +911,7 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
    if (device->depth_bounds_fs)
       vk_shader_destroy(&device->vk, &device->depth_bounds_fs->vk, NULL);
    panvk_per_arch(bc_prewarm_finish)(device);
+   panvk_upload_cache_fini(device);
    simple_mtx_destroy(&device->bc_pipeline_mtx);
    panvk_meta_cleanup(device);
    vk_pipeline_cache_destroy(device->vk.mem_cache, NULL);

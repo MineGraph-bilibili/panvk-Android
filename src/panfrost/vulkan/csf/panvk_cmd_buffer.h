@@ -595,7 +595,7 @@ struct panvk_cond_render_state {
    enum mali_cs_condition exec_cond;
 };
 
-#define PANVK_DRAW_BATCH_MAX 64
+#define PANVK_DRAW_BATCH_MAX 256
 
 /* Consecutive vkCmdDraw / vkCmdDrawIndexed calls with the same state are
  * collected and emitted as one multi-draw. Any state-changing command flushes
@@ -623,6 +623,23 @@ struct panvk_draw_batch {
    } draws;
 };
 
+/* Values last written to the static IDVS system registers by this command
+ * buffer's CS. Draws that reuse the same pipeline and index buffer skip the
+ * redundant register writes. Invalidated whenever a new CS stream starts or
+ * another command buffer may have changed the register file.
+ */
+struct panvk_vt_sr_cache {
+   bool ga_offset_valid;
+   uint32_t ga_offset;
+   bool instance_offset_valid;
+   uint32_t instance_offset;
+   bool vary_size_valid;
+   uint32_t vary_size;
+   bool ib_valid;
+   uint64_t ib_addr;
+   uint32_t ib_size;
+};
+
 struct panvk_cmd_buffer {
    struct vk_command_buffer vk;
    VkCommandBufferUsageFlags flags;
@@ -633,22 +650,7 @@ struct panvk_cmd_buffer {
 
    struct panvk_draw_batch draw_batch;
 
-   /* Values last written to the static IDVS system registers by this command
-    * buffer's CS. Draws that reuse the same pipeline and index buffer skip the
-    * redundant register writes. Invalidated whenever a new CS stream starts or
-    * another command buffer may have changed the register file.
-    */
-   struct {
-      bool ga_offset_valid;
-      uint32_t ga_offset;
-      bool instance_offset_valid;
-      uint32_t instance_offset;
-      bool vary_size_valid;
-      uint32_t vary_size;
-      bool ib_valid;
-      uint64_t ib_addr;
-      uint32_t ib_size;
-   } vt_sr_cache;
+   struct panvk_vt_sr_cache vt_sr_cache;
 
    struct {
       struct u_trace uts[PANVK_SUBQUEUE_COUNT];

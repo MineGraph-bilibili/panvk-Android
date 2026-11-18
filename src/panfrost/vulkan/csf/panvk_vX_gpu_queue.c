@@ -509,6 +509,13 @@ kbase_tiler_heap_max_chunks(const struct panvk_physical_device *phys_dev)
    return MAX2(phys_dev->csf.tiler.max_chunks,
                DIV_ROUND_UP(200u << 20, phys_dev->csf.tiler.chunk_size));
 }
+/* Initial heap must cover the largest single submission: the GPU waits on
+ * the tiler iterator (and eventually hits the 10s job timeout) if a frame's
+ * polygon list does not fit.  The old 10 MiB budget (2 chunks of 8 MiB) hung
+ * on a test frame drawing 2.4M+ vertices in one submit, so budget 48 MiB,
+ * which covers roughly 12M vertices at the observed ~4B/vertex. */
+#define KBASE_TILER_HEAP_INITIAL_BYTES (48u << 20)
+
 /* Heap geometry used by the kbase backend, overridable with
  * PANVK_KBASE_HEAP_CHUNKS=<initial>[,<max>].  The panthor defaults were sized
  * for a much larger heap and leave several MiB resident per context; the
@@ -520,7 +527,8 @@ kbase_heap_chunks(const struct panvk_physical_device *phys_dev,
    static uint32_t initial, max;
 
    if (!initial) {
-      uint32_t initial_opt = MIN2(phys_dev->csf.tiler.initial_chunks, 4);
+      uint32_t initial_opt = DIV_ROUND_UP(KBASE_TILER_HEAP_INITIAL_BYTES,
+                                          phys_dev->csf.tiler.chunk_size);
       uint32_t max_opt = kbase_tiler_heap_max_chunks(phys_dev);
       const char *str = debug_get_option("PANVK_KBASE_HEAP_CHUNKS", NULL);
 

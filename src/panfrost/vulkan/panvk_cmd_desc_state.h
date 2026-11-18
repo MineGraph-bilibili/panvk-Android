@@ -69,6 +69,13 @@ struct panvk_descriptor_state {
       uint64_t dev_addr;
       uint32_t size;
    } desc_buffer_sets[MAX_SETS];
+
+   /* Last push-descriptor payload, used to skip identical re-pushes. */
+   struct {
+      const struct panvk_descriptor_set *push_set;
+      uint32_t len;
+      uint8_t data[256];
+   } last_push;
 };
 
 #if PAN_ARCH < 9
