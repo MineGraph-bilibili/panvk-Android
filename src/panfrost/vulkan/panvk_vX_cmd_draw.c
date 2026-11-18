@@ -1215,11 +1215,41 @@ panvk_per_arch(CmdBindVertexBuffers2)(VkCommandBuffer commandBuffer,
                                       const VkDeviceSize *pStrides)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+
+   assert(firstBinding + bindingCount <= MAX_VBS);
+
+   const struct vk_dynamic_graphics_state *dyns =
+      &cmdbuf->vk.dynamic_graphics_state;
+   bool changed = firstBinding + bindingCount > cmdbuf->state.gfx.vb.count;
+
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
+      uint64_t address = 0;
+      uint64_t size = 0;
+
+      if (buffer) {
+         address = panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
+         size = panvk_buffer_range(buffer, pOffsets[i],
+                                   pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+      }
+
+      const struct panvk_attrib_buf *bound =
+         &cmdbuf->state.gfx.vb.bufs[firstBinding + i];
+
+      if (bound->address != address || bound->size != size ||
+          (pStrides &&
+           dyns->vi_binding_strides[firstBinding + i] != pStrides[i]))
+         changed = true;
+   }
+
+   /* Applications commonly re-bind the same vertex buffers; do not disturb
+    * the draw batch or the vertex descriptors for those. */
+   if (!changed)
+      return;
+
 #if PAN_ARCH >= 10
    panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
 #endif
-
-   assert(firstBinding + bindingCount <= MAX_VBS);
 
    if (pStrides) {
       vk_cmd_set_vertex_binding_strides(&cmdbuf->vk, firstBinding,
@@ -1253,22 +1283,36 @@ panvk_per_arch(CmdBindIndexBuffer2)(VkCommandBuffer commandBuffer,
                                     VkDeviceSize size, VkIndexType indexType)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
-#if PAN_ARCH >= 10
-   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
-#endif
    VK_FROM_HANDLE(panvk_buffer, buf, buffer);
 
+   uint64_t dev_addr, range;
+
    if (buf) {
-      cmdbuf->state.gfx.ib.size = panvk_buffer_range(buf, offset, size);
-      assert(cmdbuf->state.gfx.ib.size <= UINT32_MAX);
-      cmdbuf->state.gfx.ib.dev_addr = panvk_buffer_gpu_ptr(buf, offset);
+      range = panvk_buffer_range(buf, offset, size);
+      assert(range <= UINT32_MAX);
+      dev_addr = panvk_buffer_gpu_ptr(buf, offset);
    } else {
-      cmdbuf->state.gfx.ib.size = 0;
+      range = 0;
       /* In case of NullDescriptors, we need to set a non-NULL address and rely
        * on out-of-bounds behavior against the zero size of the buffer. Note
        * that this only works for v10+, as v9 does not have a way to specify the
        * index buffer size. */
-      cmdbuf->state.gfx.ib.dev_addr = PAN_ARCH >= 10 ? 0x1000 : 0;
+      dev_addr = PAN_ARCH >= 10 ? 0x1000 : 0;
    }
-   cmdbuf->state.gfx.ib.index_size = vk_index_type_to_bytes(indexType);
+
+   const uint8_t index_size = vk_index_type_to_bytes(indexType);
+
+   /* Same as vertex buffers: a redundant re-bind changes nothing. */
+   if (cmdbuf->state.gfx.ib.dev_addr == dev_addr &&
+       cmdbuf->state.gfx.ib.size == range &&
+       cmdbuf->state.gfx.ib.index_size == index_size)
+      return;
+
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
+
+   cmdbuf->state.gfx.ib.size = range;
+   cmdbuf->state.gfx.ib.dev_addr = dev_addr;
+   cmdbuf->state.gfx.ib.index_size = index_size;
 }
