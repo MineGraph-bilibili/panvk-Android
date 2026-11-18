@@ -3233,6 +3233,18 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
       const struct vk_sync_wait *wait = &vk_submit->waits[w];
       uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT];
       void *owner;
+      bool duplicate = false;
+
+      /* Waiting a second time on the same sync/value pair is a no-op. */
+      for (uint32_t p = 0; p < w; p++) {
+         if (vk_submit->waits[p].sync == wait->sync &&
+             vk_submit->waits[p].wait_value == wait->wait_value) {
+            duplicate = true;
+            break;
+         }
+      }
+      if (duplicate)
+         continue;
 
       if (!kbase_gpu_waits_disabled() && wait->wait_value == 0 &&
           panvk_kbase_sync_peek(wait->sync, &owner, targets) &&
