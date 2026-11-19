@@ -150,9 +150,6 @@ panvk_ResetCommandPool(VkDevice _device, VkCommandPool commandPool,
 
    const bool release_resources =
       (flags & VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT) != 0;
-   if (release_resources) {
-      panvk_bo_pool_cleanup(&pool->tls_big_bo_pool);
-   }
 
    struct panvk_bo_pool *bo_pools[PANVK_CMD_POOL_BO_POOLS];
    unsigned before[PANVK_CMD_POOL_BO_POOLS] = {0};
@@ -165,10 +162,25 @@ panvk_ResetCommandPool(VkDevice _device, VkCommandPool commandPool,
    }
 
    VkResult result = vk_common_ResetCommandPool(_device, commandPool, flags);
+   if (result != VK_SUCCESS)
+      return result;
 
-   /* The command buffer resets above splice their BOs into the pool free
-    * lists. */
-   if (result == VK_SUCCESS && autotrim) {
+   if (release_resources) {
+      /* Explicit resource release must drop every free list, not only the
+       * large-TLS pool; the command buffer resets above have already returned
+       * their BOs to these lists. */
+      panvk_cmd_pool_bo_pools(pool, bo_pools);
+      for (unsigned i = 0; i < PANVK_CMD_POOL_BO_POOLS; i++)
+         panvk_bo_pool_cleanup(bo_pools[i]);
+
+      pool->autotrim.resets = 0;
+      for (unsigned i = 0; i < PANVK_CMD_POOL_BO_POOLS; i++) {
+         pool->autotrim.cur[i] = 0;
+         pool->autotrim.prev[i] = 0;
+      }
+   } else if (autotrim) {
+      /* The command buffer resets above splice their BOs into the pool free
+       * lists. */
       const unsigned window = panvk_cmd_pool_autotrim_window();
       for (unsigned i = 0; i < PANVK_CMD_POOL_BO_POOLS; i++) {
          const unsigned after = list_length(&bo_pools[i]->free_bos);

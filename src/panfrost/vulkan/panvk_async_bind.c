@@ -32,7 +32,9 @@ static struct sparse_mirror_rec sparse_mirror_recs[SPARSE_MIRROR_MAX];
 static uint32_t sparse_mirror_rec_count;
 static uint32_t sparse_mirror_cursor;
 static uint64_t sparse_mirror_bytes;
+#ifdef PANVK_DIAG_ENABLE
 static uint32_t sparse_mirror_submits;
+#endif
 static uint64_t sparse_mirror_up_bytes;
 static uint64_t sparse_mirror_down_bytes;
 static uint32_t sparse_mirror_syncs;
@@ -598,6 +600,7 @@ panvk_queue_vm_bind_kbase(struct vk_queue *vk_queue,
          return vk_queue_set_lost(vk_queue, "kbase sparse bind wait: %m");
    }
 
+#ifdef PANVK_DIAG_ENABLE
    uint32_t buffer_bind_count = 0, image_opaque_bind_count = 0,
             image_bind_count = 0;
    for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++)
@@ -681,6 +684,7 @@ panvk_queue_vm_bind_kbase(struct vk_queue *vk_queue,
               sparse_mirror_rec_count,
               (unsigned long long)(sparse_mirror_bytes >> 20));
    }
+#endif
 
    /* Publish GPU results of the previous binding, then upload the new
     * contents, for exactly the ranges being (re)bound. */
@@ -694,12 +698,14 @@ panvk_queue_vm_bind_kbase(struct vk_queue *vk_queue,
       }
    }
 
+#ifdef PANVK_DIAG_ENABLE
    if ((++sparse_mirror_submits % 64) == 0) {
       PANVK_DIAG_PRINTF("[PANVK-DIAG] mirror stats: submits=%u recs=%u "
               "total=%llu MiB\n",
               sparse_mirror_submits, sparse_mirror_rec_count,
               (unsigned long long)(sparse_mirror_bytes >> 20));
    }
+#endif
 
    for (uint32_t i = 0; i < vk_submit->signal_count; i++) {
       const struct vk_sync_signal *signal = &vk_submit->signals[i];
@@ -816,6 +822,7 @@ sparse_mirror_sync_bind(VkBuffer buf, VkDeviceMemory mem, uint64_t res_off,
                         sparse_mirror_rec_count);
 }
 
+#ifdef PANVK_DIAG_ENABLE
 static void
 sparse_probe_words(const void *base, uint64_t offset, uint64_t size,
                    uint64_t *nz, uint64_t *hash)
@@ -830,10 +837,12 @@ sparse_probe_words(const void *base, uint64_t offset, uint64_t size,
       *hash = (*hash ^ p[i]) * 1099511628211ull;
    }
 }
+#endif
 
 void
 panvk_sparse_mirror_probe(void)
 {
+#ifdef PANVK_DIAG_ENABLE
    static uint32_t probe_ticks;
 
    if ((probe_ticks++ % 8) != 0 || sparse_mirror_rec_count == 0)
@@ -920,4 +929,5 @@ panvk_sparse_mirror_probe(void)
 
       pan_kmod_bo_munmap(b->sparse_backing, bhost, 0);
    }
+#endif
 }

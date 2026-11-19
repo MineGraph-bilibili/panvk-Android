@@ -161,6 +161,12 @@ struct panvk_device {
    struct {
       simple_mtx_t lock;
       struct util_dynarray bos;
+      /* Sparse TLS alias state, per device. A permanent failure (the ioctl is
+       * unsupported) must disable aliasing for this device only; a transient
+       * one is retried after a backoff instead of falling back for the whole
+       * process lifetime. */
+      bool sparse_disabled;
+      uint64_t sparse_retry_ns;
    } tls;
 
    struct {

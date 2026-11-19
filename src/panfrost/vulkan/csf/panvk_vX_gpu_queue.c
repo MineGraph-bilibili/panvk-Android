@@ -506,6 +506,9 @@ kbase_subqueue_reserve_ring(struct panvk_gpu_queue *queue,
  * until TERM, so the initial size bounds idle memory while the heap still
  * grows on demand. */
 #define KBASE_TILER_HEAP_MAX_FLOOR_BYTES (200u << 20)
+/* Upper bound for explicitly configured max chunk counts: 4 GiB of tiler
+ * heap. Larger values do not help real workloads and can OOM the system. */
+#define KBASE_TILER_HEAP_ABS_MAX_BYTES (4ull << 30)
 
 /* Per-heap chunk limit: the configured count, but never below 200 MiB. */
 static uint32_t
@@ -527,9 +530,19 @@ kbase_heap_chunks(const struct panvk_physical_device *phys_dev,
                   uint32_t *initial_chunks, uint32_t *max_chunks)
 {
    static uint32_t initial, max;
+   static uint32_t cached_chunk_size, cached_initial_cfg, cached_max_cfg;
 
-   if (!initial) {
-      uint32_t initial_opt = phys_dev->csf.tiler.initial_chunks;
+   const uint32_t chunk_size = phys_dev->csf.tiler.chunk_size;
+   const uint32_t initial_cfg = phys_dev->csf.tiler.initial_chunks;
+   const uint32_t max_cfg = phys_dev->csf.tiler.max_chunks;
+
+   /* The byte budgets depend only on the chunk size, but key the cache on the
+    * full per-device geometry so a second physical device (or a different
+    * PANVK_KBASE_TILER_CHUNK_KB layout) cannot reuse stale values. */
+   if (cached_chunk_size != chunk_size ||
+       cached_initial_cfg != initial_cfg ||
+       cached_max_cfg != max_cfg) {
+      uint32_t initial_opt = initial_cfg;
       uint32_t max_opt = kbase_tiler_heap_max_chunks(phys_dev);
       const char *str = debug_get_option("PANVK_KBASE_HEAP_CHUNKS", NULL);
 
@@ -548,10 +561,18 @@ kbase_heap_chunks(const struct panvk_physical_device *phys_dev,
          }
       }
 
-      initial = initial_opt;
-      max = max_opt;
+      /* Clamp explicit values: max must never exceed a sane byte budget, and
+       * initial must fit within max or heap creation fails. */
+      const uint32_t abs_max =
+         (uint32_t)DIV_ROUND_UP(KBASE_TILER_HEAP_ABS_MAX_BYTES, chunk_size);
+      max = MIN2(max_opt, abs_max);
+      initial = MIN2(MAX2(initial_opt, 1), max);
+
+      cached_chunk_size = chunk_size;
+      cached_initial_cfg = initial_cfg;
+      cached_max_cfg = max_cfg;
       mesa_logi("kbase: tiler heaps %u initial / %u max chunks of %u KiB",
-                initial, max, phys_dev->csf.tiler.chunk_size / 1024);
+                initial, max, chunk_size / 1024);
    }
 
    *initial_chunks = initial;

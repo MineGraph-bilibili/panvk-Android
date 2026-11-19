@@ -196,12 +196,14 @@ dev_tls_page(void)
 /* Returns the alias region VA, or 0. */
 static uint64_t
 dev_tls_alias(struct panvk_device *dev, const struct panvk_priv_bo *backing,
-              const struct dev_tls_layout *l)
+              const struct dev_tls_layout *l, int *err_out)
 {
    const uint64_t page = dev_tls_page();
    const uint64_t stride = l->per_core / page;
    struct base_mem_aliasing_info ai[64];
    unsigned idx = 0;
+
+   *err_out = 0;
 
    for (unsigned c = 0; c < l->range; c++) {
       const bool present = (l->present >> c) & 1;
@@ -225,8 +227,10 @@ dev_tls_alias(struct panvk_device *dev, const struct panvk_priv_bo *backing,
    };
 
    if (ioctl(dev->kmod.dev->fd, KBASE_IOCTL_MEM_ALIAS, &req)) {
+      const int err = errno;
+      *err_out = err;
       mesa_logw("panvk: device TLS: KBASE_IOCTL_MEM_ALIAS failed (%s), "
-                "using a full BO", strerror(errno));
+                "using a full BO", strerror(err));
       return 0;
    }
 
@@ -235,8 +239,10 @@ dev_tls_alias(struct panvk_device *dev, const struct panvk_priv_bo *backing,
    void *ptr = mmap(NULL, l->span, PROT_READ, MAP_SHARED, dev->kmod.dev->fd,
                     req.out.gpu_va);
    if (ptr == MAP_FAILED) {
+      const int err = errno;
+      *err_out = err;
       mesa_logw("panvk: device TLS: alias mmap failed (%s), using a full BO",
-                strerror(errno));
+                strerror(err));
       struct kbase_ioctl_mem_free free_req = {.gpu_addr = req.out.gpu_va};
       ioctl(dev->kmod.dev->fd, KBASE_IOCTL_MEM_FREE, &free_req);
       return 0;
@@ -254,21 +260,25 @@ dev_tls_create(struct panvk_device *dev, const struct dev_tls_layout *l)
    struct panvk_priv_bo *bo = NULL;
 
 #ifdef HAVE_PAN_KMOD_KBASE
-   static int sparse_broken;
    const struct panvk_physical_device *pdev =
       to_panvk_physical_device(dev->vk.physical);
    const unsigned cores = util_bitcount64(l->present);
+   const uint64_t now = os_time_get_nano();
 
    if (pdev->kbase_node_path[0] && dev_tls_sparse() &&
-       !p_atomic_read(&sparse_broken) && !dev->debug.decode_ctx &&
-       cores && cores < l->range && l->range <= 64 &&
-       l->per_core * l->range == l->span && !(l->per_core % dev_tls_page()) &&
+       !dev->tls.sparse_disabled &&
+       (!dev->tls.sparse_retry_ns || now >= dev->tls.sparse_retry_ns) &&
+       !dev->debug.decode_ctx && cores && cores < l->range &&
+       l->range <= 64 && l->per_core * l->range == l->span &&
+       !(l->per_core % dev_tls_page()) &&
        !(flags & PAN_KMOD_BO_FLAG_GPU_UNCACHED)) {
       if (panvk_priv_bo_create(dev, l->per_core * cores, flags,
                                VK_SYSTEM_ALLOCATION_SCOPE_DEVICE,
                                &bo) == VK_SUCCESS) {
-         const uint64_t va = dev_tls_alias(dev, bo, l);
+         int alias_err = 0;
+         const uint64_t va = dev_tls_alias(dev, bo, l, &alias_err);
          if (va) {
+            dev->tls.sparse_retry_ns = 0;
             bo->addr.dev = va;
             bo->alias_size = l->span;
             mesa_logi("panvk: device TLS %u B/thread x %u threads x %u core "
@@ -280,7 +290,16 @@ dev_tls_create(struct panvk_device *dev, const struct dev_tls_layout *l)
          }
          panvk_priv_bo_unref(bo);
          bo = NULL;
-         p_atomic_set(&sparse_broken, 1);
+         if (alias_err == EINVAL || alias_err == ENOTTY ||
+             alias_err == ENOSYS) {
+            /* The kernel does not support aliasing this layout: retrying is
+             * pointless, but only for this device. */
+            dev->tls.sparse_disabled = true;
+         } else {
+            /* Transient failure (e.g. ENOMEM): retry later instead of
+             * disabling sparse TLS for the whole process. */
+            dev->tls.sparse_retry_ns = now + 60ull * 1000000000ull;
+         }
       }
    }
 #endif
