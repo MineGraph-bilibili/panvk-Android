@@ -49,7 +49,7 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
          pan_kmod_bo_mmap(bo, PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
       if (priv_bo->addr.host == MAP_FAILED) {
          if (size >= (8ull << 20))
-            PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo mmap FAIL size=%llu MiB "
+            mesa_loge("[PANVK-DIAG] priv_bo mmap FAIL size=%llu MiB "
                     "errno=%d\n", (unsigned long long)(size >> 20), errno);
          result = panvk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
          goto err_put_bo;
@@ -81,7 +81,7 @@ panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
    ret = pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
    if (ret) {
       if (size >= (8ull << 20))
-         PANVK_DIAG_PRINTF("[PANVK-DIAG] priv_bo vm_bind FAIL size=%llu MiB "
+         mesa_loge("[PANVK-DIAG] priv_bo vm_bind FAIL size=%llu MiB "
                  "ret=%d errno=%d\n", (unsigned long long)(size >> 20), ret,
                  errno);
       result = panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);

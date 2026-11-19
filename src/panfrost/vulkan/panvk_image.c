@@ -531,7 +531,7 @@ panvk_image_try_afrc(struct panvk_image *image,
 static unsigned
 panvk_bc_afrc_cu_size(void)
 {
-   return debug_get_num_option("PANVK_BC_AFRC", 0);
+   return debug_get_num_option("PANVK_BC_AFRC", 24);
 }
 
 /* Internal RGBA8 colour image holding the decoded texels of a bc_afrc

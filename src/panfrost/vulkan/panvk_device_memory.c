@@ -640,7 +640,7 @@ panvk_AllocateMemory(VkDevice _device,
                                   shareable ? NULL : device->kmod.vm,
                                   pAllocateInfo->allocationSize, bo_flags);
       if (!mem->bo) {
-         PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL bo size=%llu type=%u heap_used=%llu MiB\n",
+         mesa_loge("[PANVK-DIAG] AllocateMemory FAIL bo size=%llu type=%u heap_used=%llu MiB\n",
                  (unsigned long long)pAllocateInfo->allocationSize,
                  pAllocateInfo->memoryTypeIndex,
                  (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
@@ -691,7 +691,7 @@ panvk_AllocateMemory(VkDevice _device,
       }
 
       if (!op.va.start) {
-         PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL va size=%llu type=%u heap_used=%llu MiB\n",
+         mesa_loge("[PANVK-DIAG] AllocateMemory FAIL va size=%llu type=%u heap_used=%llu MiB\n",
                  (unsigned long long)pAllocateInfo->allocationSize,
                  pAllocateInfo->memoryTypeIndex,
                  (unsigned long long)(p_atomic_read(&physical_device->memory.heap_used) >> 20));
@@ -703,7 +703,7 @@ panvk_AllocateMemory(VkDevice _device,
    int ret =
       pan_kmod_vm_bind(device->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &op, 1);
    if (ret) {
-      PANVK_DIAG_PRINTF("[PANVK-DIAG] AllocateMemory FAIL bind size=%llu type=%u ret=%d\n",
+      mesa_loge("[PANVK-DIAG] AllocateMemory FAIL bind size=%llu type=%u ret=%d\n",
               (unsigned long long)pAllocateInfo->allocationSize,
               pAllocateInfo->memoryTypeIndex, ret);
       result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);

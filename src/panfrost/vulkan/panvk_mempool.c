@@ -162,7 +162,7 @@ panvk_pool_alloc_mem(struct panvk_pool *pool, struct panvk_pool_alloc_info info)
    if (!bo) {
       /* Pool allocations are indirect; make failures visible before the
        * caller turns them into a VkResult (which may be lost on abort). */
-      PANVK_DIAG_PRINTF("[PANVK-DIAG] pool alloc FAIL size=%zu align=%u "
+      mesa_loge("[PANVK-DIAG] pool alloc FAIL size=%zu align=%u "
               "slab=%zu flags=0x%x owns=%d pool=%p errno=%d\n",
               info.size, info.alignment, pool->base.slab_size,
               pool->props.create_flags, (int)pool->props.owns_bos, pool, errno);

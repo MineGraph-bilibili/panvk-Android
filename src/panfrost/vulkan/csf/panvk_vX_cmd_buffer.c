@@ -454,7 +454,7 @@ flush_sync_points(struct panvk_cmd_buffer *cmdbuf)
       struct cs_builder *b = panvk_get_cs_builder(cmdbuf, i);
 
       if (!cs_is_valid(b)) {
-         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+         mesa_loge("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
 vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
       }
@@ -647,7 +647,7 @@ panvk_per_arch(EndCommandBuffer)(VkCommandBuffer commandBuffer)
       struct cs_builder *b = &cmdbuf->state.cs[i].builder;
 
       if (!cs_is_valid(b)) {
-         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+         mesa_loge("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
 vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       } else if (!cs_is_empty(b)) {
          /* An empty stream is never submitted (see
@@ -664,7 +664,7 @@ vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
    VkResult end_result = vk_command_buffer_end(&cmdbuf->vk);
    if (end_result != VK_SUCCESS)
-      PANVK_DIAG_PRINTF("[PANVK-DIAG] EndCommandBuffer FAIL result=%d\n",
+      mesa_loge("[PANVK-DIAG] EndCommandBuffer FAIL result=%d\n",
               end_result);
    return end_result;
 }
@@ -1774,7 +1774,7 @@ panvk_per_arch(cmd_cut_vmr_segment)(struct panvk_cmd_buffer *cmdbuf)
       cs_wait_slots(b, dev->csf.sb.all_mask);
       cs_end(b);
       if (!cs_is_valid(b)) {
-         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
+         mesa_loge("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__);
 vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
       }

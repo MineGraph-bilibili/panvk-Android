@@ -1039,6 +1039,17 @@ bc_chunk_texels(void)
  * the cache. */
 DEBUG_GET_ONCE_BOOL_OPTION(upload_cache_opt, "PANVK_UPLOAD_CACHE", true)
 
+/* Only large BC textures take the dedup/decoded-plane cache; the small ones
+ * keep the plain upload-and-decode path. A cached slice costs a hash and an
+ * entry in a global table, which never pays off for small uploads. */
+DEBUG_GET_ONCE_NUM_OPTION(bc_cache_min_kb_opt, "PANVK_BC_CACHE_MIN_KB", 1024)
+
+static uint64_t
+bc_cache_min_bytes(void)
+{
+   return (uint64_t)debug_get_option_bc_cache_min_kb_opt() * 1024u;
+}
+
 static uint32_t
 upload_src_hash_layer_count(const struct panvk_image *img)
 {
@@ -1198,7 +1209,7 @@ bc_decode_region(struct panvk_cmd_buffer *cmdbuf, struct panvk_image *img,
        (shader_idx == BC_ETC_SHADER && img->vk.format >= VK_FORMAT_BC2_UNORM_BLOCK)) {
       lut = panvk_bc_eac_lut_addr(dev);
       if (!lut) {
-         PANVK_DIAG_PRINTF("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         mesa_loge("[PANVK-DIAG] cmdbuf OOM at %s:%d\n", __FILE__, __LINE__); vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
       }
    }
@@ -1616,6 +1627,9 @@ bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
           !upload_src_host(src_buffer, r, slice_B * layer_count))
          return false;
 
+      if (slice_B < bc_cache_min_bytes())
+         return false;
+
       total += layer_count;
    }
 
@@ -1646,6 +1660,9 @@ bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
       const void *host =
          upload_src_host(src_buffer, r, slice_B * layer_count);
       if (!host)
+         continue;
+
+      if (slice_B < bc_cache_min_bytes())
          continue;
 
       const VkExtent3D mip = vk_image_mip_level_extent(&img->vk, level);
@@ -1759,6 +1776,9 @@ bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
       if (!host)
          continue;
 
+      if (slice_B < bc_cache_min_bytes())
+         continue;
+
       const VkExtent3D mip = vk_image_mip_level_extent(&img->vk, level);
 
       for (uint32_t l = 0; l < layer_count; l++) {
@@ -1805,6 +1825,11 @@ panvk_per_arch(CmdCopyBufferToImage2)(
 
          if (!upload_region_layout(img, r, &level, &first_layer,
                                       &layer_count, &slice_B)) {
+            all_cached = false;
+            break;
+         }
+
+         if (slice_B < bc_cache_min_bytes()) {
             all_cached = false;
             break;
          }
