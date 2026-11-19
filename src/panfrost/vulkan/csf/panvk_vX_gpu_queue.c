@@ -2763,9 +2763,12 @@ struct panvk_queue_submit {
    } utrace;
 };
 
+/* A typical DXVK submit carries 2-3 command streams, 1-3 wait ops and 2-3
+ * signal ops.  8 slots made the common case spill to malloc()/free() on the
+ * submit path; 16 keeps it on the stack. */
 struct panvk_queue_submit_stack_storage {
-   struct drm_panthor_queue_submit qsubmits[8];
-   struct drm_panthor_sync_op syncops[8];
+   struct drm_panthor_queue_submit qsubmits[16];
+   struct drm_panthor_sync_op syncops[16];
 };
 
 static void
@@ -3217,6 +3220,12 @@ kbase_wait_sync_targets(
 
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
       if (!targets[i])
+         continue;
+
+      /* The seqno is monotonic, so a value at or above the target can only
+       * have come from an earlier observation of a reached target.  Skip the
+       * blocking wait instead of re-invalidating an idle subqueue's cell. */
+      if (kbase_subqueue_seqno_cell(queue, i)->seqno >= targets[i])
          continue;
 
       VkResult result = kbase_subqueue_wait_seqno(

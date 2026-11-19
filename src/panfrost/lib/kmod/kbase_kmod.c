@@ -2098,10 +2098,16 @@ kbase_kmod_import_dmabuf(struct pan_kmod_dev *dev,
       goto err_free_bo;
    }
 
+   /* BASE_MEM_COHERENT_SYSTEM must NOT be requested for imported dma-bufs:
+    * it programs the GPU page-table shareability to SYSTEM, which faults on
+    * SoCs where the GPU has no system coherency interface (this backend
+    * reports is_io_coherent = false), and some DDKs reject AHB imports with
+    * ENOMEM outright. Keep imported memory non-coherent, like the normal
+    * allocation path. */
    uint64_t import_flags =
       BASE_MEM_PROT_CPU_RD | BASE_MEM_PROT_CPU_WR |
       BASE_MEM_PROT_GPU_RD | BASE_MEM_PROT_GPU_WR |
-      BASE_MEM_IMPORT_SHARED | BASE_MEM_COHERENT_SYSTEM;
+      BASE_MEM_IMPORT_SHARED;
 
    if (kmod_flags & PAN_KMOD_BO_FLAG_GPU_UNCACHED)
       import_flags |= BASE_MEM_UNCACHED_GPU;

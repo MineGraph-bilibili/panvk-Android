@@ -722,6 +722,8 @@ kbase tiler heap 回退已由远程提交 `b6365fa` 收录，因此本地序列�
 
 | 补丁 | 作用 |
 | --- | --- |
+| `042-import-no-coherent-system.patch` | dma-buf / AHB 导入不再请求 `BASE_MEM_COHERENT_SYSTEM`：该标志会把 GPU 页表 shareability 设为 SYSTEM，在本 SoC（`is_io_coherent=false`）上导致导入 ENOMEM 或 GPU fault；导入内存改为与普通分配一致的非一致路径。 |
+| `041-submit-storage-wait-skip.patch` | 提交路径去掉常见溢出：`qsubmits` / `syncops` 内联槽位 8→16，避免 DXVK 常规提交走 `malloc/free`；`kbase_wait_sync_targets` 在 seqno 已达到 target 时跳过阻塞等待和无效的 cache invalidate。 |
 | `039-submit-wait-dedup.patch` | 单次提交内对相同 `(sync, wait_value)` 的重复等待去重，避免重复的 CPU 等待。 |
 | `038-cs-static-sr-cache.patch` | 缓存每个命令缓冲最后写入的 `VARY_SIZE`、`INDEX_BUFFER`/`INDEX_BUFFER_SIZE`、`GLOBAL_ATTRIBUTE_OFFSET`、`INSTANCE_OFFSET`，同 pipeline/索引缓冲的连续绘制跳过重复 SR 写；命令缓冲开始、VMR 分段切割与执行 secondary 后失效。 |
 | `037-bind-noop.patch` | `vkCmdBindVertexBuffers2` / `vkCmdBindIndexBuffer2` 在地址、大小、stride、索引类型都未变化时直接返回，不打断合批也不重建顶点描述符。 |
