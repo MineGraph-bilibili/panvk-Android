@@ -1,6 +1,7 @@
 #version 450
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_control_flow_attributes : require
 
 /* BC1 -> ETC2 RGB8 (BC1 RGB) or RGB8A1 (BC1 RGBA), BC2/BC3 -> ETC2 RGBA8,
  * one invocation per 4x4 block. The ETC2 blocks have the BC block sizes,
@@ -211,7 +212,7 @@ uvec2 bc1_to_etc(uvec2 s, int format, bool four)
    /* One flip only: the split whose halves vary least about their means. */
    const vec4 pp = vec4(dot(p[0], p[0]), dot(p[1], p[1]), dot(p[2], p[2]), dot(p[3], p[3]));
    float sse[2];
-   for (uint f = 0u; f < 2u; f++) {
+   [[dont_unroll]] for (uint f = 0u; f < 2u; f++) {
       const vec4 m0 = sub_counts(idx, SM[2u * f]) * fit, m1 = sub_counts(idx, SM[2u * f + 1u]) * fit;
       const vec3 a0 = m0.x * p[0] + m0.y * p[1] + m0.z * p[2] + m0.w * p[3];
       const vec3 a1 = m1.x * p[0] + m1.y * p[1] + m1.z * p[2] + m1.w * p[3];
@@ -235,7 +236,7 @@ uvec2 bc1_to_etc(uvec2 s, int format, bool four)
     * the T distance search and the H fit only on it. */
    uint gsel = 0u; float esel = 1e30;
    vec3 msa = vec3(0.0), msb = vec3(0.0);
-   for (uint c = 0u; c < 3u; c++) {
+   [[dont_unroll]] for (uint c = 0u; c < 3u; c++) {
       const uvec4 inb4 = uvec4(greaterThanEqual(rank, uvec4(3u - c)));
       const vec4 inb = vec4(inb4);
       const vec4 wa = nall * (1.0 - inb), wb = nall * inb;
@@ -267,7 +268,7 @@ uvec2 bc1_to_etc(uvec2 s, int format, bool four)
       /* T: one group is the single colour, the other uses C2 and C2 +- d.
        * Each side tries the two distances bracketing sum(w s^2) / (3 sum(w s)),
        * which leans towards the entries that need the +-d levels. */
-      for (uint o = 0u; o < 2u; o++) {
+      [[dont_unroll]] for (uint o = 0u; o < 2u; o++) {
          const vec4 w = o == 0u ? wb : wa, sv = o == 0u ? sb : sa;
          const float dstar = dot(w, sv * sv) / (3.0 * max(dot(w, sv), 1e-6));
          const uint i0 = uint(dstar > TDIST[1]) + uint(dstar > TDIST[2]) + uint(dstar > TDIST[3]) +

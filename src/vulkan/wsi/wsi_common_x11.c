@@ -35,6 +35,7 @@
 #include <xcb/shm.h>
 
 #include "util/macros.h"
+#include "util/log.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1686,12 +1687,16 @@ x11_handle_dri3_present_event(struct x11_swapchain *chain,
       xcb_present_idle_notify_event_t *idle = (void *) event;
 
       assert(!chain->base.image_info.explicit_sync);
-      for (unsigned i = 0; i < chain->base.image_count; i++) {
-         if (chain->images[i].pixmap == idle->pixmap) {
-            chain->sent_image_count--;
-            assert(chain->sent_image_count >= 0);
-            wsi_queue_push(&chain->acquire_queue, i);
-            break;
+      {
+         bool matched = false;
+         for (unsigned i = 0; i < chain->base.image_count; i++) {
+            if (chain->images[i].pixmap == idle->pixmap) {
+               chain->sent_image_count--;
+               assert(chain->sent_image_count >= 0);
+               wsi_queue_push(&chain->acquire_queue, i);
+               matched = true;
+               break;
+            }
          }
       }
 
@@ -1700,6 +1705,7 @@ x11_handle_dri3_present_event(struct x11_swapchain *chain,
 
    case XCB_PRESENT_EVENT_COMPLETE_NOTIFY: {
       xcb_present_complete_notify_event_t *complete = (void *) event;
+
 
       /* Clamping the ust here serves multiple purposes.
        * - In VRR/Xwl paths, we pulled back the sleep for a few ms to be able to hit the target time
@@ -1882,6 +1888,15 @@ x11_present_to_x11_dri3(struct x11_swapchain *chain, uint32_t image_index,
    }
    xcb_discard_reply(chain->conn, cookie.sequence);
    xcb_flush(chain->conn);
+
+   /* Winlator/Termux raw DRI3: the X server delivers IdleNotify immediately
+    * when it queues the present, but the container's libxshmfence is built
+    * with the pthread backend, whose state cannot be signaled by the server
+    * process (bionic vs glibc pthread layouts). Signal the fence locally once
+    * the present request is on the wire, matching the server's synchronous
+    * idle model. */
+   xshmfence_trigger(image->shm_fence);
+
    return x11_swapchain_result(chain, VK_SUCCESS);
 }
 #endif
@@ -2137,7 +2152,7 @@ x11_swapchain_present_timing_is_out_of_order_completion(
 }
 
 /* This matches Wayland. */
-#define X11_SWAPCHAIN_MAILBOX_IMAGES 4
+#define X11_SWAPCHAIN_MAILBOX_IMAGES 8
 
 static bool
 x11_requires_mailbox_image_count(const struct wsi_device *device,
@@ -2276,6 +2291,7 @@ x11_acquire_next_image(struct wsi_swapchain *wsi_chain,
    struct x11_swapchain *chain = (struct x11_swapchain *)wsi_chain;
    uint64_t timeout = info->timeout;
 
+
    /* If the swapchain is in an error state, don't go any further. */
    VkResult result = x11_swapchain_read_status_atomic(chain);
    if (result < 0)
@@ -2312,8 +2328,9 @@ x11_acquire_next_image(struct wsi_swapchain *wsi_chain,
    assert(*image_index < chain->base.image_count);
 #ifdef HAVE_X11_DRM
    if (chain->images[*image_index].shm_fence &&
-       !chain->base.image_info.explicit_sync)
+       !chain->base.image_info.explicit_sync) {
       xshmfence_await(chain->images[*image_index].shm_fence);
+   }
 #endif
 
    return result;
@@ -2335,6 +2352,7 @@ x11_queue_present(struct wsi_swapchain *wsi_chain,
    struct x11_swapchain *chain = (struct x11_swapchain *)wsi_chain;
    xcb_xfixes_region_t update_area = 0;
    const bool sw_shm = chain->sw_shm;
+
 
    /* If the swapchain is in an error state, don't go any further. */
    VkResult status = x11_swapchain_read_status_atomic(chain);
@@ -2650,6 +2668,7 @@ x11_manage_present_queue(void *state)
        * blit here instead of in vkQueuePresentKHR. */
       bool need_fence_wait =
             (chain->base.wsi->sw ||
+             !wsi_conn->is_xwayland ||
              x11_needs_wait_for_fences(chain->base.wsi, wsi_conn, present_mode)) &&
             !chain->base.image_info.explicit_sync;
 
@@ -3344,6 +3363,10 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
          num_images = MAX2(num_images, present_mode_images);
       }
    }
+
+   /* Winlator raw DRI3: the compositor hands images back only once per display frame, so a deeper
+    * swapchain is what lets the client keep running instead of waiting on the idle round-trip. */
+   num_images = MAX2(num_images, 10);
 
    /* Check that we have a window up-front. It is an error to not have one. */
    xcb_window_t window = x11_surface_get_window(icd_surface);

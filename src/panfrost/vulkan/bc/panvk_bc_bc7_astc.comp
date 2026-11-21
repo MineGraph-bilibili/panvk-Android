@@ -533,7 +533,7 @@ void bc7_setup(uvec4 p)
 
    uint raw[6];
    for (uint k = 0u; k < 6u; k++) raw[k] = 0u;
-   for (uint c = 0u; c < 3u; c++)
+   [[dont_unroll]] for (uint c = 0u; c < 3u; c++)
       for (uint k = 0u; k < ne; k++) {
          raw[k] |= bits_at(p, off, cb) << (8u * c);
          off += cb;
@@ -554,7 +554,7 @@ void bc7_setup(uvec4 p)
       }
    }
    const bool has_pb = BC7_EPB[m] != 0u || BC7_SPB[m] != 0u;
-   for (uint k = 0u; k < 6u; k++) {
+   [[dont_unroll]] for (uint k = 0u; k < 6u; k++) {
       uint e = 0u;
       if (k < ne) {
          for (uint c = 0u; c < 4u; c++) {
@@ -622,7 +622,7 @@ void bc7_cache(uvec4 p)
       const uvec3 rb1 = uvec3(g7_ep[1], g7_ep[3], g7_ep[5]) & 0x00ff00ffu;
       const uvec3 ga0 = (uvec3(g7_ep[0], g7_ep[2], g7_ep[4]) >> 8u) & 0x00ff00ffu;
       const uvec3 ga1 = (uvec3(g7_ep[1], g7_ep[3], g7_ep[5]) >> 8u) & 0x00ff00ffu;
-      for (uint i = 0u; i < 16u; i++) {
+      [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
          const bool anc = i == 0u || i == a1 || i == a2;
          const uint w = bc7_w(take(st, ib - (anc ? 1u : 0u)), ib);
          const uint sub = g7_ns == 3u ? (pmap >> (2u * i)) & 3u : (pmap >> i) & 1u;
@@ -638,7 +638,7 @@ void bc7_cache(uvec4 p)
    }
    uvec2 st2 = ib2 != 0u ? bits64_at(p, g7_idx + 16u * ib - 1u) : uvec2(0u);
    const bool swapw = m == 4u && g7_isb != 0u;
-   for (uint i = 0u; i < 16u; i++) {
+   [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
       const bool anc = i == 0u || i == a1 || i == a2;
       const uint i1 = take(st, ib - (anc ? 1u : 0u));
       uint wc = bc7_w(i1, ib), wa = wc;

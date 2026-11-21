@@ -57,6 +57,8 @@ fn nir_opts(arch: u8, merge_wg: bool) -> nir_shader_compiler_options {
             | nir_lower_shift64
             | nir_lower_imul_2x32_64),
         lower_fisnormal: true,
+        lower_uadd_carry: true,
+        lower_usub_borrow: true,
 
         has_ldexp: true,
         has_isub: true,
