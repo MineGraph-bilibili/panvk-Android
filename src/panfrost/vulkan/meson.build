@@ -101,19 +101,6 @@ fifthgen_archs = [12, 13, 14]
 fifthgen_inc_dir = ['fifthgen']
 fifthgen_files = []
 
-jm_archs = [6, 7, 9]
-jm_inc_dir = ['jm']
-jm_files = [
-  'jm/panvk_vX_cmd_buffer.c',
-  'jm/panvk_vX_cmd_dispatch.c',
-  'jm/panvk_vX_cmd_draw.c',
-  'jm/panvk_vX_cmd_event.c',
-  'jm/panvk_vX_cmd_query.c',
-  'jm/panvk_vX_cmd_precomp.c',
-  'jm/panvk_vX_event.c',
-  'jm/panvk_vX_gpu_queue.c',
-]
-
 csf_archs = [10, 11, 12, 13, 14]
 csf_inc_dir = ['csf']
 csf_files = [
@@ -158,7 +145,7 @@ common_per_arch_files = [
   sha1_h,
 ]
 
-foreach arch : [6, 7, 9, 10, 11, 12, 13, 14]
+foreach arch : csf_archs
   per_arch_files = common_per_arch_files
   inc_panvk_per_arch = []
 
@@ -173,17 +160,8 @@ foreach arch : [6, 7, 9, 10, 11, 12, 13, 14]
     per_arch_files += fifthgen_files
   endif
 
-  if arch in jm_archs
-    inc_panvk_per_arch += jm_inc_dir
-    per_arch_files += jm_files
-    if arch == 9
-      # v9 JM runs the shared gpu_prerast path (GS, tess, XFB)
-      per_arch_files += 'csf/panvk_gpu_prerast.c'
-    endif
-  elif arch in csf_archs
-    inc_panvk_per_arch += csf_inc_dir
-    per_arch_files += csf_files
-  endif
+  inc_panvk_per_arch += csf_inc_dir
+  per_arch_files += csf_files
 
   panvk_per_arch_libs += static_library(
     'panvk_v@0@'.format(arch),

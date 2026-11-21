@@ -91,15 +91,6 @@ panvk_diag_result(VkResult result, const char *file, int line)
 #define panvk_arch_dispatch(arch, name, ...)                                   \
    do {                                                                        \
       switch (arch) {                                                          \
-      case 6:                                                                  \
-         panvk_arch_name(name, v6)(__VA_ARGS__);                               \
-         break;                                                                \
-      case 7:                                                                  \
-         panvk_arch_name(name, v7)(__VA_ARGS__);                               \
-         break;                                                                \
-      case 9:                                                                  \
-         panvk_arch_name(name, v9)(__VA_ARGS__);                               \
-         break;                                                                \
       case 10:                                                                 \
          panvk_arch_name(name, v10)(__VA_ARGS__);                              \
          break;                                                                \
@@ -123,15 +114,6 @@ panvk_diag_result(VkResult result, const char *file, int line)
 #define panvk_arch_dispatch_ret(arch, name, ret, ...)                          \
    do {                                                                        \
       switch (arch) {                                                          \
-      case 6:                                                                  \
-         ret = panvk_arch_name(name, v6)(__VA_ARGS__);                         \
-         break;                                                                \
-      case 7:                                                                  \
-         ret = panvk_arch_name(name, v7)(__VA_ARGS__);                         \
-         break;                                                                \
-      case 9:                                                                  \
-         ret = panvk_arch_name(name, v9)(__VA_ARGS__);                         \
-         break;                                                                \
       case 10:                                                                 \
          ret = panvk_arch_name(name, v10)(__VA_ARGS__);                        \
          break;                                                                \

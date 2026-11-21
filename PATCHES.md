@@ -4,6 +4,9 @@
 (26.3.0-devel) + **223 个补丁**。补丁已在当前树中全部应用，`patches/` 目录保留完整
 系列，用于复现、审阅和回退。
 
+> **后端拆分**：本树已移除 JM 后端（v6/v7/v9），只保留 CSF 后端（v10–v14）。
+> JM 后端（Kirin）维护在 https://github.com/MineGraph-bilibili/panvk-JM-kirin。
+
 应用顺序由 `scripts/apply-patches.sh` 固定：
 
 ```

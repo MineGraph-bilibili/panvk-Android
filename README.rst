@@ -2,6 +2,14 @@
 ======================================================
 
 
+PanVK backend split
+-------------------
+
+This tree ships the CSF backend only (v10-v14). The JM backend for Bifrost and
+Valhall (v6/v7/v9) is maintained separately in
+https://github.com/MineGraph-bilibili/panvk-JM-kirin.
+
+
 Source
 ------
 
