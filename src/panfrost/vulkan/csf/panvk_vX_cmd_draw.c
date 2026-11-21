@@ -4204,6 +4204,11 @@ gpu_prerast_arena_sync(const struct panvk_device *dev, uint64_t arena)
    const bool tess =
       arena == panvk_priv_mem_dev_addr(dev->gpu_prerast_tess_arena);
 
+   if (panvk_priv_mem_check_alloc(dev->gpu_prerast_tess_arena2) &&
+       arena == panvk_priv_mem_dev_addr(dev->gpu_prerast_tess_arena2))
+      return dev->gpu_prerast_syncs->addr.dev +
+             offsetof(struct panvk_gpu_prerast_syncs, tess_arena2);
+
    assert(tess || arena == panvk_priv_mem_dev_addr(dev->gpu_prerast_arena));
    return dev->gpu_prerast_syncs->addr.dev +
           (tess ? offsetof(struct panvk_gpu_prerast_syncs, tess_arena)
@@ -5488,7 +5493,27 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
       }
    }
 
-   const uint64_t arena = panvk_priv_mem_dev_addr(dev->gpu_prerast_tess_arena);
+   /* csf-v11 tess-arenas: with one arena, the compute pre-pass of a tess
+    * draw cannot start before the vertex/tiler side of the previous one has
+    * drawn and released it, so the two queues take turns and never overlap.
+    * Odd tess draws of a command buffer use a second arena and ready/free
+    * pair: the compute side of draw N+1 then runs while draw N is drawn.
+    * Each pair is still taken and given in recording order on both queues,
+    * as is each arena's ownership sync, so the loops cannot deadlock.
+    * PANVK_TESS_ARENAS=1 keeps the single arena.
+    */
+   bool slot2 = false;
+   if (dev->tess_opt.arenas > 1 && (cmdbuf->state.tess_draws++ & 1)) {
+      slot2 = panvk_priv_mem_check_alloc(
+         panvk_per_arch(device_gpu_prerast_tess_arena2)(dev));
+   }
+   const uint64_t arena =
+      panvk_priv_mem_dev_addr(slot2 ? dev->gpu_prerast_tess_arena2
+                                    : dev->gpu_prerast_tess_arena);
+   const uint32_t ready_sync = slot2 ? PANVK_QUEUE_TESS_READY2_SYNC_OFFSET
+                                     : PANVK_QUEUE_TESS_READY_SYNC_OFFSET;
+   const uint32_t free_sync = slot2 ? PANVK_QUEUE_TESS_FREE2_SYNC_OFFSET
+                                    : PANVK_QUEUE_TESS_FREE_SYNC_OFFSET;
    const uint64_t prerast_arena =
       nested ? panvk_priv_mem_dev_addr(dev->gpu_prerast_arena) : 0;
    struct panvk_gpu_prerast_tess_layout l;
@@ -5623,6 +5648,25 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
    };
    const struct panlib_precomp_grid tess_grid =
       panlib_1d(DIV_ROUND_UP(max_patches, 64));
+   /* csf-v11 tess-fused: one workgroup counts, prefix sums and publishes the
+    * draw of a chunk (PANVK_TESS_FUSE=0 runs the COUNT pass and the serial
+    * panlib_tess_draw() instead). A direct draw the CPU knows to have at
+    * most PANVK_TESS_FUSE_GEN_MAX patches is also tessellated by that
+    * workgroup: the separate WITH_COUNTS pass would be one workgroup too.
+    */
+   const bool fuse = dev->tess_opt.fuse;
+   const uint64_t direct_patches =
+      indirect ? UINT64_MAX
+               : (uint64_t)(draw->vertex.count / ps) * draw->instance.count;
+   bool fuse_gen = fuse && direct_patches <= dev->tess_opt.fuse_gen_max;
+   /* csf-v11 tess-fuse-stack: the fused workgroup's gen variant inlines a
+    * second tessellator, which for quads needs 5.2 KiB of stack (8 KiB per
+    * thread). On G615 that produced broken interior domain points (bc6c).
+    * Quads therefore count and scan in the fused workgroup but tessellate in
+    * panlib_tess_gen(); triangles and isolines stay fused.
+    */
+   if (fuse_gen && domain == 1)
+      fuse_gen = false;
    const uint64_t prims_generated =
       gs ? 0 : cmdbuf->state.gfx.prims_generated_query.ptr;
    const uint32_t view_count =
@@ -5673,10 +5717,21 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
     cs_store32(b, once_reset, pass_addr, 4);
     cs_flush_stores(b);
 
-   panlib_tess_setup(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu, src,
-                     draw->indirect.count_buffer_dev_addr,
-                     draw->indirect.buffer_dev_addr ? draw->indirect.draw_index : 0);
-   cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+   /* csf-v11 tess-setup-step: the first panlib_tess_setup_step() of the
+    * loop does the setup and the predicate drop below, one dispatch and
+    * three CS load waits fewer per draw. PANVK_TESS_SETUP_STEP=0 keeps the
+    * separate setup dispatch and the CS once-block.
+    */
+   const bool setup_in_step = dev->tess_opt.setup_in_step;
+   const uint64_t count_buf = draw->indirect.count_buffer_dev_addr;
+   const uint32_t draw_index =
+      draw->indirect.buffer_dev_addr ? draw->indirect.draw_index : 0;
+
+   if (!setup_in_step) {
+      panlib_tess_setup(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu, src,
+                        count_buf, draw_index);
+      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+   }
 
    /* No C-level exit from a cs_while body, it would leave the block open.
     * Allocation failures are recorded on the command buffer instead.
@@ -5684,13 +5739,13 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
    bool ok = true;
    cs_while(b, MALI_CS_CONDITION_ALWAYS, cs_undef()) {
       gpu_prerast_sync32_take(cmdbuf, PANVK_SUBQUEUE_COMPUTE,
-                              PANVK_QUEUE_TESS_FREE_SYNC_OFFSET);
+                              free_sync);
 
       /* First iteration only: setup has copied the API draw. Drop it when
        * the predicate says not to render. Later iterations already see
        * total_patches == 0. pass_mem[1] is the once-only flag.
        */
-      {
+      if (!setup_in_step) {
          struct cs_index once = gpu_prerast_load_flag(b, pass_mem.gpu + 4);
          struct cs_index zero = cs_scratch_reg32(b, 2);
          struct cs_index dst = cs_scratch_reg64(b, 4);
@@ -5725,8 +5780,15 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
          }
       }
 
-      panlib_tess_step(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
-                       tcs_stat);
+      /* panlib_* launchers are brace-block macros: no bare if/else. */
+      if (setup_in_step) {
+         panlib_tess_setup_step(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE,
+                                td.gpu, tcs_stat, src, count_buf, draw_index,
+                                pass_mem.gpu);
+      } else {
+         panlib_tess_step(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
+                          tcs_stat);
+      }
       cs_wait_slots(b, dev->csf.sb.all_iters_mask);
 
       ok &= gpu_prerast_vs(cmdbuf, &vs_src, vs, arena,
@@ -5750,15 +5812,27 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
                                  push.gpu, tsd, &tcs_dispatch);
       cs_wait_slots(b, dev->csf.sb.all_iters_mask);
 
-      panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p), domain,
-                        POLY_TESS_MODE_COUNT);
-      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
-      panlib_tess_draw(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
-                       c_invs, c_prims, prims_generated);
-      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
-      panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p), domain,
-                        POLY_TESS_MODE_WITH_COUNTS);
-      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+      if (fuse) {
+         panlib_tess_count_draw(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE,
+                                td.gpu, TD(p), c_invs, c_prims,
+                                prims_generated, fuse_gen, domain);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         if (!fuse_gen) {
+            panlib_tess_gen(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p),
+                            domain);
+            cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         }
+      } else {
+         panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p),
+                           domain, POLY_TESS_MODE_COUNT);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         panlib_tess_draw(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
+                          c_invs, c_prims, prims_generated);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p),
+                           domain, POLY_TESS_MODE_WITH_COUNTS);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+      }
 
       if (nested) {
          /* TES as the gpu_prerast VS over this iteration's index range. */
@@ -5821,7 +5895,7 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
       }
 
       gpu_prerast_sync32_give(cmdbuf, PANVK_SUBQUEUE_COMPUTE,
-                              PANVK_QUEUE_TESS_READY_SYNC_OFFSET);
+                              ready_sync);
       cs_loop_conditional_break(b, __loop, MALI_CS_CONDITION_EQUAL,
                                 gpu_prerast_load_flag(b, TD(more)));
    }
@@ -5836,7 +5910,7 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
    struct panvk_draw_info raster = out;
    cs_while(vt, MALI_CS_CONDITION_ALWAYS, cs_undef()) {
       gpu_prerast_sync32_take(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
-                              PANVK_QUEUE_TESS_READY_SYNC_OFFSET);
+                              ready_sync);
 
       cmdbuf->state.gfx.vs.shader = tes;
       gfx_state_set_dirty(cmdbuf, VS);
@@ -5862,7 +5936,7 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
       struct cs_index more_keep = cs_scratch_reg32(vt, 4);
       cs_add_imm32(vt, more_keep, more, 0);
       gpu_prerast_sync32_give(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
-                              PANVK_QUEUE_TESS_FREE_SYNC_OFFSET);
+                              free_sync);
       cs_loop_conditional_break(vt, __loop, MALI_CS_CONDITION_EQUAL,
                                 more_keep);
    }
