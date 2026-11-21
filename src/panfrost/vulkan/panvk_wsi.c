@@ -20,6 +20,9 @@
 #include "lib/kmod/kbase_kmod.h"
 #endif
 
+#include "lib/pan_props.h"
+#include "util/u_debug.h"
+
 #include "vk_util.h"
 #include "wsi_common.h"
 
@@ -1035,6 +1038,47 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
       !uses_kbase || (kbase_dmabuf && !kbase_raw_dri3);
    physical_device->wsi_device.can_present_on_device =
       panvk_can_present_on_device;
+
+   /* The sw path reads every frame back on the CPU.  The cached readback
+    * type needs a cache invalidate before each read; on kbase the X6 Pro
+    * (v11) measures 831 fps uncached vs 257 cached at 640x360, while v9
+    * and v13+ lose with the uncached read.  So the uncached buffer is the
+    * default only on v11; PANVK_WSI_SW_CACHED forces either.  The arch
+    * default is only the starting mode: with MIT-SHM present each swapchain
+    * measures its frame rate in both modes and keeps the faster, unless a
+    * cached coherent type makes both modes identical.
+    */
+   physical_device->wsi_device.sw_cached_noncoherent = debug_get_bool_option(
+      "PANVK_WSI_SW_CACHED",
+      pan_arch(physical_device->kmod.dev->props.gpu_id) != 11);
+   bool has_cached_coherent = false;
+   bool has_cached_noncoherent = false;
+   for (unsigned i = 0;
+        i < physical_device->wsi_device.memory_props.memoryTypeCount; i++) {
+      const VkMemoryPropertyFlags flags =
+         physical_device->wsi_device.memory_props.memoryTypes[i].propertyFlags;
+      if ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) !=
+          (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+           VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+         continue;
+      if (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+         has_cached_coherent = true;
+      else
+         has_cached_noncoherent = true;
+   }
+   physical_device->wsi_device.sw_cached_auto =
+      os_get_option("PANVK_WSI_SW_CACHED") == NULL &&
+      has_cached_noncoherent && !has_cached_coherent;
+
+   /* MIT-SHM sw present: the event thread collects each put's GetGeometry
+    * reply, so the present thread copies and sends the next frame while
+    * the X server handles this one.  PANVK_WSI_SW_DEFER_REPLY=0 reads each
+    * image's reply at its next present instead, which never blocks the
+    * present thread on the round trip either.
+    */
+   physical_device->wsi_device.x11.sw_defer_reply =
+      debug_get_bool_option("PANVK_WSI_SW_DEFER_REPLY", true);
 
    physical_device->vk.wsi_device = &physical_device->wsi_device;
 

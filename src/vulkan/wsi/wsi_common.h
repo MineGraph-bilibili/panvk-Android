@@ -136,6 +136,11 @@ struct wsi_device {
       /* Never report VK_SUBOPTIMAL_KHR. Used to workaround
        * games that cannot handle SUBOPTIMAL correctly. */
       bool ignore_suboptimal;
+
+      /* sw MIT-SHM present: collect the GetGeometry reply of each put on
+       * the event thread instead of blocking the present thread on the
+       * round trip. */
+      bool sw_defer_reply;
    } x11;
 
    struct {
@@ -164,6 +169,19 @@ struct wsi_device {
 
 
    bool sw;
+
+   /* sw only: when no HOST_COHERENT|HOST_CACHED memory type exists, read
+    * the image back through a HOST_CACHED type that is not coherent
+    * instead of an uncached (write-combined) one.  Every CPU read of
+    * wsi_image::cpu_map is then preceded by wsi_image_invalidate_cpu_map().
+    */
+   bool sw_cached_noncoherent;
+
+   /* sw X11 MIT-SHM present only: sw_cached_noncoherent is the starting
+    * mode, and each swapchain measures its frame interval in both modes
+    * once and keeps the faster.
+    */
+   bool sw_cached_auto;
 
    /* Set to true if the implementation is ok with linear WSI images. */
    bool wants_linear;
@@ -255,6 +273,7 @@ struct wsi_device {
    WSI_CB(WaitForFences);
    WSI_CB(MapMemory);
    WSI_CB(UnmapMemory);
+   WSI_CB(InvalidateMappedMemoryRanges);
    WSI_CB(WaitSemaphores);
 #undef WSI_CB
 
