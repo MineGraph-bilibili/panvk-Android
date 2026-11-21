@@ -16,6 +16,7 @@
 #include "panvk_entrypoints.h"
 #include "panvk_image.h"
 #include "panvk_image_view.h"
+#include "panvk_perf_knobs.h"
 #include "panvk_physical_device.h"
 #include "panvk_shader.h"
 
@@ -231,6 +232,8 @@ struct panvk_cmd_graphics_state {
       bool blend_descs_dirty;
       uint64_t push_uniforms;
       bool required;
+      /* The last draw did not use the FS (see clear_dirty_after_draw()). */
+      bool unused;
 #if PAN_ARCH < 9
       uint64_t rsd;
 #endif
@@ -523,18 +526,29 @@ cached_fs_required(ASSERTED const struct panvk_cmd_graphics_state *state,
     gfx_state_dirty(cmdbuf, RENDER_STATE))
 
 /* After a draw, all dirty flags are cleared except the FS dirty flag which
- * needs to be set again if the draw didn't use the fragment shader. */
+ * needs to be set again if the draw didn't use the fragment shader.
+ *
+ * A1: a CSF pipeline without a fragment shader still has the device depth
+ * bounds FS bound and re-emitted all the FS-side state on every depth-only
+ * draw. Every input of fs_required() is in fs_user_dirty(), so a draw that
+ * starts using the FS again re-emits it anyway: with PANVK_CSF_FS_IDLE_CLEAN
+ * the draws in between leave the FS state clean and only remember that it
+ * must be re-dirtied at that draw (panvk_cmd_draw()).
+ */
 
 #define clear_dirty_after_draw(__cmdbuf)                                       \
    do {                                                                        \
-      bool __set_fs_dirty =                                                    \
+      bool __fs_unused =                                                       \
          (__cmdbuf)->state.gfx.fs.shader != get_fs(__cmdbuf);                  \
-      bool __set_fs_push_dirty =                                               \
-         __set_fs_dirty && gfx_state_dirty(__cmdbuf, FS_PUSH_UNIFORMS);        \
+      bool __idle_clean = __fs_unused && PANVK_PERF(FS_IDLE_CLEAN);            \
+      bool __set_fs_push_dirty = __fs_unused && !__idle_clean &&               \
+                                 gfx_state_dirty(__cmdbuf, FS_PUSH_UNIFORMS);  \
       vk_dynamic_graphics_state_clear_dirty(                                   \
          &(__cmdbuf)->vk.dynamic_graphics_state);                              \
       gfx_state_clear_all_dirty(__cmdbuf);                                     \
-      if (__set_fs_dirty)                                                      \
+      if (__idle_clean)                                                        \
+         (__cmdbuf)->state.gfx.fs.unused = true;                               \
+      else if (__fs_unused)                                                    \
          gfx_state_set_dirty(__cmdbuf, FS);                                    \
       if (__set_fs_push_dirty)                                                 \
          gfx_state_set_dirty(__cmdbuf, FS_PUSH_UNIFORMS);                      \

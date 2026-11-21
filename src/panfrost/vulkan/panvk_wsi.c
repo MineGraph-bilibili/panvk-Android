@@ -11,6 +11,7 @@
 
 #include "panvk_wsi.h"
 #include "panvk_instance.h"
+#include "panvk_perf_knobs.h"
 #include "panvk_physical_device.h"
 
 #include <stdlib.h>
@@ -1078,7 +1079,7 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
     * present thread on the round trip either.
     */
    physical_device->wsi_device.x11.sw_defer_reply =
-      debug_get_bool_option("PANVK_WSI_SW_DEFER_REPLY", true);
+      PANVK_PERF(WSI_SW_DEFER_REPLY);
 
    physical_device->vk.wsi_device = &physical_device->wsi_device;
 

@@ -4142,6 +4142,22 @@ launch_indirect_draw(struct panvk_cmd_buffer *cmdbuf,
          }
       }
    }
+
+   /* The loop leaves VERTEX_SRT past the last per-draw resource table and
+    * VERTEX_FAU past the last per-draw push uniform block, and those copies
+    * hold the indirect draws' own firstInstance/firstVertex patches. The
+    * next draw re-emits both registers only when its VS tables or push
+    * uniforms are dirty, which nothing guaranteed: a direct draw with the
+    * same state and zero firstVertex/firstInstance reused them. Make it
+    * rebuild its own (BASE_INSTANCE reaches vs_desc_dirty() through the
+    * per-instance attributes that made the tables repeat).
+    */
+   if (PANVK_PERF(CSF_INDIRECT_REEMIT)) {
+      if (cmdbuf->state.gfx.vs.desc_repeat_count)
+         gfx_state_set_dirty(cmdbuf, BASE_INSTANCE);
+      if (patch_faus)
+         gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
+   }
 }
 
 static void panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf,
@@ -6681,7 +6697,18 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
       draw.pstats_counted = true;
    }
 
-   if (gpu_prerast_wanted(cmdbuf, &draw) && gpu_prerast_split(cmdbuf, &draw))
+   /* A5 (115): evaluated once. A draw gpu_prerast does not want (none of
+    * its triggers, see gpu_prerast_needed()) can never be lowered either:
+    * gpu_prerast_can_lower() needs one of the same triggers or
+    * PANVK_DEBUG=gpu_prerast. Such a draw skips gpu_prerast_draw() and the
+    * second gpu_prerast_needed() below. PANVK_PRERAST_FAST_SKIP=0 runs
+    * them, as in 114.
+    */
+   const bool prerast_wanted = gpu_prerast_wanted(cmdbuf, &draw);
+   const bool prerast_skip = PANVK_PERF(PRERAST_FAST_SKIP) &&
+                             !prerast_wanted && !PANVK_DEBUG(GPU_PRERAST);
+
+   if (prerast_wanted && gpu_prerast_split(cmdbuf, &draw))
       return;
 
    /* A split chunk that falls back to IDVS has no instance ID offset: shift
@@ -6703,6 +6730,15 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
     * fs.required being initialized. */
    cmdbuf->state.gfx.fs.required =
       fs_required(&cmdbuf->state.gfx, &cmdbuf->vk.dynamic_graphics_state);
+
+   /* A1: the first draw that runs the FS after draws that did not (see
+    * clear_dirty_after_draw()) emits its state again.
+    */
+   if (cmdbuf->state.gfx.fs.unused && cmdbuf->state.gfx.fs.required) {
+      cmdbuf->state.gfx.fs.unused = false;
+      gfx_state_set_dirty(cmdbuf, FS);
+      gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);
+   }
 
    if (cmdbuf->state.gfx.vi.base_instance != draw.instance.base) {
       cmdbuf->state.gfx.vi.base_instance = draw.instance.base;
@@ -6727,12 +6763,14 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
       return;
    }
 
-   if (!draw.gpu_prerast_generated && gpu_prerast_draw(cmdbuf, &draw))
-      return;
+   if (!prerast_skip) {
+      if (!draw.gpu_prerast_generated && gpu_prerast_draw(cmdbuf, &draw))
+         return;
 
-   if (gpu_prerast_needed(cmdbuf, &draw)) {
-      gpu_prerast_unhandled("shader variants missing");
-      return;
+      if (gpu_prerast_needed(cmdbuf, &draw)) {
+         gpu_prerast_unhandled("shader variants missing");
+         return;
+      }
    }
 
    /* For indirect draws, we need to patch the descriptors we just emitted */

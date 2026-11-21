@@ -16,9 +16,10 @@
 #include "util/os_misc.h"
 #include "util/u_call_once.h"
 
+#include <stdio.h>
+
 #if defined(HAVE_PAN_KMOD_KBASE)
 #include <limits.h>
-#include <stdio.h>
 #include <unistd.h>
 #endif
 
@@ -30,6 +31,7 @@
 #include "panvk_entrypoints.h"
 #include "panvk_instance.h"
 #include "panvk_macros.h"
+#include "panvk_perf_knobs.h"
 #include "panvk_physical_device.h"
 
 #ifdef HAVE_VALGRIND
@@ -70,11 +72,56 @@ static const struct debug_control panvk_debug_options[] = {
 
 uint64_t panvk_debug;
 
+uint32_t panvk_perf_knobs;
+
+/* panvk_perf_knobs.h: on unless "<name>=0". */
+static const struct {
+   const char *name;
+   uint32_t knob;
+} panvk_perf_knob_names[] = {
+   {"PANVK_CSF_FS_IDLE_CLEAN", PANVK_PERF_FS_IDLE_CLEAN},
+   {"PANVK_PRERAST_FAST_SKIP", PANVK_PERF_PRERAST_FAST_SKIP},
+   {"PANVK_DESC_POOL_HINT", PANVK_PERF_DESC_POOL_HINT},
+   {"PANVK_CSF_DESC_DIRTY", PANVK_PERF_CSF_DESC_DIRTY},
+   {"PANVK_PRELOAD_BARRIER_TRACK", PANVK_PERF_PRELOAD_BARRIER_TRACK},
+   {"PANVK_CSF_INDIRECT_REEMIT", PANVK_PERF_CSF_INDIRECT_REEMIT},
+   {"PANVK_VB_DIRTY_CMP", PANVK_PERF_VB_DIRTY_CMP},
+   {"PANVK_WSI_SW_DEFER_REPLY", PANVK_PERF_WSI_SW_DEFER_REPLY},
+};
+
+void
+panvk_perf_knobs_init(void)
+{
+   char off[512];
+   unsigned off_len = 0;
+   uint32_t knobs = 0;
+
+   off[0] = '\0';
+   for (unsigned i = 0; i < ARRAY_SIZE(panvk_perf_knob_names); i++) {
+      const char *e = os_get_option(panvk_perf_knob_names[i].name);
+
+      if (e && e[0] == '0') {
+         if (off_len < sizeof(off))
+            off_len += snprintf(off + off_len, sizeof(off) - off_len, " %s",
+                                panvk_perf_knob_names[i].name);
+      } else {
+         knobs |= panvk_perf_knob_names[i].knob;
+      }
+   }
+
+   panvk_perf_knobs = knobs;
+
+   /* Once per process, so a device log tells which 115 changes were off. */
+   if (off_len)
+      mesa_logi("panvk: 114 behaviour restored for:%s", off);
+}
+
 static void
 panvk_debug_init_once(void)
 {
    panvk_debug =
       parse_debug_string(os_get_option("PANVK_DEBUG"), panvk_debug_options);
+   panvk_perf_knobs_init();
 }
 
 static void
