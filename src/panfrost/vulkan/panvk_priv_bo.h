@@ -1,0 +1,52 @@
+/*
+ * Copyright © 2021 Collabora Ltd.
+ * SPDX-License-Identifier: MIT
+ */
+
+#ifndef PANVK_PRIV_BO_H
+#define PANVK_PRIV_BO_H
+
+#include <vulkan/vulkan_core.h>
+
+#include "util/list.h"
+#include "util/u_atomic.h"
+
+struct panvk_kmod_bo;
+
+/* Used for internal object allocation. */
+struct panvk_priv_bo {
+   struct list_head node;
+   uint64_t refcnt;
+   struct panvk_device *dev;
+   struct pan_kmod_bo *bo;
+   struct {
+      uint64_t dev;
+      void *host;
+   } addr;
+   /* High-water mark of CPU-written bytes in this BO since it was last
+    * recycled.  Used to flush only the populated prefix instead of the whole
+    * BO on command buffer end. */
+   size_t flush_end;
+   /* csf-v11 230: when non-zero, addr.dev is a kbase MEM_ALIAS region of
+    * this many bytes over the BO (sparse device TLS), unmapped on destroy. */
+   uint64_t alias_size;
+};
+
+VkResult panvk_priv_bo_create(struct panvk_device *dev, uint64_t size,
+                              uint32_t flags, VkSystemAllocationScope scope,
+                              struct panvk_priv_bo **out);
+
+static inline struct panvk_priv_bo *
+panvk_priv_bo_ref(struct panvk_priv_bo *bo)
+{
+   assert(p_atomic_read(&bo->refcnt) > 0);
+   p_atomic_inc(&bo->refcnt);
+   return bo;
+}
+
+void panvk_priv_bo_flush(struct panvk_priv_bo *bo, size_t offset, size_t size);
+void panvk_priv_bo_invalidate(struct panvk_priv_bo *bo, size_t offset, size_t size);
+
+void panvk_priv_bo_unref(struct panvk_priv_bo *bo);
+
+#endif

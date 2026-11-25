@@ -1,0 +1,73 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+/* Copy decoded BC elements between two U-interleaved planes: 16-byte ASTC
+ * blocks (tiles of 4x4 blocks) or 2x2 R8/RG8 quads (tiles of 8x8 quads),
+ * one element per invocation. Used for BC image copies when the source has
+ * no raw BC plane. */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer InBuf {
+    uint data[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer OutBuf {
+    uint data[];
+};
+
+layout(push_constant) uniform Registers
+{
+    uvec2 src;          /* plane base + level offset + first layer/slice */
+    uvec2 dst;
+    uint src_row_B;     /* bytes per row of tiles */
+    uint src_slice_B;
+    uint dst_row_B;
+    uint dst_slice_B;
+    int width;          /* region size in elements */
+    int height;
+    int depth;
+    int elem_B;         /* 16, 8 or 4 */
+    uint dst_x0;        /* region origins in elements */
+    uint dst_y0;
+    uint t_log2;        /* tile size in elements, log2 (2 or 3) */
+    uint src_x0;
+    uint src_y0;
+} registers;
+
+uint spread(uint v)
+{
+    v = (v | (v << 2u)) & 0x33u;
+    return (v | (v << 1u)) & 0x55u;
+}
+
+uint tile_offset_B(uint x, uint y, uint row_B)
+{
+    const uint t = registers.t_log2;
+    const uint m = (1u << t) - 1u;
+    const uint e = uint(registers.elem_B);
+    const uint sy = spread(y & m);
+    const uint idx = (sy | (sy << 1u)) ^ spread(x & m);
+    return (y >> t) * row_B + (x >> t) * (e << (2u * t)) + idx * e;
+}
+
+void main()
+{
+    const uvec3 id = gl_GlobalInvocationID;
+    if (id.x >= uint(registers.width) || id.y >= uint(registers.height) ||
+        id.z >= uint(registers.depth))
+        return;
+
+    InBuf ibuf = InBuf(registers.src);
+    OutBuf obuf = OutBuf(registers.dst);
+    const uint s = (id.z * registers.src_slice_B +
+                    tile_offset_B(registers.src_x0 + id.x, registers.src_y0 + id.y,
+                                  registers.src_row_B)) / 4u;
+    const uint d = (id.z * registers.dst_slice_B +
+                    tile_offset_B(registers.dst_x0 + id.x, registers.dst_y0 + id.y,
+                                  registers.dst_row_B)) / 4u;
+    const uint words = uint(registers.elem_B) / 4u;
+    for (uint w = 0u; w < words; w++)
+        obuf.data[d + w] = ibuf.data[s + w];
+}

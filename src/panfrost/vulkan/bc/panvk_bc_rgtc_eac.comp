@@ -1,0 +1,204 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+/* BC4/BC5 -> EAC R11/RG11 (UNORM or SNORM), one invocation per 4x4 block.
+ * BC4 and EAC R11 are both 64-bit blocks with eight levels per block, so
+ * the transcode keeps the source size. The EAC base, multiplier and table
+ * for a BC4 endpoint pair come from a precomputed table (see
+ * panvk_bc_eac_lutgen.c); each of the eight BC4 palette entries is then
+ * given its nearest EAC level. */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer InBuf {
+    uint data[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer OutBuf {
+    uint data[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer LutBuf {
+    uint data[];
+};
+
+layout(push_constant) uniform Registers
+{
+    uvec2 src;
+    uvec2 dst;
+    uint src_row_B;
+    uint src_slice_B;
+    uint dst_row_B;
+    uint dst_slice_B;
+    int width;
+    int height;
+    int depth;
+    int format;
+    uint dst_x0;    /* region origin in blocks, tiled planes only */
+    uint dst_y0;
+    uint dst_tiled;
+    uint src_x0;
+    uint src_y0;
+    uint lut_lo;    /* uvec2 would be 8-byte aligned, past the C struct field */
+    uint lut_hi;
+} registers;
+
+uint spread4(uint v)
+{
+    v = (v | (v << 2u)) & 0x33u;
+    return (v | (v << 1u)) & 0x55u;
+}
+
+/* Byte offset of block (x, y) in a U-interleaved plane of 4x4-block tiles. */
+uint utile_offset_B(uint x, uint y, uint elem_B)
+{
+    uint sy = spread4(y & 3u);
+    uint idx = (sy | (sy << 1u)) ^ spread4(x & 3u);
+    return (y >> 2u) * registers.dst_row_B + (x >> 2u) * (elem_B << 4u) + idx * elem_B;
+}
+
+layout(constant_id = 0) const int SPEC_FORMAT = 0;
+
+#define VK_FORMAT_BC4_SNORM_BLOCK 140
+#define VK_FORMAT_BC5_UNORM_BLOCK 141
+#define VK_FORMAT_BC5_SNORM_BLOCK 142
+
+const ivec4 EAC_NEG[16] = ivec4[16](
+    ivec4(-3, -6, -9, -15), ivec4(-3, -7, -10, -13), ivec4(-2, -5, -8, -13), ivec4(-2, -4, -6, -13),
+    ivec4(-3, -6, -8, -12), ivec4(-3, -7, -9, -11), ivec4(-4, -7, -8, -11), ivec4(-3, -5, -8, -11),
+    ivec4(-2, -6, -8, -10), ivec4(-2, -5, -8, -10), ivec4(-2, -4, -8, -10), ivec4(-2, -5, -7, -10),
+    ivec4(-3, -4, -7, -10), ivec4(-1, -2, -3, -10), ivec4(-4, -6, -8, -9), ivec4(-3, -5, -7, -9));
+const ivec4 EAC_POS[16] = ivec4[16](
+    ivec4(2, 5, 8, 14), ivec4(2, 6, 9, 12), ivec4(1, 4, 7, 12), ivec4(1, 3, 5, 12),
+    ivec4(2, 5, 7, 11), ivec4(2, 6, 8, 10), ivec4(3, 6, 7, 10), ivec4(2, 4, 7, 10),
+    ivec4(1, 5, 7, 9), ivec4(1, 4, 7, 9), ivec4(1, 3, 7, 9), ivec4(1, 4, 6, 9),
+    ivec4(2, 3, 6, 9), ivec4(0, 1, 2, 9), ivec4(3, 5, 7, 8), ivec4(2, 4, 6, 8));
+
+/* EAC code (0..7) whose level is nearest to p. */
+uint nearest(float p, vec4 vn, vec4 vp)
+{
+    vec4 a = abs(vn - p), b = abs(vp - p);
+    uint j = 0u;
+    float e = a.x;
+    if (a.y < e) { e = a.y; j = 1u; }
+    if (a.z < e) { e = a.z; j = 2u; }
+    if (a.w < e) { e = a.w; j = 3u; }
+    if (b.x < e) { e = b.x; j = 4u; }
+    if (b.y < e) { e = b.y; j = 5u; }
+    if (b.z < e) { e = b.z; j = 6u; }
+    if (b.w < e) { j = 7u; }
+    return j;
+}
+
+/* One BC4 block (two words) -> one EAC R11 block (two words, memory order). */
+uvec2 bc4_to_eac(uvec2 s, bool snorm, LutBuf lut)
+{
+    const uint key = s.x & 0xffffu;
+    const uint prm = (lut.data[key] >> (snorm ? 16u : 0u)) & 0xffffu;
+    const int m = int((prm >> 8u) & 0xfu);
+    const uint tab = prm >> 12u;
+
+    /* BC4 palette and EAC levels, both in EAC units. */
+    vec4 pa, pb, vn, vp;
+    if (snorm) {
+        const float e0 = max(float(bitfieldExtract(int(s.x), 0, 8)), -127.0);
+        const float e1 = max(float(bitfieldExtract(int(s.x), 8, 8)), -127.0);
+        if (e0 > e1) {
+            pa = vec4(e0, e1, (6.0 * e0 + e1) / 7.0, (5.0 * e0 + 2.0 * e1) / 7.0);
+            pb = vec4((4.0 * e0 + 3.0 * e1) / 7.0, (3.0 * e0 + 4.0 * e1) / 7.0,
+                      (2.0 * e0 + 5.0 * e1) / 7.0, (e0 + 6.0 * e1) / 7.0);
+        } else {
+            pa = vec4(e0, e1, (4.0 * e0 + e1) / 5.0, (3.0 * e0 + 2.0 * e1) / 5.0);
+            pb = vec4((2.0 * e0 + 3.0 * e1) / 5.0, (e0 + 4.0 * e1) / 5.0, -127.0, 127.0);
+        }
+        pa *= 1023.0 / 127.0;
+        pb *= 1023.0 / 127.0;
+        const int base = bitfieldExtract(int(prm), 0, 8) * 8;
+        vn = clamp(vec4(base + EAC_NEG[tab] * (m * 8)), -1023.0, 1023.0);
+        vp = clamp(vec4(base + EAC_POS[tab] * (m * 8)), -1023.0, 1023.0);
+    } else {
+        const uvec4 u = uvec4(s.x & 0xffu, (s.x >> 8u) & 0xffu, 0u, 0u);
+        const uint a0 = u.x, a1 = u.y;
+        uvec4 qa, qb;
+        if (a0 > a1) {
+            qa = uvec4(a0, a1, ((a0 * 6u + a1 + 3u) * 9363u) >> 16u, ((a0 * 5u + a1 * 2u + 3u) * 9363u) >> 16u);
+            qb = uvec4(((a0 * 4u + a1 * 3u + 3u) * 9363u) >> 16u, ((a0 * 3u + a1 * 4u + 3u) * 9363u) >> 16u,
+                       ((a0 * 2u + a1 * 5u + 3u) * 9363u) >> 16u, ((a0 + a1 * 6u + 3u) * 9363u) >> 16u);
+        } else {
+            qa = uvec4(a0, a1, ((a0 * 4u + a1 + 2u) * 13108u) >> 16u, ((a0 * 3u + a1 * 2u + 2u) * 13108u) >> 16u);
+            qb = uvec4(((a0 * 2u + a1 * 3u + 2u) * 13108u) >> 16u, ((a0 + a1 * 4u + 2u) * 13108u) >> 16u, 0u, 255u);
+        }
+        pa = vec4(qa) * (2047.0 / 255.0);
+        pb = vec4(qb) * (2047.0 / 255.0);
+        const int base = int(prm & 0xffu) * 8 + 4;
+        vn = clamp(vec4(base + EAC_NEG[tab] * (m * 8)), 0.0, 2047.0);
+        vp = clamp(vec4(base + EAC_POS[tab] * (m * 8)), 0.0, 2047.0);
+    }
+
+    /* EAC code for each BC4 palette entry, 3 bits each. */
+    const uint pid = nearest(pa.x, vn, vp) | nearest(pa.y, vn, vp) << 3u |
+                     nearest(pa.z, vn, vp) << 6u | nearest(pa.w, vn, vp) << 9u |
+                     nearest(pb.x, vn, vp) << 12u | nearest(pb.y, vn, vp) << 15u |
+                     nearest(pb.z, vn, vp) << 18u | nearest(pb.w, vn, vp) << 21u;
+
+    /* BC4 indices: texel i = y * 4 + x at bit 16 + 3i. EAC indices: a 48-bit
+     * big-endian field, texel (x, y) in slot x * 4 + y, most significant
+     * slot first. */
+    const uint lo = (s.x >> 16u) | (s.y << 16u), hi = s.y >> 16u;
+    uint ih = 0u, il = 0u;
+    for (uint i = 0u; i < 16u; i++) {
+        const uint b = 3u * i;
+        const uint k = b + 3u <= 32u ? (lo >> b) & 7u :
+                       b >= 32u ? (hi >> (b - 32u)) & 7u :
+                       ((lo >> b) | (hi << (32u - b))) & 7u;
+        const uint v = (pid >> (3u * k)) & 7u;
+        const uint pos = 45u - 3u * ((i & 3u) * 4u + (i >> 2u));
+        if (pos >= 32u)
+            ih |= v << (pos - 32u);
+        else if (pos + 3u <= 32u)
+            il |= v << pos;
+        else {
+            il |= v << pos;
+            ih |= v >> (32u - pos);
+        }
+    }
+    return uvec2((prm & 0xffu) | ((uint(m) << 4u | tab) << 8u) |
+                    ((ih >> 8u) & 0xffu) << 16u | (ih & 0xffu) << 24u,
+                 (il >> 24u) | ((il >> 16u) & 0xffu) << 8u |
+                    ((il >> 8u) & 0xffu) << 16u | (il & 0xffu) << 24u);
+}
+
+void main()
+{
+    uint bx = gl_GlobalInvocationID.x;
+    uint by = gl_GlobalInvocationID.y;
+    uint bz = gl_GlobalInvocationID.z;
+
+    if (bx >= uint((registers.width + 3) / 4) || by >= uint((registers.height + 3) / 4) ||
+        bz >= uint(registers.depth))
+        return;
+
+    InBuf ibuf = InBuf(registers.src);
+    OutBuf obuf = OutBuf(registers.dst);
+    LutBuf lut = LutBuf(uvec2(registers.lut_lo, registers.lut_hi));
+    int format = SPEC_FORMAT != 0 ? SPEC_FORMAT : registers.format;
+    bool two = format == VK_FORMAT_BC5_UNORM_BLOCK || format == VK_FORMAT_BC5_SNORM_BLOCK;
+    bool snorm = format == VK_FORMAT_BC4_SNORM_BLOCK || format == VK_FORMAT_BC5_SNORM_BLOCK;
+    uint nw = two ? 4u : 2u;
+
+    uint in_word = (bz * registers.src_slice_B + by * registers.src_row_B) / 4u + bx * nw;
+    uint out_word = registers.dst_tiled != 0u
+        ? (bz * registers.dst_slice_B +
+           utile_offset_B(registers.dst_x0 + bx, registers.dst_y0 + by, nw * 4u)) / 4u
+        : (bz * registers.dst_slice_B + by * registers.dst_row_B) / 4u + bx * nw;
+
+    uvec2 r = bc4_to_eac(uvec2(ibuf.data[in_word], ibuf.data[in_word + 1u]), snorm, lut);
+    obuf.data[out_word] = r.x;
+    obuf.data[out_word + 1u] = r.y;
+    if (two) {
+        uvec2 g = bc4_to_eac(uvec2(ibuf.data[in_word + 2u], ibuf.data[in_word + 3u]), snorm, lut);
+        obuf.data[out_word + 2u] = g.x;
+        obuf.data[out_word + 3u] = g.y;
+    }
+}

@@ -1,0 +1,1561 @@
+/*
+ * Copyright © 2024 Collabora Ltd.
+ * Copyright © 2024 Arm Ltd.
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "panvk_buffer.h"
+#include "panvk_cmd_alloc.h"
+#include "panvk_cmd_buffer.h"
+#include "panvk_device_memory.h"
+#include "panvk_entrypoints.h"
+#include "panvk_perf_knobs.h"
+
+#include "pan_desc.h"
+#include "pan_util.h"
+
+#include "util/u_debug.h"
+
+#if PAN_ARCH == 9
+DEBUG_GET_ONCE_OPTION(v9_rt128, "PANVK_V9_RT128", NULL)
+#endif
+
+/* PANVK_CLEAN_TILE_WRITE=1: skip the preload forced by
+ * loadOp=DONT_CARE/NONE + storeOp=NONE when the clean tile write can be
+ * safely disabled for the final tile size.
+ */
+static bool
+clean_tile_write_elide_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("PANVK_CLEAN_TILE_WRITE", false);
+   return enabled;
+}
+
+static bool
+discard_preload_candidate(const VkRenderingAttachmentInfo *att)
+{
+   return clean_tile_write_elide_enabled() &&
+          (att->loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE ||
+           att->loadOp == VK_ATTACHMENT_LOAD_OP_NONE) &&
+          att->storeOp == VK_ATTACHMENT_STORE_OP_NONE &&
+          att->resolveMode == VK_RESOLVE_MODE_NONE;
+}
+
+static enum pan_fb_load_op
+get_att_fb_load_op(const VkRenderingAttachmentInfo *att)
+{
+   switch (att->loadOp) {
+   case VK_ATTACHMENT_LOAD_OP_CLEAR:
+      return PAN_FB_LOAD_CLEAR;
+   case VK_ATTACHMENT_LOAD_OP_LOAD:
+      return PAN_FB_LOAD_IMAGE;
+   case VK_ATTACHMENT_LOAD_OP_NONE:
+   case VK_ATTACHMENT_LOAD_OP_DONT_CARE:
+      /* This is a very frustrating corner case. From the spec:
+       *
+       *     VK_ATTACHMENT_STORE_OP_NONE specifies the contents within the
+       *     render area are not accessed by the store operation as long as
+       *     no values are written to the attachment during the render pass.
+       *
+       * With VK_ATTACHMENT_LOAD_OP_DONT_CARE + VK_ATTACHMENT_STORE_OP_NONE,
+       * we need to preserve the contents throughout partial renders. The
+       * easiest way to do that is forcing a preload, so that partial stores
+       * for unused attachments will be no-op'd by writing existing contents.
+       *
+       * TODO: disable preload when we have clean_tile_write_enable = false
+       * as an optimization
+       */
+      if (att->storeOp == VK_ATTACHMENT_STORE_OP_NONE)
+         return PAN_FB_LOAD_IMAGE;
+      else
+         return PAN_FB_LOAD_NONE;
+   default:
+      UNREACHABLE("Unsupported loadOp");
+   }
+}
+
+static enum pan_fb_msaa_copy_op
+vk_to_pan_fb_resolve_mode(VkResolveModeFlagBits resolveMode)
+{
+   switch (resolveMode) {
+   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:  return PAN_FB_MSAA_COPY_SAMPLE_0;
+   case VK_RESOLVE_MODE_AVERAGE_BIT:      return PAN_FB_MSAA_COPY_AVERAGE;
+   case VK_RESOLVE_MODE_MIN_BIT:          return PAN_FB_MSAA_COPY_MIN;
+   case VK_RESOLVE_MODE_MAX_BIT:          return PAN_FB_MSAA_COPY_MAX;
+   default: UNREACHABLE("Unsupported resolveMode");
+   }
+}
+
+static struct panvk_image_view *
+get_ms2ss_image_view(struct panvk_image_view *iview, uint32_t nr_samples)
+{
+   assert(nr_samples >= 2 && nr_samples <= 16);
+   assert(iview->pview.nr_samples == 1);
+   assert(iview->vk.image->create_flags &
+          VK_IMAGE_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT);
+
+   /* sample count 2 is at index 0, 4 at 1, .. */
+   uint32_t vidx = 0;
+   switch (nr_samples) {
+   case VK_SAMPLE_COUNT_2_BIT:
+      vidx = 0;
+      break;
+   case VK_SAMPLE_COUNT_4_BIT:
+      vidx = 1;
+      break;
+   case VK_SAMPLE_COUNT_8_BIT:
+      vidx = 2;
+      break;
+   case VK_SAMPLE_COUNT_16_BIT:
+      vidx = 3;
+      break;
+   default:
+      UNREACHABLE("unhandled sample count");
+   }
+   assert(iview->ms_views[vidx] != VK_NULL_HANDLE);
+
+   struct panvk_image_view *res =
+      panvk_image_view_from_handle(iview->ms_views[vidx]);
+
+   assert(res->pview.nr_samples == nr_samples);
+
+   return res;
+}
+
+static bool
+avoid_direct_resolve_to(const struct pan_image *img)
+{
+   /* There is an issue with AFBC and small tiles where, if the tile size is
+    * not a multiple of superblock size then writes and reads may race within
+    * a superblock.  On v7+, there's a hardware bit to help us work around
+    * this but it doesn't exist on v6 and earlier.
+    *
+    * This is particularly likely to happen with MSAA since the sample count
+    * is a multiplier on the color allocation, making it much more likely that
+    * we'll hit this case.  MSAA images are safe because they don't allow AFBC
+    * but we have a real problem if we attempt to resolve directly to an
+    * AFBC-compressed single-sampled image.  Skip the resolve optimization in
+    * this case.
+    *
+    * TODO: If we moved this decision later, it could be based on the final
+    * framebuffer layout and we could potentially allow direct resolves in
+    * more cases.
+    */
+   return PAN_ARCH < 7 && drm_is_afbc(img->props.modifier);
+}
+
+static void
+panvk_fb_store_set_crc_header_addr(struct pan_fb_store_target *store,
+                                   const struct panvk_image_view *iview)
+{
+   if (!store->store || !pan_image_view_has_crc(&iview->pview))
+      return;
+
+   const struct panvk_image *image =
+      container_of(iview->vk.image, struct panvk_image, vk);
+
+   store->crc_header_addr = panvk_image_plane_crc_header_addr(image);
+}
+
+static void
+render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
+                                  const VkRenderingAttachmentInfo *att,
+                                  uint32_t index)
+{
+   struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+   VK_FROM_HANDLE(panvk_image_view, iview, att->imageView);
+
+   struct panvk_image_view *iview_ss = NULL;
+   const bool ms2ss = render->fb.nr_samples > 1 &&
+                      iview->pview.nr_samples == 1;
+
+   if (ms2ss) {
+      iview_ss = iview;
+      iview = get_ms2ss_image_view(iview, render->fb.nr_samples);
+   }
+
+   struct panvk_image *img =
+      container_of(iview->vk.image, struct panvk_image, vk);
+
+   render->bound_attachments |= MESA_VK_RP_ATTACHMENT_COLOR_BIT(index);
+   render->color_attachments.iviews[index] = iview;
+   render->color_attachments.preload_iviews[index] =
+      ms2ss ? iview_ss : NULL;
+   render->color_attachments.fmts[index] = iview->vk.format;
+   render->color_attachments.samples[index] = img->vk.samples;
+
+#if PAN_ARCH < 9
+   for (uint8_t p = 0; p < ARRAY_SIZE(iview->pview.planes); p++) {
+      struct pan_image_plane_ref pref =
+         pan_image_view_get_plane(&iview->pview, p);
+
+      if (!pref.image)
+         continue;
+
+      assert(pref.plane_idx < ARRAY_SIZE(img->planes));
+      assert(img->planes[pref.plane_idx].mem->bo != NULL);
+      render->fb.bos[render->fb.bo_count++] =
+         img->planes[pref.plane_idx].mem->bo;
+   }
+#endif
+
+   render->fb.layout.rt_formats[index] = iview->pview.format;
+   render->fb.nr_samples =
+      MAX2(render->fb.nr_samples,
+           pan_image_view_get_nr_samples(&iview->pview));
+
+   render->fb.load.rts[index] = (struct pan_fb_load_target) {
+      .in_bounds_load = get_att_fb_load_op(att),
+      .border_load = PAN_FB_LOAD_IMAGE,
+      .always = att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .discard_candidate = discard_preload_candidate(att),
+      .msaa = ms2ss ? PAN_FB_MSAA_COPY_SINGLE
+                    : PAN_FB_MSAA_COPY_ALL,
+      .iview = ms2ss ? &iview_ss->pview : &iview->pview,
+      .clear.color.ui = {
+         att->clearValue.color.uint32[0],
+         att->clearValue.color.uint32[1],
+         att->clearValue.color.uint32[2],
+         att->clearValue.color.uint32[3],
+      },
+   };
+   render->fb.spill.load.rts[index] = pan_fb_load_iview(&iview->pview);
+   render->fb.spill.store.rts[index] = pan_fb_store_iview(&iview->pview);
+   panvk_fb_store_set_crc_header_addr(&render->fb.spill.store.rts[index],
+                                      iview);
+   if (att->storeOp == VK_ATTACHMENT_STORE_OP_STORE && !ms2ss) {
+      render->fb.store.rts[index] = pan_fb_store_iview(&iview->pview);
+      panvk_fb_store_set_crc_header_addr(&render->fb.store.rts[index], iview);
+   }
+
+   if (att->resolveMode != VK_RESOLVE_MODE_NONE) {
+      VK_FROM_HANDLE(panvk_image_view, resolve_iview, att->resolveImageView);
+
+      /* VUID-VkRenderingAttachmentInfo-imageView-06862 and
+       * VUID-VkRenderingAttachmentInfo-imageView-06863:
+       * If resolveMode != NONE, then
+       * resolveView == NULL iff. multisampledRenderToSingleSampledEnable */
+      assert(ms2ss == (resolve_iview == NULL));
+
+      const struct panvk_resolve_attachment resolve = {
+         .dst_iview = ms2ss ? iview_ss : resolve_iview,
+         .mode = att->resolveMode,
+      };
+      assert(resolve.dst_iview != NULL);
+      assert(resolve.dst_iview->pview.nr_samples == 1);
+
+      const struct pan_image *resolve_pimage =
+         pan_image_view_get_color_plane(&resolve.dst_iview->pview).image;
+
+      if ((ms2ss || att->storeOp != VK_ATTACHMENT_STORE_OP_STORE) &&
+          !avoid_direct_resolve_to(resolve_pimage)) {
+         render->fb.resolve.rts[index] = (struct pan_fb_resolve_target) {
+            .in_bounds = {
+               .resolve = PAN_FB_RESOLVE_RT(index),
+               .msaa = vk_to_pan_fb_resolve_mode(att->resolveMode),
+            },
+            .border = {
+               .resolve = PAN_FB_RESOLVE_IMAGE,
+               .msaa = PAN_FB_MSAA_COPY_SINGLE,
+            },
+            .iview = &resolve.dst_iview->pview,
+         };
+         render->fb.store.rts[index] =
+            pan_fb_always_store_iview_s0(&resolve.dst_iview->pview);
+         panvk_fb_store_set_crc_header_addr(&render->fb.store.rts[index],
+                                            resolve.dst_iview);
+      } else {
+         /* We need to store so we can do the MSAA resolve later */
+         render->fb.store.rts[index] = pan_fb_store_iview(&iview->pview);
+         panvk_fb_store_set_crc_header_addr(&render->fb.store.rts[index],
+                                            iview);
+         render->color_attachments.resolve[index] = resolve;
+      }
+   }
+}
+
+static struct pan_image_view
+get_zs_pan_image_view_aspects(struct panvk_image_view *iview,
+                              VkImageAspectFlags aspects)
+{
+   struct panvk_image *img =
+      container_of(iview->vk.image, struct panvk_image, vk);
+   unsigned plane_idx = panvk_plane_index(img, aspects);
+
+   /* From the Vulkan 1.4.335 spec:
+    *
+    *    "The aspectMask of any image view specified for pDepthAttachment
+    *    or pStencilAttachment is ignored. Instead, depth attachments are
+    *    automatically treated as if VK_IMAGE_ASPECT_DEPTH_BIT was
+    *    specified for their aspect masks"
+    *
+    * We need to re-create the image view more-or-less from scratch.  The old
+    * image view might not have the right effective format or point to the
+    * right planes.
+    */
+
+   struct pan_image_view pview = iview->pview;
+   if (panvk_image_is_planar_depth_stencil(img)) {
+      assert(util_bitcount(aspects) == 1);
+      pview.format = aspects == VK_IMAGE_ASPECT_STENCIL_BIT
+                     ? panvk_image_stencil_only_pfmt(img)
+                     : panvk_image_depth_only_pfmt(img);
+   } else {
+      assert(img->plane_count == 1 && plane_idx == 0);
+      pview.format = img->planes[0].image.props.format;
+   }
+
+   memset(pview.planes, 0, sizeof(pview.planes));
+   pview.planes[0] = (struct pan_image_plane_ref) {
+      .image = &img->planes[plane_idx].image,
+      .plane_idx = 0,
+   };
+
+   return pview;
+}
+
+static struct pan_image_view
+get_z_pan_image_view(struct panvk_image_view *iview)
+{
+   return get_zs_pan_image_view_aspects(iview, VK_IMAGE_ASPECT_DEPTH_BIT);
+}
+
+static struct pan_image_view
+get_s_pan_image_view(struct panvk_image_view *iview)
+{
+   return get_zs_pan_image_view_aspects(iview, VK_IMAGE_ASPECT_STENCIL_BIT);
+}
+
+static struct pan_image_view
+get_zs_pan_image_view(struct panvk_image_view *iview)
+{
+   return get_zs_pan_image_view_aspects(iview, VK_IMAGE_ASPECT_DEPTH_BIT |
+                                               VK_IMAGE_ASPECT_STENCIL_BIT);
+}
+
+static void
+render_state_set_zs_attachments(struct panvk_cmd_buffer *cmdbuf,
+                                const VkRenderingAttachmentInfo *z_att,
+                                const VkRenderingAttachmentInfo *s_att)
+{
+   struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+   struct panvk_image_view *z_iview = NULL, *z_iview_ss = NULL;
+   struct panvk_image_view *s_iview = NULL, *s_iview_ss = NULL;
+   const struct panvk_image *z_img = NULL, *s_img = NULL;
+   bool z_ms2ss = false, s_ms2ss = false;
+
+   /* First grab our images/views and set up the API-level stuff.  For
+    * multisampled render to single sampled, this also includes fetching
+    * the multisampled view.
+    */
+
+   if (z_att) {
+      z_iview = panvk_image_view_from_handle(z_att->imageView);
+      z_img = container_of(z_iview->vk.image, struct panvk_image, vk);
+
+      z_ms2ss = render->fb.nr_samples > 1 && z_iview->pview.nr_samples == 1;
+      if (z_ms2ss) {
+         z_iview_ss = z_iview;
+         z_iview = get_ms2ss_image_view(z_iview, render->fb.nr_samples);
+      }
+
+      render->bound_attachments |= MESA_VK_RP_ATTACHMENT_DEPTH_BIT;
+      render->z_attachment.iview = z_iview;
+      render->z_attachment.preload_iview = z_ms2ss ? z_iview_ss : NULL;
+      render->z_attachment.fmt = z_iview->vk.format;
+      render->fb.nr_samples =
+         MAX2(render->fb.nr_samples,
+              pan_image_view_get_nr_samples(&z_iview->pview));
+
+#if PAN_ARCH < 9
+      /* Depth plane always comes first. */
+      render->fb.bos[render->fb.bo_count++] = z_img->planes[0].mem->bo;
+#endif
+   }
+
+   if (s_att) {
+      s_iview = panvk_image_view_from_handle(s_att->imageView);
+      s_img = container_of(s_iview->vk.image, struct panvk_image, vk);
+
+      s_ms2ss = render->fb.nr_samples > 1 && s_iview->pview.nr_samples == 1;
+      if (s_ms2ss) {
+         s_iview_ss = s_iview;
+         s_iview = get_ms2ss_image_view(s_iview, render->fb.nr_samples);
+      }
+
+      render->bound_attachments |= MESA_VK_RP_ATTACHMENT_STENCIL_BIT;
+      render->s_attachment.iview = s_iview;
+      render->s_attachment.preload_iview = s_ms2ss ? s_iview_ss : NULL;
+      render->s_attachment.fmt = s_iview->vk.format;
+      render->fb.nr_samples =
+         MAX2(render->fb.nr_samples,
+              pan_image_view_get_nr_samples(&s_iview->pview));
+
+#if PAN_ARCH < 9
+      /* The stencil plane is always last. */
+      render->fb.bos[render->fb.bo_count++] =
+         s_img->planes[s_img->plane_count - 1].mem->bo;
+#endif
+   }
+
+   const bool interleaved_zs =
+      (z_img && panvk_image_is_interleaved_depth_stencil(z_img)) ||
+      (s_img && panvk_image_is_interleaved_depth_stencil(s_img));
+
+   /* When both depth and stencil are bound, they have to be effecitvly
+    * the same image view.  This is a global Vulkan requirement but it
+    * really only matters for us in the interleaved case.
+    */
+   if (interleaved_zs && z_img && s_img) {
+      assert(z_img == s_img);
+      assert(z_iview->pview.dim == s_iview->pview.dim);
+      assert(z_iview->pview.first_level == s_iview->pview.first_level);
+      assert(z_iview->pview.last_level == s_iview->pview.last_level);
+      assert(z_iview->pview.first_layer_or_z_slice ==
+             s_iview->pview.first_layer_or_z_slice);
+      assert(z_iview->pview.last_layer_or_z_slice ==
+             s_iview->pview.last_layer_or_z_slice);
+      assert(z_iview->pview.nr_samples == s_iview->pview.nr_samples);
+   }
+
+   /* Set up the framebuffer formats for Z/S as well as framefubber loads or
+    * clears, as needed.
+    */
+
+   if (z_att) {
+      render->fb.layout.z_format = panvk_image_depth_only_pfmt(z_img);
+      render->z_pview.load =
+         get_z_pan_image_view(z_ms2ss ? z_iview_ss : z_iview);
+      render->fb.load.z = (struct pan_fb_load_target) {
+         .in_bounds_load = get_att_fb_load_op(z_att),
+         .border_load = PAN_FB_LOAD_IMAGE,
+         .always = z_att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
+         /* Interleaved Z/S stores both planes together and would stomp the
+          * aspect that was not loaded. */
+         .discard_candidate = !interleaved_zs &&
+                              discard_preload_candidate(z_att),
+         .msaa = z_ms2ss ? PAN_FB_MSAA_COPY_SINGLE
+                         : PAN_FB_MSAA_COPY_ALL,
+         .iview = &render->z_pview.load,
+         .clear.depth = z_att->clearValue.depthStencil.depth,
+      };
+   } else if (interleaved_zs) {
+      /* If we have interleaved Z/S and depth isn't bound, we need to load
+       * it anyway so it doesn't get stompped when we write out at the end.
+       */
+      render->fb.layout.z_format = panvk_image_depth_only_pfmt(s_img);
+      render->fb.load.z = pan_fb_load_iview(&render->s_pview.load);
+   }
+
+   if (s_att) {
+      render->fb.layout.s_format = panvk_image_stencil_only_pfmt(s_img);
+      render->s_pview.load =
+         get_s_pan_image_view(s_ms2ss ? s_iview_ss : s_iview);
+      render->fb.load.s = (struct pan_fb_load_target) {
+         .in_bounds_load = get_att_fb_load_op(s_att),
+         .border_load = PAN_FB_LOAD_IMAGE,
+         .always = s_att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR,
+         /* Interleaved Z/S stores both planes together and would stomp the
+          * aspect that was not loaded. */
+         .discard_candidate = !interleaved_zs &&
+                              discard_preload_candidate(s_att),
+         .msaa = s_ms2ss ? PAN_FB_MSAA_COPY_SINGLE
+                         : PAN_FB_MSAA_COPY_ALL,
+         .iview = &render->s_pview.load,
+         .clear.stencil = s_att->clearValue.depthStencil.stencil,
+      };
+   } else if (interleaved_zs) {
+      /* If we have interleaved Z/S and stencil isn't bound, we need to load
+       * it anyway so it doesn't get stompped when we write out at the end.
+       */
+      render->fb.layout.s_format = panvk_image_stencil_only_pfmt(z_img);
+      render->fb.load.s = pan_fb_load_iview(&render->z_pview.load);
+   }
+
+   /* Set up spill load/stores for incremental rendering */
+
+   if (interleaved_zs) {
+      /* Use the same image view for both spills */
+      struct panvk_image_view *iview = z_iview ? z_iview : s_iview;
+      render->z_pview.spill = get_zs_pan_image_view(iview);
+      render->fb.spill.load.z = pan_fb_load_iview(&render->z_pview.spill);
+      render->fb.spill.load.s = pan_fb_load_iview(&render->z_pview.spill);
+      render->fb.spill.store.zs = pan_fb_store_iview(&render->z_pview.spill);
+   } else {
+      if (z_iview) {
+         render->z_pview.spill = get_z_pan_image_view(z_iview);
+         render->fb.spill.load.z = pan_fb_load_iview(&render->z_pview.spill);
+         render->fb.spill.store.zs = pan_fb_store_iview(&render->z_pview.spill);
+      }
+
+      if (s_iview) {
+         render->s_pview.spill = get_s_pan_image_view(s_iview);
+         render->fb.spill.load.s = pan_fb_load_iview(&render->s_pview.spill);
+         render->fb.spill.store.s = pan_fb_store_iview(&render->s_pview.spill);
+      }
+   }
+
+   /* Set up the final render target write(s) at the end, as well as any
+    * multisample resolves.
+    */
+
+   struct panvk_resolve_attachment z_resolve = { };
+   if (z_att && z_att->resolveMode != VK_RESOLVE_MODE_NONE) {
+      VK_FROM_HANDLE(panvk_image_view, resolve_iview, z_att->resolveImageView);
+      assert(z_ms2ss == (resolve_iview == NULL));
+
+      z_resolve = (struct panvk_resolve_attachment) {
+         .dst_iview = z_ms2ss ? z_iview_ss : resolve_iview,
+         .mode = z_att->resolveMode,
+      };
+      assert(z_resolve.dst_iview != NULL);
+      assert(z_resolve.dst_iview->pview.nr_samples == 1);
+   }
+
+   struct panvk_resolve_attachment s_resolve = { };
+   if (s_att && s_att->resolveMode != VK_RESOLVE_MODE_NONE) {
+      VK_FROM_HANDLE(panvk_image_view, resolve_iview, s_att->resolveImageView);
+      assert(s_ms2ss == (resolve_iview == NULL));
+
+      s_resolve = (struct panvk_resolve_attachment) {
+         .dst_iview = s_ms2ss ? s_iview_ss : resolve_iview,
+         .mode = s_att->resolveMode,
+      };
+      assert(s_resolve.dst_iview != NULL);
+      assert(s_resolve.dst_iview->pview.nr_samples == 1);
+   }
+
+   if (interleaved_zs) {
+      /* Store both Z and S together */
+      struct panvk_image_view *iview = z_iview ? z_iview : s_iview;
+      render->z_pview.store = get_zs_pan_image_view(iview);
+      render->fb.store.zs = pan_fb_store_iview(&render->z_pview.store);
+
+      /* It's probably possible to make resolve shaders work with interleaved
+       * Z/S but it's tricky at best.  For now, skip this optimization in the
+       * interleaved case.
+       */
+      render->z_attachment.resolve = z_resolve;
+      render->s_attachment.resolve = s_resolve;
+   } else {
+      if (z_iview) {
+         render->z_pview.store = get_z_pan_image_view(z_iview);
+         if (z_att->storeOp == VK_ATTACHMENT_STORE_OP_STORE && !z_ms2ss)
+            render->fb.store.zs = pan_fb_store_iview(&render->z_pview.store);
+      }
+
+      if (s_iview) {
+         render->s_pview.store = get_s_pan_image_view(s_iview);
+         if (s_att->storeOp == VK_ATTACHMENT_STORE_OP_STORE && !s_ms2ss)
+            render->fb.store.s = pan_fb_store_iview(&render->s_pview.store);
+      }
+
+      if (z_resolve.mode != VK_RESOLVE_MODE_NONE) {
+         const struct pan_image *z_resolve_pimage =
+            pan_image_view_get_zs_plane(&z_resolve.dst_iview->pview).image;
+
+         if ((z_ms2ss || z_att->storeOp != VK_ATTACHMENT_STORE_OP_STORE) &&
+             !avoid_direct_resolve_to(z_resolve_pimage)) {
+            render->z_pview.resolve = get_z_pan_image_view(z_resolve.dst_iview);
+            render->fb.resolve.z = (struct pan_fb_resolve_target) {
+               .in_bounds = {
+                  .resolve = PAN_FB_RESOLVE_Z,
+                  .msaa = vk_to_pan_fb_resolve_mode(z_att->resolveMode),
+               },
+               .border = {
+                  .resolve = PAN_FB_RESOLVE_IMAGE,
+                  .msaa = PAN_FB_MSAA_COPY_SINGLE,
+               },
+               .iview = &render->z_pview.resolve,
+            };
+            render->fb.store.zs =
+               pan_fb_always_store_iview_s0(&render->z_pview.resolve);
+         } else {
+            /* We need to store so we can do the MSAA resolve later */
+            render->fb.store.zs = pan_fb_store_iview(&render->z_pview.store);
+            render->z_attachment.resolve = z_resolve;
+         }
+      }
+
+      if (s_resolve.mode != VK_RESOLVE_MODE_NONE) {
+         const struct pan_image *s_resolve_pimage =
+            pan_image_view_get_s_plane(&s_resolve.dst_iview->pview).image;
+
+         if ((s_ms2ss || s_att->storeOp != VK_ATTACHMENT_STORE_OP_STORE) &&
+             !avoid_direct_resolve_to(s_resolve_pimage)) {
+            render->s_pview.resolve = get_s_pan_image_view(s_resolve.dst_iview);
+            render->fb.resolve.s = (struct pan_fb_resolve_target) {
+               .in_bounds = {
+                  .resolve = PAN_FB_RESOLVE_S,
+                  .msaa = vk_to_pan_fb_resolve_mode(s_att->resolveMode),
+               },
+               .border = {
+                  .resolve = PAN_FB_RESOLVE_IMAGE,
+                  .msaa = PAN_FB_MSAA_COPY_SINGLE,
+               },
+               .iview = &render->s_pview.resolve,
+            };
+            render->fb.store.s =
+               pan_fb_always_store_iview_s0(&render->s_pview.resolve);
+         } else {
+            /* We need to store so we can do the MSAA resolve later */
+            render->fb.store.s = pan_fb_store_iview(&render->s_pview.store);
+            render->s_attachment.resolve = s_resolve;
+         }
+      }
+   }
+}
+
+#if PAN_ARCH >= 10
+/* C4 (115): add the page-aligned range [base, base + size). A zero base
+ * (unbound) is unknown.
+ */
+static void
+frag_written_add_range(struct panvk_frag_written *fw, uint64_t base,
+                       uint64_t size)
+{
+   if (!base) {
+      fw->overflow = true;
+      return;
+   }
+
+   const uint64_t start = ROUND_DOWN_TO(base, 4096);
+   const uint64_t end = align64(base + size, 4096);
+
+   for (unsigned r = 0; r < fw->count; r++) {
+      if (fw->ranges[r].start <= start && end <= fw->ranges[r].end)
+         return;
+   }
+
+   if (fw->count == ARRAY_SIZE(fw->ranges)) {
+      fw->overflow = true;
+      return;
+   }
+
+   fw->ranges[fw->count].start = start;
+   fw->ranges[fw->count].end = end;
+   fw->count++;
+}
+
+static void
+frag_written_add_iview(struct panvk_frag_written *fw,
+                       const struct panvk_image_view *iview)
+{
+   if (!iview)
+      return;
+
+   const struct panvk_image *img =
+      container_of(iview->vk.image, struct panvk_image, vk);
+
+   /* Sparse images can share pages with anything. */
+   if (img->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      fw->overflow = true;
+      return;
+   }
+
+   for (unsigned p = 0; p < img->plane_count; p++)
+      frag_written_add_range(fw, img->planes[p].plane.base,
+                             img->planes[p].plane.layout.data_size_B);
+}
+
+/* A direct MSAA resolve stores straight to the resolve image, which is in
+ * none of the attachment views.
+ */
+static void
+frag_written_add_store(struct panvk_frag_written *fw,
+                       const struct pan_fb_store_target *store)
+{
+   if (!store->store || !store->iview)
+      return;
+
+   for (unsigned p = 0; p < ARRAY_SIZE(store->iview->planes); p++) {
+      const struct pan_image_plane_ref pref =
+         pan_image_view_get_plane(store->iview, p);
+
+      if (!pref.image)
+         continue;
+
+      const struct pan_image_plane *plane = pref.image->planes[pref.plane_idx];
+      if (!plane) {
+         fw->overflow = true;
+         continue;
+      }
+
+      frag_written_add_range(fw, plane->base, plane->layout.data_size_B);
+   }
+}
+
+static bool
+frag_written_overlaps_range(const struct panvk_frag_written *fw,
+                            uint64_t base, uint64_t size)
+{
+   if (!base)
+      return true;
+
+   const uint64_t start = ROUND_DOWN_TO(base, 4096);
+   const uint64_t end = align64(base + size, 4096);
+
+   for (unsigned r = 0; r < fw->count; r++) {
+      if (start < fw->ranges[r].end && fw->ranges[r].start < end)
+         return true;
+   }
+
+   return false;
+}
+
+static bool
+frag_written_overlaps(const struct panvk_frag_written *fw,
+                      const struct panvk_image_view *iview)
+{
+   if (!iview)
+      return false;
+
+   const struct panvk_image *img =
+      container_of(iview->vk.image, struct panvk_image, vk);
+
+   if (img->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT)
+      return true;
+
+   for (unsigned p = 0; p < img->plane_count; p++) {
+      if (frag_written_overlaps_range(fw, img->planes[p].plane.base,
+                                      img->planes[p].plane.layout.data_size_B))
+         return true;
+   }
+
+   return false;
+}
+
+/* The view the preload actually reads from. */
+static bool
+frag_written_overlaps_load(const struct panvk_frag_written *fw,
+                           const struct pan_fb_load_target *load)
+{
+   if (!load->iview)
+      return false;
+
+   for (unsigned p = 0; p < ARRAY_SIZE(load->iview->planes); p++) {
+      const struct pan_image_plane_ref pref =
+         pan_image_view_get_plane(load->iview, p);
+
+      if (!pref.image)
+         continue;
+
+      const struct pan_image_plane *plane = pref.image->planes[pref.plane_idx];
+      if (!plane || frag_written_overlaps_range(fw, plane->base,
+                                                plane->layout.data_size_B))
+         return true;
+   }
+
+   return false;
+}
+
+/* Called for every fragment job the command buffer issues: everything the
+ * jobs can write. That is the attachments (incremental rendering spills to
+ * them even without a store), the internal multisampled images of
+ * multisampled-render-to-single-sampled, the resolve targets and whatever
+ * the framebuffer stores to.
+ */
+void
+panvk_per_arch(cmd_track_frag_writes)(struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+   struct panvk_frag_written *fw = &cmdbuf->state.gfx.frag_written;
+
+   for (unsigned i = 0; i < MAX_RTS; i++) {
+      frag_written_add_iview(fw, render->color_attachments.iviews[i]);
+      frag_written_add_iview(fw, render->color_attachments.preload_iviews[i]);
+      frag_written_add_iview(fw,
+                             render->color_attachments.resolve[i].dst_iview);
+   }
+
+   frag_written_add_iview(fw, render->z_attachment.iview);
+   frag_written_add_iview(fw, render->z_attachment.preload_iview);
+   frag_written_add_iview(fw, render->z_attachment.resolve.dst_iview);
+   frag_written_add_iview(fw, render->s_attachment.iview);
+   frag_written_add_iview(fw, render->s_attachment.preload_iview);
+   frag_written_add_iview(fw, render->s_attachment.resolve.dst_iview);
+
+   for (unsigned rt = 0; rt < PAN_MAX_RTS; rt++) {
+      frag_written_add_store(fw, &render->fb.store.rts[rt]);
+      frag_written_add_store(fw, &render->fb.spill.store.rts[rt]);
+   }
+
+   frag_written_add_store(fw, &render->fb.store.zs);
+   frag_written_add_store(fw, &render->fb.store.s);
+   frag_written_add_store(fw, &render->fb.spill.store.zs);
+   frag_written_add_store(fw, &render->fb.spill.store.s);
+}
+
+static bool
+load_target_reads_image(const struct pan_fb_load_target *target,
+                        bool include_border)
+{
+   return target->in_bounds_load == PAN_FB_LOAD_IMAGE ||
+          (include_border && target->border_load == PAN_FB_LOAD_IMAGE);
+}
+
+/* Whether the preload of this pass has to wait for earlier fragment jobs:
+ * unless this command buffer knows, since its last full fragment wait,
+ * every attachment the fragment jobs wrote and none of them is loaded here.
+ */
+static bool
+preload_needs_frag_wait(const struct panvk_cmd_buffer *cmdbuf,
+                        bool include_border)
+{
+   const struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+   const struct panvk_frag_written *fw = &cmdbuf->state.gfx.frag_written;
+   const struct pan_fb_load *load = &render->fb.load;
+
+   if (!fw->valid || fw->overflow)
+      return true;
+
+   for (unsigned rt = 0; rt < MIN2(MAX_RTS, PAN_MAX_RTS); rt++) {
+      if (load_target_reads_image(&load->rts[rt], include_border) &&
+          (frag_written_overlaps_load(fw, &load->rts[rt]) ||
+           frag_written_overlaps(fw, render->color_attachments.iviews[rt]) ||
+           frag_written_overlaps(fw,
+                                 render->color_attachments.preload_iviews[rt])))
+         return true;
+   }
+
+   if (load_target_reads_image(&load->z, include_border) &&
+       (frag_written_overlaps_load(fw, &load->z) ||
+        frag_written_overlaps(fw, render->z_attachment.iview) ||
+        frag_written_overlaps(fw, render->z_attachment.preload_iview)))
+      return true;
+
+   if (load_target_reads_image(&load->s, include_border) &&
+       (frag_written_overlaps_load(fw, &load->s) ||
+        frag_written_overlaps(fw, render->s_attachment.iview) ||
+        frag_written_overlaps(fw, render->s_attachment.preload_iview)))
+      return true;
+
+   return false;
+}
+#endif
+
+
+void
+panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
+                                      const VkRenderingInfo *pRenderingInfo)
+{
+   struct panvk_physical_device *phys_dev =
+         to_panvk_physical_device(cmdbuf->vk.base.device->physical);
+   struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+   uint32_t att_width = UINT32_MAX, att_height = UINT32_MAX;
+
+   render->flags = pRenderingInfo->flags;
+
+   BITSET_SET(cmdbuf->state.gfx.dirty, PANVK_CMD_GRAPHICS_DIRTY_RENDER_STATE);
+
+   render->first_provoking_vertex = U_TRISTATE_UNSET;
+#if PAN_ARCH >= 10
+   render->maybe_set_tds_provoking_vertex = NULL;
+   render->maybe_set_fbds_provoking_vertex = NULL;
+#endif
+   memset(&render->color_attachments, 0,
+          sizeof(render->color_attachments));
+   memset(&render->z_attachment, 0, sizeof(render->z_attachment));
+   memset(&render->s_attachment, 0, sizeof(render->s_attachment));
+   memset(&render->fb, 0, sizeof(render->fb));
+   render->bound_attachments = 0;
+
+   const VkMultisampledRenderToSingleSampledInfoEXT *ms2ss_info =
+      vk_find_struct_const(pRenderingInfo,
+                           MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_INFO_EXT);
+   const bool ms2ss = ms2ss_info
+                         ? ms2ss_info->multisampledRenderToSingleSampledEnable
+                         : VK_FALSE;
+
+   render->layer_count = pRenderingInfo->viewMask
+                         ? util_last_bit(pRenderingInfo->viewMask)
+                         : pRenderingInfo->layerCount;
+   render->view_mask = pRenderingInfo->viewMask;
+   render->fb.layout = (struct pan_fb_layout) {
+      /* In case ms2ss is enabled, use the provided sample count.
+       *
+       * All attachments need to have sample count == 1 or the provided value.
+       * But, if all attachments have 1, we would end up choosing the wrong
+       * value if we don't set it here already.
+       */
+      .sample_count = 0,
+
+      /* The hardware requires us to have at least one color target, even if
+       * it's a dummy.
+       */
+      .rt_count = MAX2(pRenderingInfo->colorAttachmentCount, 1),
+
+      .tile_rt_budget_B =
+         pan_query_optimal_tib_size(PAN_ARCH, phys_dev->model),
+      .tile_z_budget_B =
+         pan_query_optimal_z_tib_size(PAN_ARCH, phys_dev->model),
+   };
+#if PAN_ARCH == 9
+   /* Bisect knob for the bc_decode RGBA32F blit: an eighth of the colour
+    * budget (64-pixel tiles at 16 B/px). */
+   const char *rt128_dbg = debug_get_option_v9_rt128();
+   if (rt128_dbg && strstr(rt128_dbg, "tile"))
+      render->fb.layout.tile_rt_budget_B /= 8;
+#endif
+   /* In case ms2ss is enabled, use the provided sample count.
+    * All attachments need to have sample count == 1 or the provided value.
+    * But, if all attachments have 1, we would end up choosing the wrong value
+    * if we don't set it here already. */
+   render->fb.nr_samples = ms2ss ? ms2ss_info->rasterizationSamples : 1;
+
+   assert(pRenderingInfo->colorAttachmentCount <= PAN_MAX_RTS);
+   for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
+      const VkRenderingAttachmentInfo *att =
+         &pRenderingInfo->pColorAttachments[i];
+      VK_FROM_HANDLE(panvk_image_view, iview, att->imageView);
+
+      if (!iview)
+         continue;
+
+      render_state_set_color_attachment(cmdbuf, att, i);
+      att_width = MIN2(iview->vk.extent.width, att_width);
+      att_height = MIN2(iview->vk.extent.height, att_height);
+   }
+
+   const VkRenderingAttachmentInfo *z_att = NULL, *s_att = NULL;
+   if (pRenderingInfo->pDepthAttachment &&
+       pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+      z_att = pRenderingInfo->pDepthAttachment;
+
+      VK_FROM_HANDLE(panvk_image_view, iview, z_att->imageView);
+      att_width = MIN2(iview->vk.extent.width, att_width);
+      att_height = MIN2(iview->vk.extent.height, att_height);
+   }
+
+   if (pRenderingInfo->pStencilAttachment &&
+       pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+      s_att = pRenderingInfo->pStencilAttachment;
+
+      VK_FROM_HANDLE(panvk_image_view, iview, s_att->imageView);
+      att_width = MIN2(iview->vk.extent.width, att_width);
+      att_height = MIN2(iview->vk.extent.height, att_height);
+   }
+
+   if (z_att || s_att)
+      render_state_set_zs_attachments(cmdbuf, z_att, s_att);
+
+   const struct pan_fb_bbox ra_px =
+      pan_fb_bbox_from_xywh(pRenderingInfo->renderArea.offset.x,
+                            pRenderingInfo->renderArea.offset.y,
+                            pRenderingInfo->renderArea.extent.width,
+                            pRenderingInfo->renderArea.extent.height);
+
+   if (render->bound_attachments) {
+      render->fb.layout.width_px = att_width;
+      render->fb.layout.height_px = att_height;
+   } else {
+      render->fb.layout.width_px = (uint32_t)ra_px.max_x + 1;
+      render->fb.layout.height_px = (uint32_t)ra_px.max_y + 1;
+   }
+   assert(render->fb.layout.width_px > 0 &&
+          render->fb.layout.height_px > 0);
+
+   render->fb.layout.render_area_px = ra_px;
+   render->fb.layout.tiling_area_px = ra_px;
+
+   GENX(pan_align_fb_tiling_area)(&render->fb.layout, &render->fb.store);
+   GENX(pan_align_fb_tiling_area)(&render->fb.layout, &render->fb.spill.store);
+
+   /* Try to optimize and remove unnecessary resolves if we can */
+   GENX(pan_fb_fold_resolve_into_store)(&render->fb.layout,
+                                        &render->fb.resolve,
+                                        &render->fb.store);
+
+   const bool has_partial_tiles =
+      pan_fb_has_partial_tiles(&render->fb.layout);
+   if (!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) &&
+       pan_fb_has_image_load(&render->fb.load, has_partial_tiles)) {
+      /* Loads happen through the texture unit so, if we're going to do a
+       * load, we need a barrier to ensure that the texture cache gets
+       * invalidated prior to the load.
+       */
+      VkMemoryBarrier2 mem_barrier = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+         .srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                         VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+         .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+         .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+      };
+#if PAN_ARCH >= 10
+      /* C4 (115): the source scope makes the fragment subqueue wait for all
+       * its earlier jobs. When none of those that ran since its last such
+       * wait wrote what this pass loads, keep only the invalidate (no
+       * source stages: no wait, only the fragment-side cache operation).
+       * PANVK_PRELOAD_BARRIER_TRACK=0 always waits, as in 114.
+       */
+      if (PANVK_PERF(PRELOAD_BARRIER_TRACK) &&
+          !preload_needs_frag_wait(cmdbuf, has_partial_tiles)) {
+         mem_barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+         mem_barrier.srcAccessMask = VK_ACCESS_2_NONE;
+      }
+#endif
+      const VkDependencyInfo dep_info = {
+         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+         .memoryBarrierCount = 1,
+         .pMemoryBarriers = &mem_barrier,
+      };
+      panvk_per_arch(CmdPipelineBarrier2)(panvk_cmd_buffer_to_handle(cmdbuf),
+                                          &dep_info);
+   }
+}
+
+/* Returns true if the preload of the given target was elided.  This is only
+ * safe when the clean tile write can be disabled: an AFBC/AFRC block larger
+ * than a tile forces a clean tile write-back which needs the loaded contents.
+ */
+static bool
+try_elide_discard_preload(struct pan_fb_load_target *target,
+                          const struct pan_image *img, unsigned tile_size_px)
+{
+   if (!target->discard_candidate || !img)
+      return false;
+
+   if (GENX(pan_force_clean_write_on)(img, tile_size_px) ||
+       drm_is_afrc(img->props.modifier))
+      return false;
+
+   if (target->in_bounds_load == PAN_FB_LOAD_NONE &&
+       target->border_load == PAN_FB_LOAD_NONE)
+      return false;
+
+   target->in_bounds_load = PAN_FB_LOAD_NONE;
+   target->border_load = PAN_FB_LOAD_NONE;
+   return true;
+}
+
+void
+panvk_per_arch(cmd_select_tile_size)(struct panvk_cmd_buffer *cmdbuf)
+{
+   struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+   struct pan_fb_layout *fb = &render->fb.layout;
+
+   /* In case we never emitted tiler/framebuffer descriptors, we emit the
+    * current sample count and compute tile size */
+   if (fb->sample_count == 0) {
+      fb->sample_count = render->fb.nr_samples;
+
+      GENX(pan_select_fb_tile_size)(fb);
+
+#if PAN_ARCH != 6
+      if (fb->tile_rt_alloc_B > fb->tile_rt_budget_B) {
+         vk_perf(VK_LOG_OBJS(&cmdbuf->vk.base),
+                 "Using too much tile-memory, disabling pipelining");
+      }
+#endif
+   } else {
+      /* In case we already emitted tiler/framebuffer descriptors, we ensure
+       * that the sample count didn't change (this should never happen) */
+      assert(fb->sample_count == render->fb.nr_samples);
+   }
+
+   /* The tile size is final now, so we know whether skipping the preload of a
+    * discarded attachment is safe. */
+   for (unsigned rt = 0; rt < PAN_MAX_RTS; rt++) {
+      if (fb->rt_formats[rt] == PIPE_FORMAT_NONE)
+         continue;
+
+      struct pan_fb_load_target *target = &render->fb.load.rts[rt];
+      const struct pan_image *img =
+         target->iview ? pan_image_view_get_color_plane(target->iview).image
+                       : NULL;
+
+      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
+#if PAN_ARCH >= 10
+         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
+#endif
+      }
+   }
+
+   if (fb->z_format != PIPE_FORMAT_NONE) {
+      struct pan_fb_load_target *target = &render->fb.load.z;
+      const struct pan_image *img =
+         target->iview ? pan_image_view_get_zs_plane(target->iview).image
+                       : NULL;
+
+      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
+#if PAN_ARCH >= 10
+         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
+#endif
+      }
+   }
+
+   if (fb->s_format != PIPE_FORMAT_NONE) {
+      struct pan_fb_load_target *target = &render->fb.load.s;
+      const struct pan_image *img =
+         target->iview ? pan_image_view_get_s_plane(target->iview).image : NULL;
+
+      if (try_elide_discard_preload(target, img, fb->tile_size_px)) {
+#if PAN_ARCH >= 10
+         cmdbuf->state.gfx.pass_stats.clean_tile_skip++;
+#endif
+      }
+   }
+}
+
+static void
+prepare_iam_sysvals(struct panvk_cmd_buffer *cmdbuf, BITSET_WORD *dirty_sysvals)
+{
+   const struct vk_input_attachment_location_state *ial =
+      &cmdbuf->vk.dynamic_graphics_state.ial;
+   struct panvk_input_attachment_info iam[INPUT_ATTACHMENT_MAP_SIZE];
+   uint32_t catt_count =
+      ial->color_attachment_count == MESA_VK_COLOR_ATTACHMENT_COUNT_UNKNOWN
+         ? MAX_RTS
+         : ial->color_attachment_count;
+
+   memset(iam, ~0, sizeof(iam));
+
+   assert(catt_count <= MAX_RTS);
+
+   for (uint32_t i = 0; i < catt_count; i++) {
+      if (ial->color_map[i] == MESA_VK_ATTACHMENT_UNUSED ||
+          !(cmdbuf->state.gfx.render.bound_attachments &
+            MESA_VK_RP_ATTACHMENT_COLOR_BIT(i)))
+         continue;
+
+      VkFormat fmt = cmdbuf->state.gfx.render.color_attachments.fmts[i];
+      enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
+      struct mali_internal_conversion_packed conv;
+      uint32_t ia_idx = ial->color_map[i] + 1;
+      assert(ia_idx < ARRAY_SIZE(iam));
+
+      iam[ia_idx].target = PANVK_COLOR_ATTACHMENT(i);
+
+      bool dithered = cmdbuf->state.gfx.render.flags &
+                      VK_RENDERING_ENABLE_LEGACY_DITHERING_BIT_EXT;
+
+      pan_pack(&conv, INTERNAL_CONVERSION, cfg) {
+         cfg.memory_format =
+            GENX(pan_dithered_format_from_pipe_format)(pfmt, dithered);
+#if PAN_ARCH < 9
+         cfg.register_format =
+            vk_format_is_uint(fmt)   ? MALI_REGISTER_FILE_FORMAT_U32
+            : vk_format_is_sint(fmt) ? MALI_REGISTER_FILE_FORMAT_I32
+                                     : MALI_REGISTER_FILE_FORMAT_F32;
+#endif
+      }
+
+      iam[ia_idx].conversion = conv.opaque[0];
+   }
+
+   if (ial->depth_att != MESA_VK_ATTACHMENT_UNUSED) {
+      uint32_t ia_idx =
+         ial->depth_att == MESA_VK_ATTACHMENT_NO_INDEX ? 0 : ial->depth_att + 1;
+
+      assert(ia_idx < ARRAY_SIZE(iam));
+      iam[ia_idx].target = PANVK_ZS_ATTACHMENT;
+
+#if PAN_ARCH < 9
+      /* On v7, we need to pass the depth format around. If we use a conversion
+       * of zero, like we do on v9+, the GPU reports an INVALID_INSTR_ENC. */
+      VkFormat fmt = cmdbuf->state.gfx.render.z_attachment.fmt;
+      enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
+      struct mali_internal_conversion_packed conv;
+
+      pan_pack(&conv, INTERNAL_CONVERSION, cfg) {
+         cfg.register_format = MALI_REGISTER_FILE_FORMAT_F32;
+         cfg.memory_format =
+            GENX(pan_dithered_format_from_pipe_format)(pfmt, false);
+      }
+      iam[ia_idx].conversion = conv.opaque[0];
+#endif
+   }
+
+   if (ial->stencil_att != MESA_VK_ATTACHMENT_UNUSED) {
+      uint32_t ia_idx =
+         ial->stencil_att == MESA_VK_ATTACHMENT_NO_INDEX ? 0 : ial->stencil_att + 1;
+
+      assert(ia_idx < ARRAY_SIZE(iam));
+      iam[ia_idx].target = PANVK_ZS_ATTACHMENT;
+   }
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(iam); i++)
+      set_gfx_sysval(cmdbuf, dirty_sysvals, iam[i], iam[i]);
+}
+
+#if PAN_ARCH >= 9
+static void
+panvk_upload_prerast_viewports(struct panvk_cmd_buffer *cmdbuf,
+                               BITSET_WORD *dirty_sysvals)
+{
+   if (!panvk_prerast_viewport_shader(&cmdbuf->state.gfx))
+      return;
+
+   /* Not keyed on VS dirty: every generated GS draw sets that bit. */
+   bool dirty =
+      dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_SCISSORS) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORT_COUNT) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_SCISSOR_COUNT) ||
+      dyn_gfx_state_dirty(cmdbuf, VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE) ||
+      dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLIP_ENABLE) ||
+      dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLAMP_ENABLE) ||
+      cmdbuf->state.gfx.sysvals.gpu_prerast_viewports == 0;
+   if (!dirty)
+      return;
+
+   const struct vk_viewport_state *vp = &cmdbuf->vk.dynamic_graphics_state.vp;
+   const struct vk_rasterization_state *rs =
+      &cmdbuf->vk.dynamic_graphics_state.rs;
+   struct panvk_prerast_vp_table table = { 0 };
+   uint32_t n = vp->viewport_count ? vp->viewport_count : 1;
+
+   n = MIN2(n, ARRAY_SIZE(table.vp));
+   table.count = n;
+   for (uint32_t i = 0; i < n; i++) {
+      const VkViewport *viewport = &vp->viewports[i];
+      struct panvk_prerast_viewport *out = &table.vp[i];
+
+      out->scale[0] = 0.5f * viewport->width;
+      out->scale[1] = 0.5f * viewport->height;
+      panvk_viewport_z_coeffs(vp, rs, i, &out->scale[2], &out->offset[2]);
+      out->offset[0] = viewport->x + out->scale[0];
+      out->offset[1] = viewport->y + out->scale[1];
+
+      float minx = viewport->x;
+      float maxx = viewport->x + viewport->width;
+      float y0 = viewport->y;
+      float y1 = viewport->y + viewport->height;
+      float miny = MIN2(y0, y1);
+      float maxy = MAX2(y0, y1);
+
+      if (i < vp->scissor_count) {
+         const VkRect2D *sc = &vp->scissors[i];
+
+         minx = MAX2(minx, (float)sc->offset.x);
+         miny = MAX2(miny, (float)sc->offset.y);
+         maxx = MIN2(maxx, (float)sc->offset.x + (float)sc->extent.width);
+         maxy = MIN2(maxy, (float)sc->offset.y + (float)sc->extent.height);
+      } else {
+         maxx = minx - 1.0f;
+         maxy = miny - 1.0f;
+      }
+      /* max <= min must kill every fragment, including a pixel centre. */
+      if (!(maxx > minx && maxy > miny)) {
+         minx = 0.0f;
+         miny = 0.0f;
+         maxx = -1.0f;
+         maxy = -1.0f;
+      }
+      out->minx = minx;
+      out->miny = miny;
+      out->maxx = maxx;
+      out->maxy = maxy;
+   }
+
+   struct pan_ptr ptr =
+      panvk_cmd_alloc_dev_mem(cmdbuf, desc, sizeof(table), 16);
+   if (!ptr.gpu)
+      return;
+
+   memcpy(ptr.cpu, &table, sizeof(table));
+   set_gfx_sysval(cmdbuf, dirty_sysvals, gpu_prerast_viewports, ptr.gpu);
+}
+#endif
+
+void
+panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
+                                         const struct panvk_draw_info *info,
+                                         const struct panvk_shader_variant *fs)
+{
+   struct vk_color_blend_state *cb = &cmdbuf->vk.dynamic_graphics_state.cb;
+   uint32_t noperspective_varyings = fs ? fs->info.varyings.noperspective : 0;
+   BITSET_DECLARE(dirty_sysvals, MAX_SYSVAL_FAUS) = {0};
+
+   set_gfx_sysval(cmdbuf, dirty_sysvals, vs.noperspective_varyings,
+                  noperspective_varyings);
+   set_gfx_sysval(cmdbuf, dirty_sysvals, vs.first_vertex, info->vertex.base);
+   set_gfx_sysval(cmdbuf, dirty_sysvals, vs.base_instance, info->instance.base);
+
+#if PAN_ARCH < 9
+   set_gfx_sysval(cmdbuf, dirty_sysvals, vs.raw_vertex_offset,
+                  info->vertex.raw_offset);
+#endif
+#if PAN_ARCH <= 9
+   set_gfx_sysval(cmdbuf, dirty_sysvals, layer_id, info->layer_id);
+#endif
+#if PAN_ARCH == 9
+   set_gfx_sysval(cmdbuf, dirty_sysvals, draw_id,
+                  info->zero_draw_id ? 0 : info->indirect.draw_index);
+#endif
+
+   if (dyn_gfx_state_dirty(cmdbuf, CB_BLEND_CONSTANTS)) {
+      for (unsigned i = 0; i < ARRAY_SIZE(cb->blend_constants); i++) {
+         set_gfx_sysval(cmdbuf, dirty_sysvals, blend.constants[i],
+                        cb->blend_constants[i]);
+      }
+   }
+
+   if (cmdbuf->state.gfx.fs.blend_descs_dirty) {
+      for (unsigned i = 0; i < MAX_RTS; i++) {
+         set_gfx_sysval(cmdbuf, dirty_sysvals, fs.blend_descs[i],
+                        cmdbuf->state.gfx.fs.blend_descs[i]);
+      }
+      cmdbuf->state.gfx.fs.blend_descs_dirty = false;
+   }
+
+   if (dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
+       dyn_gfx_state_dirty(cmdbuf, VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE) ||
+       dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLIP_ENABLE) ||
+       dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLAMP_ENABLE)) {
+      const struct vk_rasterization_state *rs =
+         &cmdbuf->vk.dynamic_graphics_state.rs;
+      const struct vk_viewport_state *vp =
+         &cmdbuf->vk.dynamic_graphics_state.vp;
+      const VkViewport *viewport = &vp->viewports[0];
+
+      /* Upload the viewport scale. Defined as (px/2, py/2, pz) at the start of
+       * section 24.5 ("Controlling the Viewport") of the Vulkan spec. At the
+       * end of the section, the spec defines:
+       *
+       * px = width
+       * py = height
+       * pz = maxDepth - minDepth         if negativeOneToOne is false
+       * pz = (maxDepth - minDepth) / 2   if negativeOneToOne is true
+       */
+      float z_scale, z_offset;
+      panvk_viewport_z_coeffs(vp, rs, 0, &z_scale, &z_offset);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.scale.x,
+                     0.5f * viewport->width);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.scale.y,
+                     0.5f * viewport->height);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.scale.z, z_scale);
+
+      /* Upload the viewport offset. Defined as (ox, oy, oz) at the start of
+       * section 24.5 ("Controlling the Viewport") of the Vulkan spec. At the
+       * end of the section, the spec defines:
+       *
+       * ox = x + width/2
+       * oy = y + height/2
+       * oz = minDepth                    if negativeOneToOne is false
+       * oz = (maxDepth + minDepth) / 2   if negativeOneToOne is true
+       */
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.offset.x,
+                     (0.5f * viewport->width) + viewport->x);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.offset.y,
+                     (0.5f * viewport->height) + viewport->y);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, viewport.offset.z, z_offset);
+
+   }
+
+#if PAN_ARCH >= 9
+   panvk_upload_prerast_viewports(cmdbuf, dirty_sysvals);
+#endif
+
+#if PAN_ARCH >= 9
+   {
+      const struct vk_depth_stencil_state *dss =
+         &cmdbuf->vk.dynamic_graphics_state.ds;
+      const bool db_enable =
+         dss->depth.bounds_test.enable &&
+         (cmdbuf->state.gfx.render.bound_attachments &
+          MESA_VK_RP_ATTACHMENT_DEPTH_BIT);
+
+      set_gfx_sysval(cmdbuf, dirty_sysvals, ds.bounds[0],
+                     dss->depth.bounds_test.min);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, ds.bounds[1],
+                     dss->depth.bounds_test.max);
+      set_gfx_sysval(cmdbuf, dirty_sysvals, ds.enable, (uint32_t)db_enable);
+      set_gfx_sysval(
+         cmdbuf, dirty_sysvals, ds.samples,
+         MAX2(cmdbuf->vk.dynamic_graphics_state.ms.rasterization_samples, 1));
+   }
+#endif
+
+   if (dyn_gfx_state_dirty(cmdbuf, INPUT_ATTACHMENT_MAP))
+      prepare_iam_sysvals(cmdbuf, dirty_sysvals);
+
+   const struct panvk_shader_variant *vs =
+      panvk_shader_hw_variant(cmdbuf->state.gfx.vs.shader);
+
+#if PAN_ARCH < 9
+   struct panvk_descriptor_state *desc_state = &cmdbuf->state.gfx.desc_state;
+   struct panvk_shader_desc_state *vs_desc_state = &cmdbuf->state.gfx.vs.desc;
+   struct panvk_shader_desc_state *fs_desc_state = &cmdbuf->state.gfx.fs.desc;
+
+   if (gfx_state_dirty(cmdbuf, DESC_STATE) || gfx_state_dirty(cmdbuf, VS)) {
+      set_gfx_sysval(cmdbuf, dirty_sysvals,
+                     desc.sets[PANVK_DESC_TABLE_VS_DYN_SSBOS],
+                     vs_desc_state->dyn_ssbos);
+   }
+
+   if (gfx_state_dirty(cmdbuf, DESC_STATE) || gfx_state_dirty(cmdbuf, FS)) {
+      set_gfx_sysval(cmdbuf, dirty_sysvals,
+                     desc.sets[PANVK_DESC_TABLE_FS_DYN_SSBOS],
+                     fs_desc_state->dyn_ssbos);
+   }
+
+   uint32_t used_set_mask = 0;
+   used_set_mask |= cmdbuf->state.gfx.vs.shader->desc_info.used_set_mask;
+   if (fs)
+      used_set_mask |= cmdbuf->state.gfx.fs.shader->desc_info.used_set_mask;
+
+   for (uint32_t i = 0; i < MAX_SETS; i++) {
+      if (used_set_mask & BITFIELD_BIT(i)) {
+         set_gfx_sysval(cmdbuf, dirty_sysvals, desc.sets[i],
+                        desc_state->sets[i]->descs.dev);
+      }
+   }
+#endif
+
+   /* We mask the dirty sysvals by the shader usage, and only flag
+    * the push uniforms dirty if those intersect. */
+   BITSET_DECLARE(dirty_shader_sysvals, MAX_SYSVAL_FAUS);
+   BITSET_AND(dirty_shader_sysvals, dirty_sysvals, vs->fau.used_sysvals);
+   if (!BITSET_IS_EMPTY(dirty_shader_sysvals))
+      gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
+
+#if PAN_ARCH >= 9
+   {
+      /* The raster VS for a geometry draw is the GS passthrough, not the
+       * HW VS masked above. Mask that variant too.
+       */
+      const struct panvk_shader *pshader =
+         panvk_prerast_viewport_shader(&cmdbuf->state.gfx);
+      if (pshader) {
+         const struct panvk_shader_variant *pt =
+            pshader == cmdbuf->state.gfx.gs.shader
+               ? &pshader->variants[PANVK_GS_VARIANT_PASSTHROUGH]
+               : &pshader->variants[PANVK_VS_VARIANT_GPU_PASSTHROUGH];
+         BITSET_AND(dirty_shader_sysvals, dirty_sysvals, pt->fau.used_sysvals);
+         if (!BITSET_IS_EMPTY(dirty_shader_sysvals))
+            gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
+      }
+   }
+#endif
+
+   if (fs) {
+      BITSET_AND(dirty_shader_sysvals, dirty_sysvals, fs->fau.used_sysvals);
+
+      /* If blend constants are not read by the blend shader, we can consider
+       * they are not read at all, so clear the dirty bits to avoid re-emitting
+       * FAUs when we can. */
+      if (!cmdbuf->state.gfx.cb.info.shader_loads_blend_const)
+         BITSET_CLEAR_COUNT(dirty_shader_sysvals, 0, 4);
+
+      if (!BITSET_IS_EMPTY(dirty_shader_sysvals))
+         gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(CmdBindVertexBuffers2)(VkCommandBuffer commandBuffer,
+                                      uint32_t firstBinding,
+                                      uint32_t bindingCount,
+                                      const VkBuffer *pBuffers,
+                                      const VkDeviceSize *pOffsets,
+                                      const VkDeviceSize *pSizes,
+                                      const VkDeviceSize *pStrides)
+{
+   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+
+   assert(firstBinding + bindingCount <= MAX_VBS);
+
+   const struct vk_dynamic_graphics_state *dyns =
+      &cmdbuf->vk.dynamic_graphics_state;
+   bool changed = firstBinding + bindingCount > cmdbuf->state.gfx.vb.count;
+
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
+      uint64_t address = 0;
+      uint64_t size = 0;
+
+      if (buffer) {
+         address = panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
+         size = panvk_buffer_range(buffer, pOffsets[i],
+                                   pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+      }
+
+      const struct panvk_attrib_buf *bound =
+         &cmdbuf->state.gfx.vb.bufs[firstBinding + i];
+
+      if (bound->address != address || bound->size != size ||
+          (pStrides &&
+           dyns->vi_binding_strides[firstBinding + i] != pStrides[i]))
+         changed = true;
+   }
+
+   /* Applications commonly re-bind the same vertex buffers; do not disturb
+    * the draw batch or the vertex descriptors for those. */
+   if (!changed)
+      return;
+
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
+
+   if (pStrides) {
+      vk_cmd_set_vertex_binding_strides(&cmdbuf->vk, firstBinding,
+                                        bindingCount, pStrides);
+   }
+
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
+
+      if (buffer) {
+         panvk_diag_note_vbo(pBuffers[i]);
+
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].address =
+            panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].size = panvk_buffer_range(
+            buffer, pOffsets[i], pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+      } else {
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].address = 0;
+         cmdbuf->state.gfx.vb.bufs[firstBinding + i].size = 0;
+      }
+   }
+
+   cmdbuf->state.gfx.vb.count =
+      MAX2(cmdbuf->state.gfx.vb.count, firstBinding + bindingCount);
+   gfx_state_set_dirty(cmdbuf, VB);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(CmdBindIndexBuffer2)(VkCommandBuffer commandBuffer,
+                                    VkBuffer buffer, VkDeviceSize offset,
+                                    VkDeviceSize size, VkIndexType indexType)
+{
+   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   VK_FROM_HANDLE(panvk_buffer, buf, buffer);
+
+   uint64_t dev_addr, range;
+
+   if (buf) {
+      range = panvk_buffer_range(buf, offset, size);
+      assert(range <= UINT32_MAX);
+      dev_addr = panvk_buffer_gpu_ptr(buf, offset);
+   } else {
+      range = 0;
+      /* In case of NullDescriptors, we need to set a non-NULL address and rely
+       * on out-of-bounds behavior against the zero size of the buffer. Note
+       * that this only works for v10+, as v9 does not have a way to specify the
+       * index buffer size. */
+      dev_addr = PAN_ARCH >= 10 ? 0x1000 : 0;
+   }
+
+   const uint8_t index_size = vk_index_type_to_bytes(indexType);
+
+   /* Same as vertex buffers: a redundant re-bind changes nothing. */
+   if (cmdbuf->state.gfx.ib.dev_addr == dev_addr &&
+       cmdbuf->state.gfx.ib.size == range &&
+       cmdbuf->state.gfx.ib.index_size == index_size)
+      return;
+
+#if PAN_ARCH >= 10
+   panvk_per_arch(cmd_draw_batch_flush)(cmdbuf);
+#endif
+
+   cmdbuf->state.gfx.ib.size = range;
+   cmdbuf->state.gfx.ib.dev_addr = dev_addr;
+   cmdbuf->state.gfx.ib.index_size = index_size;
+}

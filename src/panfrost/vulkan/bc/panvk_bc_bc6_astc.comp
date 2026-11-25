@@ -1,0 +1,1088 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer InBuf {
+    uint data[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer OutBuf {
+    uint data[];
+};
+
+layout(push_constant) uniform Registers
+{
+    uvec2 src;
+    uvec2 dst;
+    uint src_row_B;
+    uint src_slice_B;
+    uint dst_row_B;
+    uint dst_slice_B;
+    int width;
+    int height;
+    int depth;
+    int format;
+    uint dst_x0;    /* region origin in decoded elements, tiled planes only */
+    uint dst_y0;
+    uint dst_tiled;
+} registers;
+
+/* Byte offset of element (x, y) in a U-interleaved plane: tiles of 2^t_log2
+ * elements square (4x4 ASTC blocks, 16x16 R8/RG8 texels) in row-major
+ * order; inside a tile bit 2k of the index is x_k ^ y_k and bit 2k+1 is y_k. */
+uint spread4(uint v)
+{
+    v = (v | (v << 2u)) & 0x33u;
+    return (v | (v << 1u)) & 0x55u;
+}
+
+uint utile_offset_B(uint x, uint y, uint t_log2, uint elem_B)
+{
+    uint m = (1u << t_log2) - 1u;
+    uint sy = spread4(y & m);
+    uint idx = (sy | (sy << 1u)) ^ spread4(x & m);
+    return (y >> t_log2) * registers.dst_row_B +
+           (x >> t_log2) * (elem_B << (2u * t_log2)) + idx * elem_B;
+}
+/* BC6H -> ASTC 4x4 HDR (CEM 11). Partition/anchor/weight tables below: */
+/* Copyright (c) 2020-2024 Hans-Kristian Arntzen
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+const int weight_table2[4] = int[](0, 21, 43, 64);
+const int weight_table3[8] = int[](0, 9, 18, 27, 37, 46, 55, 64);
+const int weight_table4[16] = int[](0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64);
+
+#define P3(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) \
+    (((a) << 0) | ((b) << 2) | ((c) << 4) | ((d) << 6) | \
+    ((e) << 8) | ((f) << 10) | ((g) << 12) | ((h) << 14) | \
+    ((i) << 16) | ((j) << 18) | ((k) << 20) | ((l) << 22) | \
+    ((m) << 24) | ((n) << 26) | ((o) << 28) | ((p) << 30))
+
+const int partition_table3[64] = int[](
+        P3(0, 0, 1, 1, 0, 0, 1, 1, 0, 2, 2, 1, 2, 2, 2, 2),
+        P3(0, 0, 0, 1, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2, 2, 1),
+        P3(0, 0, 0, 0, 2, 0, 0, 1, 2, 2, 1, 1, 2, 2, 1, 1),
+        P3(0, 2, 2, 2, 0, 0, 2, 2, 0, 0, 1, 1, 0, 1, 1, 1),
+        P3(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2),
+        P3(0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2),
+        P3(0, 0, 2, 2, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1),
+        P3(0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1),
+
+        P3(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2),
+        P3(0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2),
+        P3(0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2),
+        P3(0, 0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2),
+        P3(0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 1, 2),
+        P3(0, 1, 2, 2, 0, 1, 2, 2, 0, 1, 2, 2, 0, 1, 2, 2),
+        P3(0, 0, 1, 1, 0, 1, 1, 2, 1, 1, 2, 2, 1, 2, 2, 2),
+        P3(0, 0, 1, 1, 2, 0, 0, 1, 2, 2, 0, 0, 2, 2, 2, 0),
+
+        P3(0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 2, 1, 1, 2, 2),
+        P3(0, 1, 1, 1, 0, 0, 1, 1, 2, 0, 0, 1, 2, 2, 0, 0),
+        P3(0, 0, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2),
+        P3(0, 0, 2, 2, 0, 0, 2, 2, 0, 0, 2, 2, 1, 1, 1, 1),
+        P3(0, 1, 1, 1, 0, 1, 1, 1, 0, 2, 2, 2, 0, 2, 2, 2),
+        P3(0, 0, 0, 1, 0, 0, 0, 1, 2, 2, 2, 1, 2, 2, 2, 1),
+        P3(0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 2, 2, 0, 1, 2, 2),
+        P3(0, 0, 0, 0, 1, 1, 0, 0, 2, 2, 1, 0, 2, 2, 1, 0),
+
+        P3(0, 1, 2, 2, 0, 1, 2, 2, 0, 0, 1, 1, 0, 0, 0, 0),
+        P3(0, 0, 1, 2, 0, 0, 1, 2, 1, 1, 2, 2, 2, 2, 2, 2),
+        P3(0, 1, 1, 0, 1, 2, 2, 1, 1, 2, 2, 1, 0, 1, 1, 0),
+        P3(0, 0, 0, 0, 0, 1, 1, 0, 1, 2, 2, 1, 1, 2, 2, 1),
+        P3(0, 0, 2, 2, 1, 1, 0, 2, 1, 1, 0, 2, 0, 0, 2, 2),
+        P3(0, 1, 1, 0, 0, 1, 1, 0, 2, 0, 0, 2, 2, 2, 2, 2),
+        P3(0, 0, 1, 1, 0, 1, 2, 2, 0, 1, 2, 2, 0, 0, 1, 1),
+        P3(0, 0, 0, 0, 2, 0, 0, 0, 2, 2, 1, 1, 2, 2, 2, 1),
+
+        P3(0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 2, 1, 2, 2, 2),
+        P3(0, 2, 2, 2, 0, 0, 2, 2, 0, 0, 1, 2, 0, 0, 1, 1),
+        P3(0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 2, 2, 0, 2, 2, 2),
+        P3(0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2, 0),
+        P3(0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0),
+        P3(0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0),
+        P3(0, 1, 2, 0, 2, 0, 1, 2, 1, 2, 0, 1, 0, 1, 2, 0),
+        P3(0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2, 0, 0, 1, 1),
+
+        P3(0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 1, 1),
+        P3(0, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2),
+        P3(0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 1, 2, 1, 2, 1),
+        P3(0, 0, 2, 2, 1, 1, 2, 2, 0, 0, 2, 2, 1, 1, 2, 2),
+        P3(0, 0, 2, 2, 0, 0, 1, 1, 0, 0, 2, 2, 0, 0, 1, 1),
+        P3(0, 2, 2, 0, 1, 2, 2, 1, 0, 2, 2, 0, 1, 2, 2, 1),
+        P3(0, 1, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 0, 1, 0, 1),
+        P3(0, 0, 0, 0, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1),
+
+        P3(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2),
+        P3(0, 2, 2, 2, 0, 1, 1, 1, 0, 2, 2, 2, 0, 1, 1, 1),
+        P3(0, 0, 0, 2, 1, 1, 1, 2, 0, 0, 0, 2, 1, 1, 1, 2),
+        P3(0, 0, 0, 0, 2, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2),
+        P3(0, 2, 2, 2, 0, 1, 1, 1, 0, 1, 1, 1, 0, 2, 2, 2),
+        P3(0, 0, 0, 2, 1, 1, 1, 2, 1, 1, 1, 2, 0, 0, 0, 2),
+        P3(0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 2, 2, 2, 2),
+        P3(0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 2, 1, 1, 2),
+
+        P3(0, 1, 1, 0, 0, 1, 1, 0, 2, 2, 2, 2, 2, 2, 2, 2),
+        P3(0, 0, 2, 2, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 2, 2),
+        P3(0, 0, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2, 0, 0, 2, 2),
+        P3(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2),
+        P3(0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1),
+        P3(0, 2, 2, 2, 1, 2, 2, 2, 0, 2, 2, 2, 1, 2, 2, 2),
+        P3(0, 1, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2),
+        P3(0, 1, 1, 1, 2, 0, 1, 1, 2, 2, 0, 1, 2, 2, 2, 0));
+
+#define P2(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) \
+    (((a) << 0) | ((b) << 1) | ((c) << 2) | ((d) << 3) | \
+    ((e) << 4) | ((f) << 5) | ((g) << 6) | ((h) << 7) | \
+    ((i) << 8) | ((j) << 9) | ((k) << 10) | ((l) << 11) | \
+    ((m) << 12) | ((n) << 13) | ((o) << 14) | ((p) << 15))
+const int partition_table2[64] = int[](
+        P2(0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1),
+        P2(0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1),
+        P2(0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1),
+        P2(0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1),
+        P2(0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1),
+        P2(0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1),
+        P2(0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1),
+        P2(0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1),
+
+        P2(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1),
+        P2(0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        P2(0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1),
+        P2(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1),
+        P2(0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        P2(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1),
+        P2(0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        P2(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1),
+
+        P2(0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1),
+        P2(0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        P2(0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0),
+        P2(0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0),
+        P2(0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        P2(0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0),
+        P2(0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0),
+        P2(0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1),
+
+        P2(0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0),
+        P2(0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0),
+        P2(0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0),
+        P2(0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0),
+        P2(0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0),
+        P2(0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0),
+        P2(0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0),
+        P2(0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0),
+
+        P2(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1),
+        P2(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1),
+        P2(0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0),
+        P2(0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0),
+        P2(0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0),
+        P2(0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0),
+        P2(0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1),
+        P2(0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1),
+
+        P2(0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0),
+        P2(0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0),
+        P2(0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0),
+        P2(0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0),
+        P2(0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0),
+        P2(0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1),
+        P2(0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1),
+        P2(0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0),
+
+        P2(0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0),
+        P2(0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0),
+        P2(0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0),
+        P2(0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0),
+        P2(0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1),
+        P2(0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1),
+        P2(0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0),
+        P2(0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0),
+
+        P2(0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1),
+        P2(0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1),
+        P2(0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1),
+        P2(0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1),
+        P2(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1),
+        P2(0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0),
+        P2(0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0),
+        P2(0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1));
+
+const int anchor_table2[64] = int[](
+        15, 15, 15, 15, 15, 15, 15, 15,
+        15, 15, 15, 15, 15, 15, 15, 15,
+        15, 2, 8, 2, 2, 8, 8, 15,
+        2, 8, 2, 2, 8, 8, 2, 2,
+        15, 15, 6, 8, 2, 8, 15, 15,
+        2, 8, 2, 2, 2, 15, 15, 6,
+        6, 2, 6, 8, 15, 15, 2, 2,
+        15, 15, 15, 15, 15, 2, 2, 15);
+
+const ivec2 anchor_table3[64] = ivec2[](
+        ivec2(3, 15), ivec2(3, 8), ivec2(15, 8), ivec2(15, 3), ivec2(8, 15), ivec2(3, 15), ivec2(15, 3), ivec2(15, 8),
+        ivec2(8, 15), ivec2(8, 15), ivec2(6, 15), ivec2(6, 15), ivec2(6, 15), ivec2(5, 15), ivec2(3, 15), ivec2(3, 8),
+        ivec2(3, 15), ivec2(3, 8), ivec2(8, 15), ivec2(15, 3), ivec2(3, 15), ivec2(3, 8), ivec2(6, 15), ivec2(10, 8),
+        ivec2(5, 3), ivec2(8, 15), ivec2(8, 6), ivec2(6, 10), ivec2(8, 15), ivec2(5, 15), ivec2(15, 10), ivec2(15, 8),
+        ivec2(8, 15), ivec2(15, 3), ivec2(3, 15), ivec2(5, 10), ivec2(6, 10), ivec2(10, 8), ivec2(8, 9), ivec2(15, 10),
+        ivec2(15, 6), ivec2(3, 15), ivec2(15, 8), ivec2(5, 15), ivec2(15, 3), ivec2(15, 6), ivec2(15, 6), ivec2(15, 8),
+        ivec2(3, 15), ivec2(15, 3), ivec2(5, 15), ivec2(5, 15), ivec2(5, 15), ivec2(8, 15), ivec2(5, 15), ivec2(10, 15),
+        ivec2(5, 15), ivec2(10, 15), ivec2(8, 15), ivec2(13, 15), ivec2(15, 3), ivec2(12, 15), ivec2(3, 15), ivec2(3, 8)
+    );
+
+/* Generated by gen_lut.py (ASTC spec C.2.12-C.2.13). */
+const uint TRIT_PACK[243] = uint[](
+   0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u, 16u, 17u, 18u, 20u, 21u, 22u, 24u,
+   25u, 26u, 3u, 7u, 11u, 19u, 23u, 27u, 12u, 13u, 14u, 32u, 33u, 34u, 36u, 37u,
+   38u, 40u, 41u, 42u, 48u, 49u, 50u, 52u, 53u, 54u, 56u, 57u, 58u, 35u, 39u, 43u,
+   51u, 55u, 59u, 44u, 45u, 46u, 64u, 65u, 66u, 68u, 69u, 70u, 72u, 73u, 74u, 80u,
+   81u, 82u, 84u, 85u, 86u, 88u, 89u, 90u, 67u, 71u, 75u, 83u, 87u, 91u, 76u, 77u,
+   78u, 128u, 129u, 130u, 132u, 133u, 134u, 136u, 137u, 138u, 144u, 145u, 146u, 148u, 149u, 150u,
+   152u, 153u, 154u, 131u, 135u, 139u, 147u, 151u, 155u, 140u, 141u, 142u, 160u, 161u, 162u, 164u,
+   165u, 166u, 168u, 169u, 170u, 176u, 177u, 178u, 180u, 181u, 182u, 184u, 185u, 186u, 163u, 167u,
+   171u, 179u, 183u, 187u, 172u, 173u, 174u, 192u, 193u, 194u, 196u, 197u, 198u, 200u, 201u, 202u,
+   208u, 209u, 210u, 212u, 213u, 214u, 216u, 217u, 218u, 195u, 199u, 203u, 211u, 215u, 219u, 204u,
+   205u, 206u, 96u, 97u, 98u, 100u, 101u, 102u, 104u, 105u, 106u, 112u, 113u, 114u, 116u, 117u,
+   118u, 120u, 121u, 122u, 99u, 103u, 107u, 115u, 119u, 123u, 108u, 109u, 110u, 224u, 225u, 226u,
+   228u, 229u, 230u, 232u, 233u, 234u, 240u, 241u, 242u, 244u, 245u, 246u, 248u, 249u, 250u, 227u,
+   231u, 235u, 243u, 247u, 251u, 236u, 237u, 238u, 28u, 29u, 30u, 60u, 61u, 62u, 92u, 93u,
+   94u, 156u, 157u, 158u, 188u, 189u, 190u, 220u, 221u, 222u, 31u, 63u, 95u, 159u, 191u, 223u,
+   124u, 125u, 126u
+);
+const uint QUINT_PACK[125] = uint[](
+   0u, 1u, 2u, 3u, 4u, 8u, 9u, 10u, 11u, 12u, 16u, 17u, 18u, 19u, 20u, 24u,
+   25u, 26u, 27u, 28u, 5u, 13u, 21u, 29u, 6u, 32u, 33u, 34u, 35u, 36u, 40u, 41u,
+   42u, 43u, 44u, 48u, 49u, 50u, 51u, 52u, 56u, 57u, 58u, 59u, 60u, 37u, 45u, 53u,
+   61u, 14u, 64u, 65u, 66u, 67u, 68u, 72u, 73u, 74u, 75u, 76u, 80u, 81u, 82u, 83u,
+   84u, 88u, 89u, 90u, 91u, 92u, 69u, 77u, 85u, 93u, 22u, 96u, 97u, 98u, 99u, 100u,
+   104u, 105u, 106u, 107u, 108u, 112u, 113u, 114u, 115u, 116u, 120u, 121u, 122u, 123u, 124u, 101u,
+   109u, 117u, 125u, 30u, 102u, 103u, 70u, 71u, 38u, 110u, 111u, 78u, 79u, 46u, 118u, 119u,
+   86u, 87u, 54u, 126u, 127u, 94u, 95u, 62u, 39u, 47u, 55u, 63u, 7u
+);
+const uint E47_LUT[256] = uint[](
+   0u, 0u, 0u, 1296u, 1296u, 1296u, 1296u, 1296u, 1296u, 2848u, 2848u, 2848u, 2848u, 2848u, 4098u, 4098u,
+   4098u, 4098u, 4098u, 5394u, 5394u, 5394u, 5394u, 5394u, 5394u, 6946u, 6946u, 6946u, 6946u, 6946u, 8196u, 8196u,
+   8196u, 8196u, 8196u, 8196u, 9748u, 9748u, 9748u, 9748u, 9748u, 11044u, 11044u, 11044u, 11044u, 11044u, 12294u, 12294u,
+   12294u, 12294u, 12294u, 12294u, 13846u, 13846u, 13846u, 13846u, 13846u, 15142u, 15142u, 15142u, 15142u, 15142u, 16648u, 16648u,
+   16648u, 16648u, 16648u, 16648u, 17944u, 17944u, 17944u, 17944u, 17944u, 17944u, 19496u, 19496u, 19496u, 19496u, 19496u, 20746u,
+   20746u, 20746u, 20746u, 20746u, 22042u, 22042u, 22042u, 22042u, 22042u, 22042u, 23594u, 23594u, 23594u, 23594u, 23594u, 24844u,
+   24844u, 24844u, 24844u, 24844u, 24844u, 26396u, 26396u, 26396u, 26396u, 26396u, 27692u, 27692u, 27692u, 27692u, 27692u, 28942u,
+   28942u, 28942u, 28942u, 28942u, 28942u, 30494u, 30494u, 30494u, 30494u, 30494u, 31790u, 31790u, 31790u, 31790u, 31790u, 31790u,
+   33583u, 33583u, 33583u, 33583u, 33583u, 33583u, 34847u, 34847u, 34847u, 34847u, 34847u, 36367u, 36367u, 36367u, 36367u, 36367u,
+   36367u, 37677u, 37677u, 37677u, 37677u, 37677u, 38941u, 38941u, 38941u, 38941u, 38941u, 40461u, 40461u, 40461u, 40461u, 40461u,
+   40461u, 41771u, 41771u, 41771u, 41771u, 41771u, 43291u, 43291u, 43291u, 43291u, 43291u, 43291u, 44555u, 44555u, 44555u, 44555u,
+   44555u, 45865u, 45865u, 45865u, 45865u, 45865u, 47385u, 47385u, 47385u, 47385u, 47385u, 47385u, 48649u, 48649u, 48649u, 48649u,
+   48649u, 48649u, 50215u, 50215u, 50215u, 50215u, 50215u, 51479u, 51479u, 51479u, 51479u, 51479u, 52999u, 52999u, 52999u, 52999u,
+   52999u, 52999u, 54309u, 54309u, 54309u, 54309u, 54309u, 55573u, 55573u, 55573u, 55573u, 55573u, 57093u, 57093u, 57093u, 57093u,
+   57093u, 57093u, 58403u, 58403u, 58403u, 58403u, 58403u, 59923u, 59923u, 59923u, 59923u, 59923u, 59923u, 61187u, 61187u, 61187u,
+   61187u, 61187u, 62497u, 62497u, 62497u, 62497u, 62497u, 64017u, 64017u, 64017u, 64017u, 64017u, 64017u, 65281u, 65281u, 65281u
+);
+const uint E191_LUT[256] = uint[](
+   0u, 320u, 640u, 1026u, 1026u, 1346u, 1666u, 2052u, 2052u, 2372u, 2692u, 3078u, 3078u, 3398u, 3718u, 4104u,
+   4104u, 4424u, 4744u, 5130u, 5130u, 5450u, 5770u, 6156u, 6156u, 6476u, 6796u, 7182u, 7182u, 7502u, 7822u, 8208u,
+   8208u, 8528u, 8848u, 9234u, 9234u, 9554u, 9874u, 10260u, 10260u, 10580u, 10900u, 11286u, 11286u, 11606u, 11926u, 12312u,
+   12312u, 12632u, 12952u, 13338u, 13338u, 13658u, 13978u, 14364u, 14364u, 14684u, 15004u, 15390u, 15390u, 15710u, 16030u, 16416u,
+   16416u, 16736u, 17056u, 17442u, 17442u, 17762u, 18082u, 18468u, 18468u, 18788u, 19108u, 19494u, 19494u, 19814u, 20134u, 20520u,
+   20520u, 20840u, 21160u, 21546u, 21546u, 21866u, 22186u, 22572u, 22572u, 22892u, 23212u, 23598u, 23598u, 23918u, 24238u, 24624u,
+   24624u, 24944u, 25264u, 25650u, 25650u, 25970u, 26290u, 26676u, 26676u, 26996u, 27316u, 27702u, 27702u, 28022u, 28342u, 28728u,
+   28728u, 29048u, 29368u, 29754u, 29754u, 30074u, 30394u, 30780u, 30780u, 31100u, 31420u, 31806u, 31806u, 32126u, 32446u, 32446u,
+   33215u, 33215u, 33407u, 33599u, 33599u, 34237u, 34429u, 34621u, 34621u, 35259u, 35451u, 35643u, 35643u, 36281u, 36473u, 36665u,
+   36665u, 37303u, 37495u, 37687u, 37687u, 38325u, 38517u, 38709u, 38709u, 39347u, 39539u, 39731u, 39731u, 40369u, 40561u, 40753u,
+   40753u, 41391u, 41583u, 41775u, 41775u, 42413u, 42605u, 42797u, 42797u, 43435u, 43627u, 43819u, 43819u, 44457u, 44649u, 44841u,
+   44841u, 45479u, 45671u, 45863u, 45863u, 46501u, 46693u, 46885u, 46885u, 47523u, 47715u, 47907u, 47907u, 48545u, 48737u, 48929u,
+   48929u, 49567u, 49759u, 49951u, 49951u, 50589u, 50781u, 50973u, 50973u, 51611u, 51803u, 51995u, 51995u, 52633u, 52825u, 53017u,
+   53017u, 53655u, 53847u, 54039u, 54039u, 54677u, 54869u, 55061u, 55061u, 55699u, 55891u, 56083u, 56083u, 56721u, 56913u, 57105u,
+   57105u, 57743u, 57935u, 58127u, 58127u, 58765u, 58957u, 59149u, 59149u, 59787u, 59979u, 60171u, 60171u, 60809u, 61001u, 61193u,
+   61193u, 61831u, 62023u, 62215u, 62215u, 62853u, 63045u, 63237u, 63237u, 63875u, 64067u, 64259u, 64259u, 64897u, 65089u, 65281u
+);
+
+layout(constant_id = 0) const int SPEC_FORMAT = 0;
+#define VK_FORMAT_BC1_RGB_UNORM_BLOCK 131
+#define VK_FORMAT_BC1_RGB_SRGB_BLOCK 132
+#define VK_FORMAT_BC1_RGBA_UNORM_BLOCK 133
+#define VK_FORMAT_BC1_RGBA_SRGB_BLOCK 134
+#define VK_FORMAT_BC2_UNORM_BLOCK 135
+#define VK_FORMAT_BC2_SRGB_BLOCK 136
+#define VK_FORMAT_BC3_UNORM_BLOCK 137
+#define VK_FORMAT_BC3_SRGB_BLOCK 138
+#define VK_FORMAT_BC4_UNORM_BLOCK 139
+#define VK_FORMAT_BC5_UNORM_BLOCK 141
+
+const uint M55 = 0x55555555u;
+
+/* ---- bit streams --------------------------------------------------- */
+
+void put_bits(inout uvec4 b, uint off, uint v, uint n)
+{
+   v &= (1u << n) - 1u;
+   uint s = off & 31u;
+   uint lo = v << s;
+   uint hi = s == 0u ? 0u : v >> (32u - s);
+   switch (off >> 5u) {
+   case 0u: b.x |= lo; b.y |= hi; break;
+   case 1u: b.y |= lo; b.z |= hi; break;
+   case 2u: b.z |= lo; b.w |= hi; break;
+   default: b.w |= lo; break;
+   }
+}
+
+/* Packed small values: 8 x 4 bits per word. */
+uint pk_get(uvec4 p, uint i)
+{
+   return (p[i >> 3u] >> ((i & 7u) * 4u)) & 15u;
+}
+
+void pk_set(inout uvec4 p, uint i, uint v)
+{
+   p[i >> 3u] |= v << ((i & 7u) * 4u);
+}
+
+/* Header: 4x4 weight grid, one partition. R/H select the weight range. */
+uvec4 astc_header(uint cem, uint R, uint H, bool dual)
+{
+   uint mode = ((R >> 1u) & 3u) | ((R & 1u) << 4u) | (2u << 5u) | (H << 9u) |
+               (dual ? (1u << 10u) : 0u);
+   return uvec4(mode | (cem << 13u), 0u, 0u, 0u);
+}
+
+/* Weights are stored bit-reversed from the top of the block. */
+void put_weights(inout uvec4 b, uvec4 w)
+{
+   b |= uvec4(bitfieldReverse(w.w), bitfieldReverse(w.z),
+              bitfieldReverse(w.y), bitfieldReverse(w.x));
+}
+
+/* ---- quantisation ---------------------------------------------------- */
+
+/* Weight unquantisation (0..64) for the bit-only ranges. */
+uint wq_bits(uint v, uint nb)
+{
+   uint r = nb == 2u ? v * 21u :
+            nb == 3u ? ((v << 3u) | v) :
+            nb == 4u ? ((v << 2u) | (v >> 2u)) :
+                       ((v << 1u) | (v >> 4u));
+   if (nb == 2u) r = v == 3u ? 63u : r;
+   return r > 32u ? r + 1u : r;
+}
+
+/* Nearest level in a bit-only weight range for t in [0, 1]. */
+uint wnear_bits(float t, uint nb)
+{
+   const uint mx = (1u << nb) - 1u;
+   float x = clamp(t, 0.0, 1.0) * 64.0;
+   uint v = uint(clamp(t, 0.0, 1.0) * float(mx) + 0.5);
+   uint best = v;
+   float be = abs(float(wq_bits(v, nb)) - x);
+   if (v > 0u && abs(float(wq_bits(v - 1u, nb)) - x) < be) { best = v - 1u; be = abs(float(wq_bits(v - 1u, nb)) - x); }
+   if (v < mx && abs(float(wq_bits(v + 1u, nb)) - x) < be) best = v + 1u;
+   return best;
+}
+
+/* 0..4 (quint, linear) and 0..5 (trit + bit) weight ranges. */
+const uint W5_UNQ[6] = uint[](0u, 12u, 25u, 39u, 52u, 64u);   /* by rank */
+const uint W5_ISE[6] = uint[](0u, 2u, 4u, 5u, 3u, 1u);         /* rank -> ISE */
+
+uint wnear_q5(float t) { return uint(clamp(t, 0.0, 1.0) * 4.0 + 0.5); }
+
+uint wnear_t6(float t)
+{
+   float x = clamp(t, 0.0, 1.0) * 64.0;
+   uint best = 0u;
+   float be = 1e9;
+   for (uint k = 0u; k < 6u; k++) {
+      float e = abs(float(W5_UNQ[k]) - x);
+      if (e < be) { be = e; best = k; }
+   }
+   return best;
+}
+
+/* ---- BC decoding helpers --------------------------------------------- */
+
+uvec3 dec565(uint c)
+{
+   uint r = (c >> 11u) & 31u, g = (c >> 5u) & 63u, b = c & 31u;
+   return uvec3((r << 3u) | (r >> 2u), (g << 2u) | (g >> 4u), (b << 3u) | (b >> 2u));
+}
+
+/* 3-bit index of texel i from a BC3-alpha / BC4 block (index bits start at 16). */
+uint idx3(uvec2 w, uint i)
+{
+   uint pos = 16u + 3u * i;
+   if (pos + 3u <= 32u) return (w.x >> pos) & 7u;
+   if (pos >= 32u) return (w.y >> (pos - 32u)) & 7u;
+   return ((w.x >> pos) | (w.y << (32u - pos))) & 7u;
+}
+
+/* BC3-alpha / BC4 palette entry k (8-bit). */
+uint pal8(uvec2 w, uint k)
+{
+   uint a0 = w.x & 0xffu, a1 = (w.x >> 8u) & 0xffu;
+   if (k == 0u) return a0;
+   if (k == 1u) return a1;
+   if (a0 > a1) return (a0 * (8u - k) + a1 * (k - 1u) + 3u) / 7u;
+   if (k == 6u) return 0u;
+   if (k == 7u) return 255u;
+   return (a0 * (6u - k) + a1 * (k - 1u) + 2u) / 5u;
+}
+
+uint e127(uint v) { return (v * 127u + 127u) / 255u; }
+uint e127_unq(uint q) { return (q << 1u) | (q >> 6u); }
+
+
+/* HDR ASTC (CEM 11, HDR RGB direct) for BC6H. Endpoints live in the 16-bit
+ * pseudo-logarithmic (LNS) space the decoder interpolates in; the packing
+ * below mirrors the decoder in ASTC spec C.2.14 (validated against the
+ * Mali-G615 hardware decoder). Weights: 0..11, endpoints: 8-bit raw. */
+
+/* Per-mode bit counts (ASTC spec C.2.14), 4 bits each. */
+uint hdr_abits(uint m) { return (0xccbbaa99u >> (4u * m)) & 15u; }
+uint hdr_bbits(uint m) { return (0x67687687u >> (4u * m)) & 15u; }
+uint hdr_cbits(uint m) { return (0x77867766u >> (4u * m)) & 15u; }
+uint hdr_dbits(uint m) { return (0x65656767u >> (4u * m)) & 15u; }
+
+int hdr_q(int x, uint s)
+{
+   int h = int((1u << s) >> 1u);
+   return x >= 0 ? (x + h) >> s : -((-x + h) >> s);
+}
+
+void hdr_pack(ivec3 lo, ivec3 hi, uint mode, uint maj, out uint v[6])
+{
+   if (maj == 1u) { lo = lo.grb; hi = hi.grb; }
+   if (maj == 2u) { lo = lo.bgr; hi = hi.bgr; }
+   uint s = (mode >> 1u) ^ 3u;
+   int a = clamp(hdr_q(hi.r, s), 0, (1 << hdr_abits(mode)) - 1);
+   int A = a << s;
+   int bm = (1 << hdr_bbits(mode)) - 1;
+   int b0 = clamp(hdr_q(A - hi.g, s), 0, bm);
+   int b1 = clamp(hdr_q(A - hi.b, s), 0, bm);
+   int c = clamp(hdr_q(A - lo.r, s), 0, (1 << hdr_cbits(mode)) - 1);
+   int db = int(hdr_dbits(mode));
+   int dl = -(1 << (db - 1)), dh = (1 << (db - 1)) - 1;
+   int d0 = clamp(hdr_q(A - (b0 << s) - (c << s) - lo.g, s), dl, dh) & ((1 << db) - 1);
+   int d1 = clamp(hdr_q(A - (b1 << s) - (c << s) - lo.b, s), dl, dh) & ((1 << db) - 1);
+   uint oh = 1u << mode;
+   uint x0 = 0u, x1 = 0u, x2 = 0u, x3 = 0u, x4 = 0u, x5 = 0u;
+   uint ua = uint(a), uc = uint(c), ub0 = uint(b0), ub1 = uint(b1), ud0 = uint(d0), ud1 = uint(d1);
+   if ((oh & 0xA4u) != 0u) x0 = (ua >> 9u) & 1u;
+   if ((oh & 0x08u) != 0u) x2 = (ua >> 9u) & 1u;
+   if ((oh & 0x50u) != 0u) { x4 = (ua >> 9u) & 1u; x5 = (ua >> 10u) & 1u; }
+   if ((oh & 0xA0u) != 0u) x1 = (ua >> 10u) & 1u;
+   if ((oh & 0xC0u) != 0u) x2 = (ua >> 11u) & 1u;
+   if ((oh & 0x04u) != 0u) x1 = (uc >> 6u) & 1u;
+   if ((oh & 0xE8u) != 0u) x3 = (uc >> 6u) & 1u;
+   if ((oh & 0x20u) != 0u) x2 = (uc >> 7u) & 1u;
+   if ((oh & 0x5Bu) != 0u) { x0 = (ub0 >> 6u) & 1u; x1 = (ub1 >> 6u) & 1u; }
+   if ((oh & 0x12u) != 0u) { x2 = (ub0 >> 7u) & 1u; x3 = (ub1 >> 7u) & 1u; }
+   if ((oh & 0xAFu) != 0u) { x4 = (ud0 >> 5u) & 1u; x5 = (ud1 >> 5u) & 1u; }
+   if ((oh & 0x05u) != 0u) { x2 = (ud0 >> 6u) & 1u; x3 = (ud1 >> 6u) & 1u; }
+   v[0] = ua & 0xffu;
+   v[1] = (uc & 0x3fu) | (((ua >> 8u) & 1u) << 6u) | ((mode & 1u) << 7u);
+   v[2] = (ub0 & 0x3fu) | (x0 << 6u) | (((mode >> 1u) & 1u) << 7u);
+   v[3] = (ub1 & 0x3fu) | (x1 << 6u) | (((mode >> 2u) & 1u) << 7u);
+   v[4] = (ud0 & 0x1fu) | (x4 << 5u) | (x2 << 6u) | ((maj & 1u) << 7u);
+   v[5] = (ud1 & 0x1fu) | (x5 << 5u) | (x3 << 6u) | (((maj >> 1u) & 1u) << 7u);
+}
+
+
+/* ---- BC6H: block-oriented decode ------------------------------------ */
+
+#define VK_FORMAT_BC6H_UFLOAT_BLOCK 143
+#define VK_FORMAT_BC6H_SFLOAT_BLOCK 144
+const bool BC6_SIGNED = SPEC_FORMAT == VK_FORMAT_BC6H_SFLOAT_BLOCK;
+
+/* Decoded once per block: per subset, the unquantised endpoints as 16-bit
+ * pairs (e0 low, e1 high) per channel; the 16 indices (4 bits each) and the
+ * subset mask in bits 0..15 of g6_pm, with bit 16 set for 4-bit indices. */
+uvec3 g6_s0, g6_s1;
+uvec2 g6_ix;
+uint g6_pm;
+
+ivec3 bc6_unq(ivec3 v, int eb)
+{
+   if (BC6_SIGNED) {
+      v = bitfieldExtract(v, 0, eb);
+      if (eb >= 16)
+         return v;
+      ivec3 a = abs(v);
+      ivec3 u = ((a << 15) + 0x4000) >> (eb - 1);
+      u = mix(u, ivec3(0x7fff), greaterThanEqual(a, ivec3((1 << (eb - 1)) - 1)));
+      u = mix(u, ivec3(0), equal(v, ivec3(0)));
+      return mix(u, -u, lessThan(v, ivec3(0)));
+   }
+   if (eb >= 15)
+      return v;
+   ivec3 u = ((v << 15) + 0x4000) >> (eb - 1);
+   u = mix(u, ivec3(0xffff), equal(v, ivec3((1 << eb) - 1)));
+   return mix(u, ivec3(0), equal(v, ivec3(0)));
+}
+
+void bc6_setup(uvec4 p)
+{
+   const uint b0 = p.x & 0x1fu;
+   const uint num = (b0 & 2u) != 0u ? (((b0 >> 1u) & 0xeu) | (b0 & 1u)) + 2u : b0 & 3u;
+   ivec3 e[4] = ivec3[](ivec3(0), ivec3(0), ivec3(0), ivec3(0));
+   int eb = 0;
+   ivec3 db = ivec3(0);
+   bool tr = false, two = false;
+   [[dont_flatten]] if (num == 0u) { /* 00 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10),
+                        bitfieldExtract(p[0], 15, 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7))));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 5),
+                        bitfieldExtract(p[1], 13, 5),
+                        bitfieldExtract(p[1], 23, 5)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 5),
+                        (bitfieldExtract(p[0], 2, 1) << 4) | bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[0], 3, 1) << 4) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 5),
+                        (bitfieldExtract(p[1], 8, 1) << 4) | bitfieldExtract(p[1], 19, 4),
+                        (bitfieldExtract(p[0], 4, 1) << 4) | bitfieldExtract(p[1], 18, 1) | (bitfieldExtract(p[1], 28, 1) << 1) | (bitfieldExtract(p[2], 6, 1) << 2) | (bitfieldExtract(p[2], 12, 1) << 3)));
+      eb = 10; db = ivec3(5, 5, 5); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 1u) { /* 01 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 7),
+                        bitfieldExtract(p[0], 15, 7),
+                        bitfieldExtract(p[0], 25, 7)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 6),
+                        bitfieldExtract(p[1], 13, 6),
+                        bitfieldExtract(p[1], 23, 6)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 6),
+                        (bitfieldExtract(p[0], 2, 1) << 5) | (bitfieldExtract(p[0], 24, 1) << 4) | bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[0], 14, 1) << 4) | (bitfieldExtract(p[0], 22, 1) << 5) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 6),
+                        (bitfieldExtract(p[0], 3, 1) << 4) | (bitfieldExtract(p[0], 4, 1) << 5) | bitfieldExtract(p[1], 19, 4),
+                        bitfieldExtract(p[0], 12, 1) | (bitfieldExtract(p[0], 13, 1) << 1) | (bitfieldExtract(p[0], 23, 1) << 2) | (bitfieldExtract(p[1], 0, 1) << 3) | (bitfieldExtract(p[1], 1, 1) << 5) | (bitfieldExtract(p[1], 2, 1) << 4)));
+      eb = 7; db = ivec3(6, 6, 6); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 2u) { /* 00010 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10) | (bitfieldExtract(p[1], 8, 1) << 10),
+                        bitfieldExtract(p[0], 15, 10) | (bitfieldExtract(p[1], 17, 1) << 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7)) | (bitfieldExtract(p[1], 27, 1) << 10)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 5),
+                        bitfieldExtract(p[1], 13, 4),
+                        bitfieldExtract(p[1], 23, 4)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 5),
+                        bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 5),
+                        bitfieldExtract(p[1], 19, 4),
+                        bitfieldExtract(p[1], 18, 1) | (bitfieldExtract(p[1], 28, 1) << 1) | (bitfieldExtract(p[2], 6, 1) << 2) | (bitfieldExtract(p[2], 12, 1) << 3)));
+      eb = 11; db = ivec3(5, 4, 4); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 3u) { /* 00011 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10),
+                        bitfieldExtract(p[0], 15, 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7))));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 10),
+                        bitfieldExtract(p[1], 13, 10),
+                        (bitfieldExtract(p[1], 23, 9) | (bitfieldExtract(p[2], 0, 1) << 9))));
+      eb = 10; db = ivec3(10, 10, 10); tr = false; two = false;
+   } else [[dont_flatten]] if (num == 4u) { /* 00110 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10) | (bitfieldExtract(p[1], 7, 1) << 10),
+                        bitfieldExtract(p[0], 15, 10) | (bitfieldExtract(p[1], 18, 1) << 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7)) | (bitfieldExtract(p[1], 27, 1) << 10)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 4),
+                        bitfieldExtract(p[1], 13, 5),
+                        bitfieldExtract(p[1], 23, 4)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 4),
+                        bitfieldExtract(p[1], 9, 4) | (bitfieldExtract(p[2], 11, 1) << 4),
+                        (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 4),
+                        (bitfieldExtract(p[1], 8, 1) << 4) | bitfieldExtract(p[1], 19, 4),
+                        (bitfieldExtract(p[1], 28, 1) << 1) | bitfieldExtract(p[2], 5, 1) | (bitfieldExtract(p[2], 6, 1) << 2) | (bitfieldExtract(p[2], 12, 1) << 3)));
+      eb = 11; db = ivec3(4, 5, 4); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 5u) { /* 00111 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10) | (bitfieldExtract(p[1], 12, 1) << 10),
+                        bitfieldExtract(p[0], 15, 10) | (bitfieldExtract(p[1], 22, 1) << 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7)) | (bitfieldExtract(p[2], 0, 1) << 10)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 9),
+                        bitfieldExtract(p[1], 13, 9),
+                        bitfieldExtract(p[1], 23, 9)));
+      eb = 11; db = ivec3(9, 9, 9); tr = true; two = false;
+   } else [[dont_flatten]] if (num == 6u) { /* 01010 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10) | (bitfieldExtract(p[1], 7, 1) << 10),
+                        bitfieldExtract(p[0], 15, 10) | (bitfieldExtract(p[1], 17, 1) << 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7)) | (bitfieldExtract(p[1], 28, 1) << 10)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 4),
+                        bitfieldExtract(p[1], 13, 4),
+                        bitfieldExtract(p[1], 23, 5)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 4),
+                        bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[1], 8, 1) << 4) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 4),
+                        bitfieldExtract(p[1], 19, 4),
+                        bitfieldExtract(p[1], 18, 1) | (bitfieldExtract(p[2], 5, 1) << 1) | (bitfieldExtract(p[2], 6, 1) << 2) | (bitfieldExtract(p[2], 11, 1) << 4) | (bitfieldExtract(p[2], 12, 1) << 3)));
+      eb = 11; db = ivec3(4, 4, 5); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 7u) { /* 01011 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10) | (bitfieldExtract(p[1], 11, 1) << 11) | (bitfieldExtract(p[1], 12, 1) << 10),
+                        bitfieldExtract(p[0], 15, 10) | (bitfieldExtract(p[1], 21, 1) << 11) | (bitfieldExtract(p[1], 22, 1) << 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7)) | (bitfieldExtract(p[1], 31, 1) << 11) | (bitfieldExtract(p[2], 0, 1) << 10)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 8),
+                        bitfieldExtract(p[1], 13, 8),
+                        bitfieldExtract(p[1], 23, 8)));
+      eb = 12; db = ivec3(8, 8, 8); tr = true; two = false;
+   } else [[dont_flatten]] if (num == 8u) { /* 01110 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 9),
+                        bitfieldExtract(p[0], 15, 9),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 2) << 7))));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 5),
+                        bitfieldExtract(p[1], 13, 5),
+                        bitfieldExtract(p[1], 23, 5)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 5),
+                        (bitfieldExtract(p[0], 24, 1) << 4) | bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[0], 14, 1) << 4) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 5),
+                        (bitfieldExtract(p[1], 8, 1) << 4) | bitfieldExtract(p[1], 19, 4),
+                        (bitfieldExtract(p[1], 2, 1) << 4) | bitfieldExtract(p[1], 18, 1) | (bitfieldExtract(p[1], 28, 1) << 1) | (bitfieldExtract(p[2], 6, 1) << 2) | (bitfieldExtract(p[2], 12, 1) << 3)));
+      eb = 9; db = ivec3(5, 5, 5); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 9u) { /* 01111 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 10) | (bitfieldExtract(p[1], 7, 1) << 15) | (bitfieldExtract(p[1], 8, 1) << 14) | (bitfieldExtract(p[1], 9, 1) << 13) | (bitfieldExtract(p[1], 10, 1) << 12) | (bitfieldExtract(p[1], 11, 1) << 11) | (bitfieldExtract(p[1], 12, 1) << 10),
+                        bitfieldExtract(p[0], 15, 10) | (bitfieldExtract(p[1], 17, 1) << 15) | (bitfieldExtract(p[1], 18, 1) << 14) | (bitfieldExtract(p[1], 19, 1) << 13) | (bitfieldExtract(p[1], 20, 1) << 12) | (bitfieldExtract(p[1], 21, 1) << 11) | (bitfieldExtract(p[1], 22, 1) << 10),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 3) << 7)) | (bitfieldExtract(p[1], 27, 1) << 15) | (bitfieldExtract(p[1], 28, 1) << 14) | (bitfieldExtract(p[1], 29, 1) << 13) | (bitfieldExtract(p[1], 30, 1) << 12) | (bitfieldExtract(p[1], 31, 1) << 11) | (bitfieldExtract(p[2], 0, 1) << 10)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 4),
+                        bitfieldExtract(p[1], 13, 4),
+                        bitfieldExtract(p[1], 23, 4)));
+      eb = 16; db = ivec3(4, 4, 4); tr = true; two = false;
+   } else [[dont_flatten]] if (num == 10u) { /* 10010 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 8),
+                        bitfieldExtract(p[0], 15, 8),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 1) << 7))));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 6),
+                        bitfieldExtract(p[1], 13, 5),
+                        bitfieldExtract(p[1], 23, 5)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 6),
+                        (bitfieldExtract(p[0], 24, 1) << 4) | bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[0], 14, 1) << 4) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 6),
+                        (bitfieldExtract(p[0], 13, 1) << 4) | bitfieldExtract(p[1], 19, 4),
+                        (bitfieldExtract(p[0], 23, 1) << 2) | (bitfieldExtract(p[1], 1, 1) << 3) | (bitfieldExtract(p[1], 2, 1) << 4) | bitfieldExtract(p[1], 18, 1) | (bitfieldExtract(p[1], 28, 1) << 1)));
+      eb = 8; db = ivec3(6, 5, 5); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 12u) { /* 10110 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 8),
+                        bitfieldExtract(p[0], 15, 8),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 1) << 7))));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 5),
+                        bitfieldExtract(p[1], 13, 6),
+                        bitfieldExtract(p[1], 23, 5)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 5),
+                        (bitfieldExtract(p[0], 23, 1) << 5) | (bitfieldExtract(p[0], 24, 1) << 4) | bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[0], 14, 1) << 4) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 5),
+                        (bitfieldExtract(p[1], 1, 1) << 5) | (bitfieldExtract(p[1], 8, 1) << 4) | bitfieldExtract(p[1], 19, 4),
+                        bitfieldExtract(p[0], 13, 1) | (bitfieldExtract(p[1], 2, 1) << 4) | (bitfieldExtract(p[1], 28, 1) << 1) | (bitfieldExtract(p[2], 6, 1) << 2) | (bitfieldExtract(p[2], 12, 1) << 3)));
+      eb = 8; db = ivec3(5, 6, 5); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 14u) { /* 11010 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 8),
+                        bitfieldExtract(p[0], 15, 8),
+                        (bitfieldExtract(p[0], 25, 7) | (bitfieldExtract(p[1], 0, 1) << 7))));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 5),
+                        bitfieldExtract(p[1], 13, 5),
+                        bitfieldExtract(p[1], 23, 6)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 5),
+                        (bitfieldExtract(p[0], 24, 1) << 4) | bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[0], 14, 1) << 4) | (bitfieldExtract(p[0], 23, 1) << 5) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 5),
+                        (bitfieldExtract(p[1], 8, 1) << 4) | bitfieldExtract(p[1], 19, 4),
+                        (bitfieldExtract(p[0], 13, 1) << 1) | (bitfieldExtract(p[1], 1, 1) << 5) | (bitfieldExtract(p[1], 2, 1) << 4) | bitfieldExtract(p[1], 18, 1) | (bitfieldExtract(p[2], 6, 1) << 2) | (bitfieldExtract(p[2], 12, 1) << 3)));
+      eb = 8; db = ivec3(5, 5, 6); tr = true; two = true;
+   } else [[dont_flatten]] if (num == 16u) { /* 11110 */
+      e[0] = ivec3(uvec3(bitfieldExtract(p[0], 5, 6),
+                        bitfieldExtract(p[0], 15, 6),
+                        bitfieldExtract(p[0], 25, 6)));
+      e[1] = ivec3(uvec3(bitfieldExtract(p[1], 3, 6),
+                        bitfieldExtract(p[1], 13, 6),
+                        bitfieldExtract(p[1], 23, 6)));
+      e[2] = ivec3(uvec3(bitfieldExtract(p[2], 1, 6),
+                        (bitfieldExtract(p[0], 21, 1) << 5) | (bitfieldExtract(p[0], 24, 1) << 4) | bitfieldExtract(p[1], 9, 4),
+                        (bitfieldExtract(p[0], 14, 1) << 4) | (bitfieldExtract(p[0], 22, 1) << 5) | (bitfieldExtract(p[1], 29, 3) | (bitfieldExtract(p[2], 0, 1) << 3))));
+      e[3] = ivec3(uvec3(bitfieldExtract(p[2], 7, 6),
+                        (bitfieldExtract(p[0], 11, 1) << 4) | (bitfieldExtract(p[0], 31, 1) << 5) | bitfieldExtract(p[1], 19, 4),
+                        bitfieldExtract(p[0], 12, 1) | (bitfieldExtract(p[0], 13, 1) << 1) | (bitfieldExtract(p[0], 23, 1) << 2) | (bitfieldExtract(p[1], 0, 1) << 3) | (bitfieldExtract(p[1], 1, 1) << 5) | (bitfieldExtract(p[1], 2, 1) << 4)));
+      eb = 6; db = ivec3(6, 6, 6); tr = false; two = true;
+   } else {
+      /* reserved: decodes to black */
+      g6_s0 = uvec3(0u); g6_s1 = uvec3(0u); g6_ix = uvec2(0u); g6_pm = 0u;
+      return;
+   }
+   if (tr) {
+      const ivec3 m = ivec3((1 << eb) - 1);
+      for (int k = 1; k < 4; k++)
+         e[k] = (e[0] + ivec3(bitfieldExtract(e[k].x, 0, db.x), bitfieldExtract(e[k].y, 0, db.y),
+                              bitfieldExtract(e[k].z, 0, db.z))) & m;
+   }
+   for (int k = 0; k < 4; k++)
+      e[k] = bc6_unq(e[k], eb);
+   g6_s0 = (uvec3(e[0]) & 0xffffu) | (uvec3(e[1]) << 16u);
+   g6_s1 = (uvec3(e[2]) & 0xffffu) | (uvec3(e[3]) << 16u);
+
+   /* Expand the index stream to 4 bits per texel. */
+   g6_ix = uvec2(0u);
+   if (two) {
+      const uint part = bitfieldExtract(p.z, 13, 5);
+      const uint anc = uint(anchor_table2[part]);
+      g6_pm = uint(partition_table2[part]) & 0xffffu;
+      uint off = 82u;
+      for (uint i = 0u; i < 16u; i++) {
+         const uint n = (i == 0u || i == anc) ? 2u : 3u;
+         uint w = off >> 5u, s = off & 31u;
+         uint v = p[w] >> s;
+         if (s + n > 32u) v |= p[w + 1u] << (32u - s);
+         g6_ix[i >> 3u] |= (v & ((1u << n) - 1u)) << (4u * (i & 7u));
+         off += n;
+      }
+   } else {
+      g6_pm = 1u << 16u;
+      g6_ix.x = bitfieldExtract(p.z, 1, 3);                 /* texel 0: bits 65..67 */
+      uint off = 68u;
+      for (uint i = 1u; i < 16u; i++) {
+         g6_ix[i >> 3u] |= bitfieldExtract(p[off >> 5u], int(off & 31u), 4) << (4u * (i & 7u));
+         off += 4u;
+      }
+   }
+}
+
+/* fp16 bits of texel i (negative values read as +0, as the ASTC HDR
+ * target cannot hold them). */
+uvec3 bc6_half(uint i)
+{
+   const uint s = (g6_pm >> i) & 1u;
+   const uint k = (g6_ix[i >> 3u] >> (4u * (i & 7u))) & 15u;
+   /* BC6H weight tables: 4-bit (17k + 2) >> 2, 3-bit (73k + 4) >> 3 */
+   const int w = int((g6_pm >> 16u) != 0u ? (17u * k + 2u) >> 2u : (73u * k + 4u) >> 3u);
+   const uvec3 pr = s != 0u ? g6_s1 : g6_s0;
+   ivec3 e0, e1;
+   if (BC6_SIGNED) {
+      e0 = bitfieldExtract(ivec3(pr), 0, 16);
+      e1 = ivec3(pr) >> 16;
+   } else {
+      e0 = ivec3(pr & 0xffffu);
+      e1 = ivec3(pr >> 16u);
+   }
+   ivec3 v = ((64 - w) * e0 + w * e1 + 32) >> 6;
+   if (BC6_SIGNED)
+      return uvec3((max(v, ivec3(0)) * 31) >> 5);
+   return uvec3((v * 31) >> 6);
+}
+
+/* ---- BC6H entry: streaming HDR encoder ------------------------------ */
+
+/* Weights 0..11 (trit + 2 bits) by rank k. The unquantised values are
+ * symmetric (unq(11 - k) = 64 - unq(k)); ranks 0..5 are 0 5 11 17 23 28,
+ * packed 5 bits each. */
+float w11_unq(uint k)
+{
+   const uint c = min(k, 11u - k);
+   const uint u = bitfieldExtract(964209824u, int(5u * c), 5);
+   return float(k > 5u ? 64u - u : u);
+}
+
+/* ISE code of rank k: trit + 2 bits, mirrored ranks differ in bit 0. */
+uint w11_ise(uint k)
+{
+   const uint c = min(k, 11u - k);
+   const uint hi = c >= 3u ? 1u : 0u;
+   return ((c - 3u * hi) * 4u + hi * 2u) | (k > 5u ? 1u : 0u);
+}
+
+/* fp16 bits (non-negative) -> LNS value (0..65535). */
+vec3 lns3(uvec3 h)
+{
+   const vec3 mt = vec3((h & 0x3ffu) << 3u);
+   const vec3 m = mix(mix((mt + 2048.0) / 5.0, (mt + 512.0) / 4.0, lessThan(mt, vec3(5632.0))),
+                      mt / 3.0, lessThan(mt, vec3(1536.0)));
+   return vec3((h >> 10u) << 11u) + m;
+}
+
+/* The encoder reads each texel's LNS value on every pass: convert the 16
+ * texels once per block into workgroup memory. */
+shared uint s6_lns[32u * 64u];
+
+vec3 bc6_lns(uint i)
+{
+   const uint b = 2u * i * 64u + gl_LocalInvocationIndex;
+   const uint rg = s6_lns[b];
+   return vec3(float(rg & 0xffffu), float(rg >> 16u), float(s6_lns[b + 64u]));
+}
+
+/* CEM 11 values for 12-bit endpoints lo/hi in one of the eight packed
+ * modes (0..7) or the direct mode (8). */
+void hdr_encode(ivec3 lo, ivec3 hi, uint mode, uint maj, out uint v[6])
+{
+   if (mode == 8u) {
+      /* Direct: 8 bits for red/green, 7 for blue, no range limits. */
+      ivec3 l8 = clamp((lo + ivec3(8, 8, 16)) >> ivec3(4, 4, 5), ivec3(0), ivec3(255, 255, 127));
+      ivec3 h8 = clamp((hi + ivec3(8, 8, 16)) >> ivec3(4, 4, 5), ivec3(0), ivec3(255, 255, 127));
+      v = uint[6](uint(l8.r), uint(h8.r), uint(l8.g), uint(h8.g),
+                  uint(l8.b) | 0x80u, uint(h8.b) | 0x80u);
+   } else {
+      hdr_pack(lo, hi, mode, maj, v);
+   }
+}
+
+/* Best CEM 11 encoding of endpoints e0/e1 (16-bit LNS, either order).
+ * Only the winning mode is kept during the search; it is re-encoded at
+ * the end. Returns the six values packed 8 bits each; q0/q1 receive the
+ * endpoints the decoder will see. */
+uvec2 hdr_quant(vec3 e0, vec3 e1, out vec3 q0, out vec3 q1)
+{
+   const ivec3 i0 = clamp(ivec3(e0 / 16.0 + 0.5), 0, 4095);
+   const ivec3 i1 = clamp(ivec3(e1 / 16.0 + 0.5), 0, 4095);
+   /* The decoder's second endpoint holds the overall largest component. */
+   const int m0 = max(i0.r, max(i0.g, i0.b)), m1 = max(i1.r, max(i1.g, i1.b));
+   const ivec3 lo = m1 >= m0 ? i0 : i1, hi = m1 >= m0 ? i1 : i0;
+   const uint maj = hi.r >= hi.g && hi.r >= hi.b ? 0u : (hi.g >= hi.b ? 1u : 2u);
+
+   /* The packed modes store a, b0, b1, c, d0, d1 losslessly once they are
+    * clamped to their field widths, so what the decoder will see can be
+    * computed directly; only the winner is bit-packed. Error is the same in
+    * the major-component order, so search there. */
+   ivec3 sl = lo, sh = hi;
+   if (maj == 1u) { sl = sl.grb; sh = sh.grb; }
+   if (maj == 2u) { sl = sl.bgr; sh = sh.bgr; }
+   float be = 1e30;
+   uint bm = 0u;
+   ivec3 bql = sl, bqh = sh;   /* decoded endpoints of the best mode, major order */
+   [[unroll]] for (uint mode = 0u; mode < 8u; mode++) {
+      const uint s = (mode >> 1u) ^ 3u;
+      const int a = clamp(hdr_q(sh.r, s), 0, (1 << hdr_abits(mode)) - 1);
+      const int A = a << s;
+      const int bmx = (1 << hdr_bbits(mode)) - 1;
+      const int b0 = clamp(hdr_q(A - sh.g, s), 0, bmx) << s;
+      const int b1 = clamp(hdr_q(A - sh.b, s), 0, bmx) << s;
+      const int c = clamp(hdr_q(A - sl.r, s), 0, (1 << hdr_cbits(mode)) - 1) << s;
+      const int db = int(hdr_dbits(mode));
+      const int dl = -(1 << (db - 1)), dh = (1 << (db - 1)) - 1;
+      const int d0 = clamp(hdr_q(A - b0 - c - sl.g, s), dl, dh) << s;
+      const int d1 = clamp(hdr_q(A - b1 - c - sl.b, s), dl, dh) << s;
+      const ivec3 qh = clamp(ivec3(A, A - b0, A - b1), 0, 4095);
+      const ivec3 ql = clamp(ivec3(A - c, A - b0 - c - d0, A - b1 - c - d1), 0, 4095);
+      const vec3 el = vec3(ql - sl), eh = vec3(qh - sh);
+      const float e = dot(el, el) + dot(eh, eh);
+      if (e < be) { be = e; bm = mode; bql = ql; bqh = qh; }
+   }
+   {
+      /* direct mode */
+      const ivec3 l8 = clamp((lo + ivec3(8, 8, 16)) >> ivec3(4, 4, 5), ivec3(0), ivec3(255, 255, 127));
+      const ivec3 h8 = clamp((hi + ivec3(8, 8, 16)) >> ivec3(4, 4, 5), ivec3(0), ivec3(255, 255, 127));
+      const vec3 el = vec3((l8 << ivec3(4, 4, 5)) - lo), eh = vec3((h8 << ivec3(4, 4, 5)) - hi);
+      const float e = dot(el, el) + dot(eh, eh);
+      if (e < be) { be = e; bm = 8u; bql = l8 << ivec3(4, 4, 5); bqh = h8 << ivec3(4, 4, 5); }
+   }
+   uint v[6];
+   hdr_encode(lo, hi, bm, maj, v);
+   /* The search computed what the decoder returns; the packed modes kept it
+    * in major-component order. */
+   if (bm != 8u) {
+      if (maj == 1u) { bql = bql.grb; bqh = bqh.grb; }
+      if (maj == 2u) { bql = bql.bgr; bqh = bqh.bgr; }
+   }
+   q0 = vec3(bql) * 16.0;
+   q1 = vec3(bqh) * 16.0;
+   return uvec2(v[0] | (v[1] << 8u) | (v[2] << 16u) | (v[3] << 24u), v[4] | (v[5] << 8u));
+}
+
+/* Weight rank (0..11) nearest to x in 0..64: the 12-level weights are
+ * 0 5 11 17 23 28 36 41 47 53 59 64; count the midpoints below x. */
+uint w11_rank(float x)
+{
+   const vec4 t0 = vec4(2.5, 8.0, 14.0, 20.0), t1 = vec4(25.5, 32.0, 38.5, 44.0);
+   const vec3 t2 = vec3(50.0, 56.0, 61.5);
+   const vec4 a = step(t0, vec4(x)), b = step(t1, vec4(x));
+   const vec3 c = step(t2, vec3(x));
+   return uint(dot(a, vec4(1.0)) + dot(b, vec4(1.0)) + dot(c, vec3(1.0)));
+}
+
+/* 16 weight ranks (4 bits each in r) as the ASTC trit + 2-bit stream:
+ * 3 groups of 5 values (18 bits) and one value with its 2 trit bits. */
+uvec2 ise12_16(uvec2 r)
+{
+   uvec2 o = uvec2(0u);
+   uint off = 0u;
+   for (uint g = 0u; g < 4u; g++) {
+      uint q[5], t[5];
+      for (uint j = 0u; j < 5u; j++) {
+         const uint i = 5u * g + j;
+         const uint c = i < 16u ? w11_ise((r[i >> 3u] >> (4u * (i & 7u))) & 15u) : 0u;
+         q[j] = c & 3u; t[j] = c >> 2u;
+      }
+      const uint packed = TRIT_PACK[t[0] + 3u * t[1] + 9u * t[2] + 27u * t[3] + 81u * t[4]];
+      const uint grp = q[0] | (packed & 3u) << 2u | q[1] << 4u | ((packed >> 2u) & 3u) << 6u |
+                       q[2] << 8u | ((packed >> 4u) & 1u) << 10u | q[3] << 11u |
+                       ((packed >> 5u) & 3u) << 13u | q[4] << 15u | ((packed >> 7u) & 1u) << 17u;
+      const uint n = g < 3u ? 18u : 4u;
+      const uint v = grp & ((1u << n) - 1u);
+      o.x |= off < 32u ? v << off : 0u;
+      o.y |= off == 0u ? 0u : off < 32u ? v >> (32u - off) : v << (off - 32u);
+      off += n;
+   }
+   return o;
+}
+
+uvec4 encode_bc6()
+{
+   /* One pass: cache each texel's LNS value and accumulate the mean and
+    * covariance (relative to texel 0, symmetric terms only). */
+   const vec3 org = vec3(uvec3(lns3(bc6_half(0u)) + 0.5));
+   vec3 sum = vec3(0.0), sq = vec3(0.0), cr = vec3(0.0), lo = org, hi = org;
+   [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
+      const uvec3 v = uvec3(lns3(bc6_half(i)) + 0.5);
+      s6_lns[(2u * i) * 64u + gl_LocalInvocationIndex] = v.r | (v.g << 16u);
+      s6_lns[(2u * i + 1u) * 64u + gl_LocalInvocationIndex] = v.b;
+      const vec3 p = vec3(v), d = p - org;
+      sum += d; sq += d * d; cr += d.xxy * d.yzz;
+      lo = min(lo, p); hi = max(hi, p);
+   }
+   const vec3 mean = org + sum * (1.0 / 16.0);
+   const vec3 ms = sum * (1.0 / 16.0);
+   const mat3 cov = mat3(sq.x - 16.0 * ms.x * ms.x, cr.x - 16.0 * ms.x * ms.y, cr.y - 16.0 * ms.x * ms.z,
+                         cr.x - 16.0 * ms.x * ms.y, sq.y - 16.0 * ms.y * ms.y, cr.z - 16.0 * ms.y * ms.z,
+                         cr.y - 16.0 * ms.x * ms.z, cr.z - 16.0 * ms.y * ms.z, sq.z - 16.0 * ms.z * ms.z);
+
+   vec3 axis = hi - lo;
+   const vec3 row = cov * axis;
+   axis = dot(row, row) > 1e-6 ? row : axis;
+   for (uint it = 0u; it < 3u; it++) {
+      const vec3 n = cov * axis;
+      const float l = dot(n, n);
+      if (l < 1e-12)
+         break;
+      axis = n * inversesqrt(l);
+   }
+   axis = dot(axis, axis) > 1e-12 ? normalize(axis) : vec3(0.5);
+
+   float tmin = 1e30, tmax = -1e30;
+   [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
+      const float t = dot(bc6_lns(i) - mean, axis);
+      tmin = min(tmin, t);
+      tmax = max(tmax, t);
+   }
+   vec3 e0 = clamp(mean + axis * tmin, 0.0, 65535.0);
+   vec3 e1 = clamp(mean + axis * tmax, 0.0, 65535.0);
+   /* Pre-refit: least-squares endpoints for the 12-level weights of the
+    * unquantised line, before any (costly) CEM 11 quantisation. */
+   {
+      const vec3 d = e1 - e0;
+      const float dd = dot(d, d);
+      float a = 0.0, b = 0.0, c2 = 0.0;
+      vec3 x0 = vec3(0.0), x1 = vec3(0.0);
+      [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
+         const vec3 p = bc6_lns(i);
+         const float w = w11_unq(w11_rank(clamp(dd > 0.0 ? dot(p - e0, d) / dd : 0.0, 0.0, 1.0) * 64.0)) / 64.0;
+         const float iw = 1.0 - w;
+         a += iw * iw; b += iw * w; c2 += w * w;
+         x0 += iw * p; x1 += w * p;
+      }
+      const float det = a * c2 - b * b;
+      if (abs(det) > 1e-6) {
+         e0 = clamp((c2 * x0 - b * x1) / det, 0.0, 65535.0);
+         e1 = clamp((a * x1 - b * x0) / det, 0.0, 65535.0);
+      }
+   }
+
+   float best = 1e30;
+   uvec2 bv = uvec2(0u), bw = uvec2(0u);
+   for (uint iter = 0u; iter < 2u; iter++) {
+      vec3 q0, q1;
+      const uvec2 v = hdr_quant(e0, e1, q0, q1);
+
+      const vec3 d = q1 - q0;
+      const float dd = dot(d, d);
+      float err = 0.0, a = 0.0, b = 0.0, c2 = 0.0;
+      vec3 x0 = vec3(0.0), x1 = vec3(0.0);
+      uvec2 wc = uvec2(0u);
+      [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
+         const vec3 p = bc6_lns(i);
+         const uint k = w11_rank(clamp(dd > 0.0 ? dot(p - q0, d) / dd : 0.0, 0.0, 1.0) * 64.0);
+         const float u = w11_unq(k);
+         wc[i >> 3u] |= k << (4u * (i & 7u));
+         const float w = u / 64.0, iw = 1.0 - w;
+         const vec3 diff = q0 + d * w - p;
+         err += dot(diff, diff);
+         a += iw * iw; b += iw * w; c2 += w * w;
+         x0 += iw * p; x1 += w * p;
+      }
+      if (err < best) {
+         best = err;
+         bv = v;
+         bw = wc;
+      }
+      const float det = a * c2 - b * b;
+      if (abs(det) < 1e-6)
+         break;
+      e0 = clamp((c2 * x0 - b * x1) / det, 0.0, 65535.0);
+      e1 = clamp((a * x1 - b * x0) / det, 0.0, 65535.0);
+   }
+
+   /* CEM 11, weights 0..11 (R = 3, H = 1), endpoints 8-bit raw. */
+   uvec4 blk = astc_header(11u, 3u, 1u, false);
+   put_bits(blk, 17u, bv.x & 0xffffu, 16u);
+   put_bits(blk, 33u, bv.x >> 16u, 16u);
+   put_bits(blk, 49u, bv.y, 16u);
+   put_weights(blk, uvec4(ise12_16(bw), 0u, 0u));
+   return blk;
+}
+
+void main()
+{
+    uint bx = gl_GlobalInvocationID.x;
+    uint by = gl_GlobalInvocationID.y;
+    uint bz = gl_GlobalInvocationID.z;
+
+    uint num_blocks_x = uint((registers.width + 3) / 4);
+    uint num_blocks_y = uint((registers.height + 3) / 4);
+
+    if (bx >= num_blocks_x || by >= num_blocks_y || bz >= uint(registers.depth))
+        return;
+
+    InBuf ibuf = InBuf(registers.src);
+    OutBuf obuf = OutBuf(registers.dst);
+
+    /* Only the output offset stays live across the encoder. */
+    const uint out_word = registers.dst_tiled != 0u
+        ? (bz * registers.dst_slice_B +
+           utile_offset_B(registers.dst_x0 + bx, registers.dst_y0 + by, 2u, 16u)) / 4u
+        : (bz * registers.dst_slice_B + by * registers.dst_row_B) / 4u + bx * 4u;
+    uint in_word = (bz * registers.src_slice_B + by * registers.src_row_B) / 4u + bx * 4u;
+    bc6_setup(uvec4(ibuf.data[in_word], ibuf.data[in_word + 1u],
+                    ibuf.data[in_word + 2u], ibuf.data[in_word + 3u]));
+
+#ifdef DECODE_ONLY
+    {
+        uint idx = ((bz * num_blocks_y + by) * num_blocks_x + bx) * 64u;
+        for (uint p = 0u; p < 16u; p++) {
+            uvec3 h = bc6_half(p);
+            obuf.data[idx + p * 4u + 0u] = floatBitsToUint(unpackHalf2x16(h.r).x);
+            obuf.data[idx + p * 4u + 1u] = floatBitsToUint(unpackHalf2x16(h.g).x);
+            obuf.data[idx + p * 4u + 2u] = floatBitsToUint(unpackHalf2x16(h.b).x);
+            obuf.data[idx + p * 4u + 3u] = floatBitsToUint(1.0);
+        }
+        return;
+    }
+#endif
+
+    uvec4 astc = encode_bc6();
+
+    obuf.data[out_word + 0u] = astc.x;
+    obuf.data[out_word + 1u] = astc.y;
+    obuf.data[out_word + 2u] = astc.z;
+    obuf.data[out_word + 3u] = astc.w;
+}

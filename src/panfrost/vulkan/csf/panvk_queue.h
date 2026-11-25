@@ -1,0 +1,214 @@
+/*
+ * Copyright © 2021 Collabora Ltd.
+ * SPDX-License-Identifier: MIT
+ */
+
+#ifndef PANVK_QUEUE_H
+#define PANVK_QUEUE_H
+
+#ifndef PAN_ARCH
+#error "PAN_ARCH must be defined"
+#endif
+
+#include "genxml/gen_macros.h"
+
+#include <stdint.h>
+
+#include "panvk_device.h"
+
+#include "util/u_queue.h"
+#include "vk_queue.h"
+
+enum panvk_subqueue_id {
+   PANVK_SUBQUEUE_VERTEX_TILER = 0,
+   PANVK_SUBQUEUE_FRAGMENT,
+   PANVK_SUBQUEUE_COMPUTE,
+   PANVK_SUBQUEUE_COUNT,
+};
+
+struct panvk_tiler_heap {
+   uint32_t chunk_size;
+   struct panvk_priv_mem desc;
+   struct panvk_priv_mem oom_fbd;
+   struct {
+      uint32_t handle;
+      uint64_t dev_addr;
+   } context;
+};
+
+struct panvk_subqueue {
+   struct panvk_priv_mem context;
+   uint32_t *reg_file;
+
+   /* Memory to save/restore CS registers in functions/exception handlers.
+    * Because registers are dumped to a fixed address rather than a moving
+    * stack pointer, nested function/exception handler calls are not supported.
+    */
+   struct panvk_priv_mem regs_save;
+
+
+   struct {
+      /* Mask of resources requested by this subqueue. */
+      uint32_t mask;
+      /* Address and size of the linear buffer containing REQ_RESOURCE. */
+      uint32_t cs_buffer_size;
+      uint64_t cs_buffer_addr;
+      /* Allocation */
+      struct panvk_priv_mem buf;
+   } req_resource;
+
+   struct {
+      struct pan_kmod_bo *bo;
+      uint64_t size;
+      struct {
+         uint64_t dev;
+         void *host;
+      } addr;
+   } tracebuf;
+
+#ifdef HAVE_PAN_KMOD_KBASE
+   /* kbase-backed queues manage the CS ring buffer in userspace (the
+    * panthor kernel driver does the equivalent in kernel-owned rings). */
+   struct {
+      /* kbase compatibility path: each PanVK subqueue owns a CSG and uses
+       * CSI0.  Some Android kbase stacks accept later CSIs into a scheduled
+       * CSG but never execute them. */
+      uint32_t group_handle;
+
+      struct pan_kmod_bo *ringbuf_bo;
+      void *ringbuf_cpu;
+      uint64_t ringbuf_dev;
+
+      /* USER_IO pages from KBASE_IOCTL_CS_QUEUE_BIND: doorbell page,
+       * input page (CS_INSERT), output page (CS_EXTRACT/CS_ACTIVE). */
+      void *user_io;
+
+      /* Monotonically-increasing byte offset of the next ring entry. */
+      uint64_t insert;
+
+      /* Number of jobs emitted; each bumps the subqueue seqno cell by one
+       * when it retires. */
+      uint64_t emitted_jobs;
+
+      uint32_t last_last_job_offset;
+      uint32_t last_job_offset;
+      uint32_t last_job_size;
+      uint32_t last_job_entry_size;
+      uint32_t last_stream_size;
+      uint32_t last_flush_id;
+      uint64_t last_stream_addr;
+
+      /* TILER_HEAP descriptor last stored into this subqueue's context by a
+       * ring entry (see kbase_renew_tiler_heap()). */
+      uint64_t heap_desc;
+
+      struct panvk_priv_mem init_cs;
+      uint64_t init_stream_addr;
+      uint32_t init_stream_size;
+      uint32_t init_flush_id;
+      uint32_t init_pending;
+   } kbase;
+#endif
+};
+
+struct panvk_desc_ringbuf {
+   struct pan_kmod_bo *bo;
+   uint64_t size;
+   struct {
+      uint64_t dev;
+      void *host;
+   } addr;
+};
+
+struct panvk_gpu_queue {
+   struct vk_queue vk;
+
+   uint32_t group_handle;
+   uint32_t syncobj_handle;
+
+   struct panvk_tiler_heap tiler_heap;
+   struct panvk_desc_ringbuf render_desc_ringbuf;
+   struct panvk_priv_mem syncobjs;
+
+#ifdef HAVE_PAN_KMOD_KBASE
+   /* Per-subqueue completion seqno cells (panvk_cs_sync64 layout), bumped
+    * by a SYNC_ADD64 at the end of every ring entry and polled by the CPU.
+    * Must live in GPU-uncached memory: on inner-shareable pages the sync
+    * write can linger in the GPU L2 where the CPU never sees it. */
+   struct {
+      struct pan_kmod_bo *bo;
+      void *cpu;
+      uint64_t dev;
+   } kbase_seqnos;
+   uint32_t kbase_tiler_submit_count;
+   uint64_t kbase_tiler_work_count;
+   uint64_t kbase_gpu_waits[PANVK_SUBQUEUE_COUNT][PANVK_SUBQUEUE_COUNT];
+   /* Which of the PANVK_KBASE_HEAP_SLOTS TILER_HEAP descriptor slots the
+    * current heap uses. */
+   uint32_t kbase_heap_slot;
+   /* Tiler heap contexts retired by heap renewals, oldest first.  Ring
+    * entries emitted before a renewal keep using the retired heap (their
+    * HEAP_SET and TILER_HEAP descriptor slot), so it is only destroyed once
+    * both graphics subqueues have completed a ring entry emitted after the
+    * retirement.  Several can be in flight so renewal never has to wait for
+    * the GPU to catch up; each holds one descriptor slot. */
+#define PANVK_KBASE_HEAP_SLOTS 4
+#define PANVK_KBASE_DESTROY_RING 16
+   struct {
+      uint64_t ctx;
+      uint64_t vt_jobs;
+      uint64_t frag_jobs;
+   } kbase_retired_heaps[PANVK_KBASE_HEAP_SLOTS - 1];
+   uint32_t kbase_retired_heap_count;
+   /* Descriptor slots in use, 2 to PANVK_KBASE_HEAP_SLOTS
+    * (PANVK_KBASE_HEAP_SLOTS): at most kbase_heap_slots - 1 retired heaps. */
+   uint32_t kbase_heap_slots;
+   /* Test the retired heaps on every submission instead of only on renewal
+    * (PANVK_KBASE_HEAP_EAGER_TERM). */
+   bool kbase_heap_eager_term;
+   /* Heap context pre-created on a worker thread for the next renewal:
+    * KBASE_IOCTL_CS_TILER_HEAP_INIT commits and zeroes the initial chunks,
+    * which took ~7 ms per renewal on the submitting thread. */
+   struct {
+      struct util_queue thread;
+      struct util_queue_fence fence;
+      bool enabled;
+      bool pending;
+      uint64_t ctx;
+      uint64_t first_chunk;
+   } kbase_spare_heap;
+   /* Retired heap contexts waiting to be destroyed by the panvk_heap worker.
+    * KBASE_IOCTL_CS_TILER_HEAP_TERM cost ~3.2 ms on the submitting thread,
+    * which was the entire heap renewal cost.  The seqno check alone gates
+    * slot reuse, so the TERM can run after the slot has been recycled.
+    * Single producer (the submit thread) and single consumer (the worker):
+    * head is only written by the producer, tail only by the consumer. */
+   struct {
+      struct util_queue_fence fence;
+      uint64_t ctxs[PANVK_KBASE_DESTROY_RING];
+      uint32_t head;
+      uint32_t tail;
+      /* Set while a destroy job is queued or running, to deduplicate kicks. */
+      bool job_pending;
+   } kbase_destroy;
+#endif
+
+   struct {
+      struct vk_sync *sync;
+      uint64_t next_value;
+   } utrace;
+
+   struct panvk_subqueue subqueues[PANVK_SUBQUEUE_COUNT];
+};
+
+VK_DEFINE_HANDLE_CASTS(panvk_gpu_queue, vk.base, VkQueue, VK_OBJECT_TYPE_QUEUE)
+
+VkResult panvk_per_arch(create_gpu_queue)(
+   struct panvk_device *dev, const VkDeviceQueueCreateInfo *create_info,
+   uint32_t queue_idx, struct vk_queue **out_queue);
+void panvk_per_arch(destroy_gpu_queue)(struct vk_queue *vk_queue);
+VkResult panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue,
+                                          struct vk_queue_submit *vk_submit);
+VkResult panvk_per_arch(gpu_queue_check_status)(struct vk_queue *vk_queue);
+
+#endif
