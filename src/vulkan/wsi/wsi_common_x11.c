@@ -1251,6 +1251,15 @@ struct x11_image {
     * the critical path while still proving the server read the segment. */
    xcb_get_geometry_cookie_t                 sw_geom_cookie;
    bool                                      sw_geom_pending;
+   /* sw_defer_reply: the GetGeometry sent after this image's last put,
+    * not collected yet (the server may still read the segment), its
+    * submission order and the present ID it completes. */
+   bool                                      sw_reply_pending;
+   unsigned int                              sw_reply_sequence;
+   uint64_t                                  sw_reply_serial;
+   uint64_t                                  sw_reply_present_id;
+   /* sw_ab: the readback buffer is in the cached memory type */
+   bool                                      sw_cached;
    uint64_t                                  present_id;
    VkPresentModeKHR                          present_mode;
    xcb_rectangle_t                           rects[MAX_DAMAGE_RECTS];
@@ -1291,6 +1300,25 @@ struct x11_swapchain {
    /* sw present: FIFO cadence (0 = unpaced) and next present deadline */
    uint64_t                                     sw_fifo_interval_ns;
    uint64_t                                     sw_next_present_ns;
+   /* sw MIT-SHM present: the event thread collects the GetGeometry
+    * replies (wsi_device::x11.sw_defer_reply); puts sent so far and
+    * replies outstanding.  Protected by thread_state_lock. */
+   bool                                         sw_defer_reply;
+   uint64_t                                     sw_reply_serial;
+   uint32_t                                     sw_replies_pending;
+   /* sw_defer_reply with wsi_device::sw_cached_auto: readback memory type
+    * chosen from this swapchain's frame interval, see x11_sw_ab_frame().
+    * Present thread only. */
+   bool                                         sw_ab;
+   bool                                         sw_cached;     /* target mode */
+   uint32_t                                     sw_ab_pending; /* images not in it */
+   uint32_t                                     sw_ab_phase;
+   bool                                         sw_ab_measuring;
+   uint32_t                                     sw_ab_n;
+   uint64_t                                     sw_ab_start_ns; /* first present */
+   uint64_t                                     sw_ab_t0;
+   uint64_t                                     sw_ab_ns[2];   /* [cached] */
+   uint32_t                                     sw_ab_tries;
 
    xcb_connection_t *                           conn;
    xcb_window_t                                 window;
@@ -1900,6 +1928,239 @@ x11_present_to_x11_dri3(struct x11_swapchain *chain, uint32_t image_index,
    return x11_swapchain_result(chain, VK_SUCCESS);
 }
 #endif
+/* The swapchain status a sw present's GetGeometry reply implies. */
+static VkResult
+x11_sw_geometry_result(const struct x11_swapchain *chain,
+                       const xcb_get_geometry_reply_t *geom)
+{
+   if (!geom)
+      return VK_ERROR_SURFACE_LOST_KHR;
+
+   if (chain->extent.width != geom->width ||
+       chain->extent.height != geom->height)
+      return VK_ERROR_OUT_OF_DATE_KHR;
+
+   return VK_SUCCESS;
+}
+
+static void
+x11_sw_complete_present_id(struct x11_swapchain *chain, uint64_t present_id)
+{
+   if (!present_id)
+      return;
+
+   mtx_lock(&chain->present_progress_mutex);
+   if (present_id > chain->present_id) {
+      chain->present_id = present_id;
+      u_cnd_monotonic_broadcast(&chain->present_progress_cond);
+   }
+   mtx_unlock(&chain->present_progress_mutex);
+}
+
+/* sw_defer_reply: in-flight puts, at most.  The server always has the next
+ * frame queued while it handles one, and the window lags at most one frame
+ * behind the present thread. */
+#define X11_SW_MAX_PENDING_REPLIES 2
+
+/* Which readback memory type is faster depends on the device and on the
+ * workload, not on the frame size or the CPU read alone. On the X6 Pro
+ * (v11), with the same 640x360 swapchain, the cached type + full-frame
+ * invalidate gives the D3D11 cube 382 fps vs 271 uncached, but D3D11 FL
+ * 11_1 505 vs 708. A one-off timing of the invalidate + read at the first
+ * swapchain picked cached for both. So each swapchain measures its own
+ * mean frame interval: the starting mode, the other one, the starting one
+ * again (A, B, A cancels a linear drift), each window X11_SW_AB_WINDOW
+ * frames and at least X11_SW_AB_WINDOW_NS after X11_SW_AB_SETTLE frames /
+ * X11_SW_AB_SETTLE_NS in the mode, the first one X11_SW_AB_START_NS after
+ * the swapchain's first present. An image moves to the other type right
+ * after its CPU copy, while it is idle.
+ *
+ * The swapchain decides once (a resize makes a new swapchain, which
+ * measures again). B wins only when it is X11_SW_AB_MARGIN faster than the
+ * faster A window, and loses when it is not X11_SW_AB_MARGIN faster than the
+ * slower one; in between (noisy content, or a frame rate still ramping up)
+ * the probe runs again after X11_SW_AB_RETRY_NS, X11_SW_AB_TRIES times at
+ * most, then the starting mode stays. */
+#define X11_SW_AB_SETTLE 15
+#define X11_SW_AB_SETTLE_NS (100ull * 1000 * 1000)
+#define X11_SW_AB_WINDOW 60
+#define X11_SW_AB_WINDOW_NS (400ull * 1000 * 1000)
+#define X11_SW_AB_START_NS (1000ull * 1000 * 1000)
+#define X11_SW_AB_MARGIN 0.10
+#define X11_SW_AB_RETRY_NS (3000ull * 1000 * 1000)
+#define X11_SW_AB_TRIES 2
+/* The B window ends early, and the probe with it, once its first
+ * X11_SW_AB_ABORT_FRAMES frames run below X11_SW_AB_ABORT of the A rate. */
+#define X11_SW_AB_ABORT_FRAMES 8
+#define X11_SW_AB_ABORT 0.70
+
+static void
+x11_sw_ab_set_mode(struct x11_swapchain *chain, bool cached)
+{
+   chain->sw_cached = cached;
+   chain->sw_ab_n = 0;
+   chain->sw_ab_measuring = false;
+   chain->sw_ab_pending = 0;
+   for (uint32_t i = 0; i < chain->base.image_count; i++)
+      chain->sw_ab_pending += chain->images[i].sw_cached != cached;
+}
+
+/* Mean frame interval of a finished window, else 0. */
+static uint64_t
+x11_sw_ab_window(struct x11_swapchain *chain, uint64_t now)
+{
+   if (chain->sw_ab_n++ == 0)
+      chain->sw_ab_t0 = now; /* mode settled from here on, or not yet */
+   if (!chain->sw_ab_measuring) {
+      if (chain->sw_ab_n < X11_SW_AB_SETTLE ||
+          now - chain->sw_ab_t0 < X11_SW_AB_SETTLE_NS)
+         return 0;
+      chain->sw_ab_measuring = true;
+      chain->sw_ab_n = 1;
+      chain->sw_ab_t0 = now;
+      return 0;
+   }
+   if (chain->sw_ab_n <= X11_SW_AB_WINDOW ||
+       now - chain->sw_ab_t0 < X11_SW_AB_WINDOW_NS)
+      return 0;
+   const uint64_t ns = (now - chain->sw_ab_t0) / (chain->sw_ab_n - 1);
+   chain->sw_ab_n = 0;
+   chain->sw_ab_measuring = false;
+   return ns;
+}
+
+/* Present thread, after the CPU copy of image, before it is released. */
+static void
+x11_sw_ab_frame(struct x11_swapchain *chain, struct x11_image *image)
+{
+   if (image->sw_cached != chain->sw_cached) {
+      if (wsi_image_set_cpu_readback_cached(&chain->base, &image->base,
+                                            chain->sw_cached) != VK_SUCCESS) {
+         /* Keep what each image has; stop switching. */
+         mesa_logw("wsi/x11 sw readback: moving an image failed, mode stays");
+         chain->sw_ab = false;
+         return;
+      }
+      image->sw_cached = chain->sw_cached;
+      chain->sw_ab_pending--;
+      chain->sw_ab_n = 0;
+      chain->sw_ab_measuring = false;
+      return;
+   }
+
+   if (chain->sw_ab_phase == 3) {
+      if (!chain->sw_ab_pending)
+         chain->sw_ab = false; /* every image in the chosen type */
+      return;
+   }
+   const uint64_t now = os_time_get_nano();
+   if (!chain->sw_ab_start_ns)
+      chain->sw_ab_start_ns = now;
+   if (chain->sw_ab_pending || now < chain->sw_ab_start_ns + X11_SW_AB_START_NS)
+      return;
+   const uint64_t ns = x11_sw_ab_window(chain, now);
+   if (!ns) {
+      if (chain->sw_ab_phase == 1 && chain->sw_ab_measuring &&
+          chain->sw_ab_n > X11_SW_AB_ABORT_FRAMES) {
+         const uint64_t a = chain->sw_ab_ns[!chain->sw_cached];
+         const uint64_t b = (now - chain->sw_ab_t0) / (chain->sw_ab_n - 1);
+         if (b * X11_SW_AB_ABORT > a) {
+            mesa_logi("wsi/x11 sw readback %ux%u: %s %.1f fps, %s %.1f fps "
+                      "after %u frames -> %s (early)",
+                      chain->extent.width, chain->extent.height,
+                      chain->sw_cached ? "uncached" : "cached", 1e9 / a,
+                      chain->sw_cached ? "cached" : "uncached", 1e9 / b,
+                      chain->sw_ab_n - 1,
+                      chain->sw_cached ? "uncached" : "cached");
+            x11_sw_ab_set_mode(chain, !chain->sw_cached);
+            chain->sw_ab_phase = 3;
+         }
+      }
+      return;
+   }
+   const bool cur = chain->sw_cached;
+
+   switch (chain->sw_ab_phase) {
+   case 0: /* A measured: try B. */
+      chain->sw_ab_ns[cur] = ns;
+      chain->sw_ab_phase = 1;
+      x11_sw_ab_set_mode(chain, !cur);
+      break;
+   case 1: /* B measured: A again. */
+      chain->sw_ab_ns[cur] = ns;
+      chain->sw_ab_phase = 2;
+      x11_sw_ab_set_mode(chain, !cur);
+      break;
+   default: {
+      /* cur is A again: both of its windows against B. */
+      const uint64_t a1 = chain->sw_ab_ns[cur], a2 = ns;
+      const uint64_t b = chain->sw_ab_ns[!cur];
+      /* B against the better and the worse A window: a drift between the
+       * A windows cannot make a clear winner look like a loser. */
+      const bool flip = b < MIN2(a1, a2) * (1.0 - X11_SW_AB_MARGIN);
+      const bool keep = b > MAX2(a1, a2) * (1.0 - X11_SW_AB_MARGIN);
+      const bool retry = !flip && !keep &&
+                         ++chain->sw_ab_tries < X11_SW_AB_TRIES;
+      mesa_logi("wsi/x11 sw readback %ux%u: %s %.1f/%.1f fps, %s %.1f fps "
+                "-> %s%s",
+                chain->extent.width, chain->extent.height,
+                cur ? "cached" : "uncached", 1e9 / a1, 1e9 / a2,
+                cur ? "uncached" : "cached", 1e9 / b,
+                (flip ? !cur : cur) ? "cached" : "uncached",
+                flip || keep ? "" : retry ? " (unclear, again later)"
+                                          : " (unclear, kept)");
+      if (flip)
+         x11_sw_ab_set_mode(chain, !cur);
+      if (retry) {
+         /* Again later from the start, in the mode kept. */
+         chain->sw_ab_phase = 0;
+         chain->sw_ab_start_ns = now + X11_SW_AB_RETRY_NS - X11_SW_AB_START_NS;
+      } else {
+         chain->sw_ab_phase = 3; /* decided: images still to move, then idle */
+      }
+      break;
+   }
+   }
+}
+
+/* Event thread, thread_state_lock held: collect the oldest outstanding
+ * GetGeometry reply.  Returns false when none is outstanding. */
+static bool
+x11_sw_collect_reply(struct x11_swapchain *chain)
+{
+   struct x11_image *image = NULL;
+   for (uint32_t i = 0; i < chain->base.image_count; i++) {
+      struct x11_image *it = &chain->images[i];
+      if (it->sw_reply_pending &&
+          (!image || it->sw_reply_serial < image->sw_reply_serial))
+         image = it;
+   }
+   if (!image)
+      return false;
+
+   /* Only this thread clears sw_reply_pending, and the present thread
+    * leaves the image's reply state alone until then. */
+   xcb_get_geometry_cookie_t cookie = { image->sw_reply_sequence };
+   mtx_unlock(&chain->thread_state_lock);
+   xcb_generic_error_t *err = NULL;
+   xcb_get_geometry_reply_t *geom =
+      xcb_get_geometry_reply(chain->conn, cookie, &err);
+   mtx_lock(&chain->thread_state_lock);
+
+   VkResult result = x11_sw_geometry_result(chain, geom);
+   free(err);
+   free(geom);
+
+   image->sw_reply_pending = false;
+   chain->sw_replies_pending--;
+   x11_sw_complete_present_id(chain, image->sw_reply_present_id);
+   x11_swapchain_result(chain, result);
+
+   /* Wake the present thread if it waits for this segment or a slot. */
+   u_cnd_monotonic_broadcast(&chain->thread_state_cond);
+   return true;
+}
+
 /**
  * Send image to X server unaccelerated (software drivers).
  */
@@ -1910,11 +2171,23 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
    struct x11_image *image = &chain->images[image_index];
    VkResult pending_result = VK_SUCCESS;
 
-   /* Consume the geometry reply of this image's previous present before
-    * touching its segment again. The request was issued a whole frame ago, so
-    * this normally returns immediately, and its reply still proves the server
-    * finished reading the segment before the copy below overwrites it. */
-   if (chain->sw_shm && image->sw_geom_pending) {
+   if (chain->sw_defer_reply) {
+      /* The reply to this image's previous put proves the server has read
+       * the segment, so the copy below cannot race with it.  At most two
+       * puts are in flight: the server always has the next frame queued
+       * while the window lags at most one frame behind. */
+      while (chain->status >= 0 &&
+             (image->sw_reply_pending ||
+              chain->sw_replies_pending >= X11_SW_MAX_PENDING_REPLIES))
+         u_cnd_monotonic_wait(&chain->thread_state_cond,
+                              &chain->thread_state_lock);
+      if (chain->status < 0)
+         return chain->status;
+   } else if (chain->sw_shm && image->sw_geom_pending) {
+      /* Consume the geometry reply of this image's previous present before
+       * touching its segment again. The request was issued a whole frame ago, so
+       * this normally returns immediately, and its reply still proves the server
+       * finished reading the segment before the copy below overwrites it. */
       xcb_generic_error_t *err = NULL;
       xcb_get_geometry_reply_t *prev =
          xcb_get_geometry_reply(chain->conn, image->sw_geom_cookie, &err);
@@ -1937,6 +2210,9 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
    xcb_get_geometry_cookie_t geom_cookie = { 0 };
    if (!chain->sw_shm)
       geom_cookie = xcb_get_geometry(chain->conn, chain->window);
+
+   /* The blit fence has signalled (present thread or vkQueuePresentKHR). */
+   wsi_image_invalidate_cpu_map(&chain->base, &image->base);
 
    xcb_void_cookie_t cookie;
    void *myptr = image->base.cpu_map;
@@ -1976,11 +2252,15 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
                                     image->shmseg, 0);
          xcb_discard_reply(chain->conn, cookie.sequence);
       }
-      /* Ask for the geometry now and read it at the next present of this
-       * image; blocking on it here would serialise present on a full server
+      /* Ask for the geometry now; in the deferred mode the event thread
+       * reads the reply, otherwise it is read at the next present of this
+       * image.  Blocking on it here would serialise present on a full server
        * round-trip. */
-      image->sw_geom_cookie = xcb_get_geometry(chain->conn, chain->window);
-      image->sw_geom_pending = true;
+      geom_cookie = xcb_get_geometry(chain->conn, chain->window);
+      if (!chain->sw_defer_reply) {
+         image->sw_geom_cookie = geom_cookie;
+         image->sw_geom_pending = true;
+      }
    } else if (image->rectangle_count > 0) {
       for (int i = 0; i < image->rectangle_count; i++) {
          xcb_rectangle_t rect = chain->images[image_index].rects[i];
@@ -2030,6 +2310,25 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
 
    xcb_flush(chain->conn);
 
+   if (chain->sw_defer_reply) {
+      /* The server reads only the segment, so the image can be acquired
+       * again right away.  The event thread collects the reply, completes
+       * the present ID and reports OUT_OF_DATE (one present later than the
+       * synchronous path does). */
+      image->sw_reply_pending = true;
+      image->sw_reply_sequence = geom_cookie.sequence;
+      image->sw_reply_serial = ++chain->sw_reply_serial;
+      image->sw_reply_present_id = image->present_id;
+      chain->sw_replies_pending++;
+
+      /* The server reads only the segment: the readback buffer is idle. */
+      if (chain->sw_ab)
+         x11_sw_ab_frame(chain, image);
+
+      wsi_queue_push(&chain->acquire_queue, image_index);
+      return VK_SUCCESS;
+   }
+
    /* We don't have queued present here.
     * Immediately let application acquire again, but query geometry first so
     * we can report OUT_OF_DATE on resize. */
@@ -2040,25 +2339,12 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
 
       xcb_get_geometry_reply_t *geom =
          xcb_get_geometry_reply(chain->conn, geom_cookie, &err);
-      if (geom) {
-         if (chain->extent.width != geom->width ||
-             chain->extent.height != geom->height)
-            result = VK_ERROR_OUT_OF_DATE_KHR;
-      } else {
-         result = VK_ERROR_SURFACE_LOST_KHR;
-      }
+      result = x11_sw_geometry_result(chain, geom);
       free(err);
       free(geom);
    }
 
-   if (image->present_id) {
-      mtx_lock(&chain->present_progress_mutex);
-      if (image->present_id > chain->present_id) {
-         chain->present_id = image->present_id;
-         u_cnd_monotonic_broadcast(&chain->present_progress_cond);
-      }
-      mtx_unlock(&chain->present_progress_mutex);
-   }
+   x11_sw_complete_present_id(chain, image->present_id);
 
    wsi_queue_push(&chain->acquire_queue, image_index);
    return result;
@@ -2391,6 +2677,7 @@ x11_queue_present(struct wsi_swapchain *wsi_chain,
    memset(&chain->timing_request, 0, sizeof(chain->timing_request));
 
    wsi_queue_push(&chain->present_queue, image_index);
+
    return x11_swapchain_read_status_atomic(chain);
 }
 
@@ -2432,6 +2719,15 @@ x11_manage_event_queue(void *state)
    mtx_lock(&chain->thread_state_lock);
 
    while (chain->status >= 0) {
+      /* sw present has no Present events: this thread only collects the
+       * deferred GetGeometry replies, or sleeps until a put is sent. */
+      if (chain->sw_defer_reply) {
+         if (!x11_sw_collect_reply(chain))
+            u_cnd_monotonic_wait(&chain->thread_state_cond,
+                                 &chain->thread_state_lock);
+         continue;
+      }
+
       /* This thread should only go sleep waiting for X events when we know there are pending events.
        * We expect COMPLETION events when there is at least one image marked as present_queued.
        * We also expect IDLE events, but we only consider waiting for them when all images are busy,
@@ -3214,6 +3510,14 @@ x11_swapchain_destroy(struct wsi_swapchain *wsi_chain,
       wsi_queue_destroy(&chain->acquire_queue);
    wsi_queue_destroy(&chain->present_queue);
 
+   /* Both threads are gone: drop the sw replies nobody will collect. */
+   for (uint32_t i = 0; i < chain->base.image_count; i++) {
+      if (chain->images[i].sw_reply_pending)
+         xcb_discard_reply(chain->conn, chain->images[i].sw_reply_sequence);
+      else if (chain->images[i].sw_geom_pending)
+         xcb_discard_reply(chain->conn, chain->images[i].sw_geom_cookie.sequence);
+   }
+
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       x11_image_finish(chain, pAllocator, &chain->images[i]);
 #ifdef HAVE_X11_DRM
@@ -3594,6 +3898,15 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       if (result != VK_SUCCESS)
          goto fail_init_images;
    }
+
+   /* After the images: a failed segment attach drops sw_shm. */
+   chain->sw_defer_reply = chain->sw_shm && wsi_device->x11.sw_defer_reply;
+   chain->sw_cached = wsi_device->sw_cached_noncoherent;
+   for (uint32_t i = 0; i < chain->base.image_count; i++)
+      chain->images[i].sw_cached = chain->sw_cached;
+   chain->sw_ab = chain->sw_defer_reply && wsi_device->sw_cached_auto &&
+                  chain->base.blit.type == WSI_SWAPCHAIN_BUFFER_BLIT &&
+                  !chain->base.image_info.alloc_shm;
 
    /* The queues have a length of base.image_count + 1 because we will
     * occasionally use UINT32_MAX to signal the other thread that an error
