@@ -4,6 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "util/log.h"
 #include "util/u_debug.h"
 
@@ -692,24 +700,17 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
       return VK_SUCCESS;
    }
 
-   /* The prewarm worker creates these pipelines in the background. Take the
-    * lock so a given (shader, format) pair is only ever created once, and
-    * wait for an in-flight creation instead of duplicating it. */
-   simple_mtx_lock(&dev->bc_pipeline_mtx);
-   cached = vk_meta_lookup_pipeline(&dev->meta, &key, sizeof(key));
-   if (cached != VK_NULL_HANDLE) {
-      simple_mtx_unlock(&dev->bc_pipeline_mtx);
-      *pipeline_out = cached;
-      return VK_SUCCESS;
-   }
-
+   /* The prewarm worker compiles these pipelines in the background, but the
+    * compilation below does not take bc_pipeline_mtx: a decode on the
+    * recording thread must not wait for a background prewarm compile of
+    * another format to finish.  vk_meta caches the objects under its own
+    * mutex and destroys the loser when two threads create the same key, so a
+    * race only wastes one compilation. */
    VkResult result =
       vk_meta_get_pipeline_layout(&dev->vk, &dev->meta, NULL, &push_range,
                                   &layout_key, sizeof(layout_key), layout_out);
-   if (result != VK_SUCCESS) {
-      simple_mtx_unlock(&dev->bc_pipeline_mtx);
+   if (result != VK_SUCCESS)
       return result;
-   }
 
    const VkShaderModuleCreateInfo module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -739,43 +740,72 @@ get_bc_decode_pipeline(struct panvk_device *dev, uint32_t shader, VkFormat forma
       .layout = *layout_out,
    };
 
-   result = vk_meta_create_compute_pipeline(&dev->vk, &dev->meta, &info, &key,
-                                            sizeof(key), pipeline_out);
-   simple_mtx_unlock(&dev->bc_pipeline_mtx);
-   return result;
+   return vk_meta_create_compute_pipeline(&dev->vk, &dev->meta, &info, &key,
+                                          sizeof(key), pipeline_out);
 }
 
 /* Compiling the transcode pipelines on first use stalls the first upload of
- * every BC format on the main thread. Warm them on a worker as soon as the
- * application creates its first emulated BC image, which normally happens
- * while assets are still being loaded. If a transcode still gets there first,
- * get_bc_decode_pipeline() creates the pipeline synchronously under
- * bc_pipeline_mtx, so there is no correctness gap. */
+ * every BC format on the main thread. Warm the common ones on a worker as
+ * soon as the application starts recording, which normally happens while
+ * assets are still being loaded. If a transcode still gets there first,
+ * get_bc_decode_pipeline() creates the pipeline synchronously on the recording
+ * thread, so there is no correctness gap. */
+/* Formats are ordered by how often titles use them.  PANVK_BC_PREWARM takes
+ * "all" (every format), a number of leading formats to prewarm, "true" (the
+ * two common BC1 formats below) or "false" (no prewarm); the rest compile on
+ * first use.  Every prewarmed format is a full pipeline compile of a large
+ * SPIR-V module, so the default stays small: BC3/BC7 and the rest are worth
+ * one compile at their first upload, not seconds of background work for a
+ * title that may never use them. */
 static const VkFormat panvk_bc_prewarm_formats[] = {
    VK_FORMAT_BC1_RGB_UNORM_BLOCK,
    VK_FORMAT_BC1_RGB_SRGB_BLOCK,
    VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
    VK_FORMAT_BC1_RGBA_SRGB_BLOCK,
-   VK_FORMAT_BC2_UNORM_BLOCK,
-   VK_FORMAT_BC2_SRGB_BLOCK,
    VK_FORMAT_BC3_UNORM_BLOCK,
    VK_FORMAT_BC3_SRGB_BLOCK,
+   VK_FORMAT_BC7_UNORM_BLOCK,
+   VK_FORMAT_BC7_SRGB_BLOCK,
+   VK_FORMAT_BC2_UNORM_BLOCK,
+   VK_FORMAT_BC2_SRGB_BLOCK,
    VK_FORMAT_BC4_UNORM_BLOCK,
    VK_FORMAT_BC4_SNORM_BLOCK,
    VK_FORMAT_BC5_UNORM_BLOCK,
    VK_FORMAT_BC5_SNORM_BLOCK,
    VK_FORMAT_BC6H_UFLOAT_BLOCK,
    VK_FORMAT_BC6H_SFLOAT_BLOCK,
-   VK_FORMAT_BC7_UNORM_BLOCK,
-   VK_FORMAT_BC7_SRGB_BLOCK,
 };
+
+#define PANVK_BC_PREWARM_CORE 2
+
+static unsigned
+panvk_bc_prewarm_count(void)
+{
+   static int count = -1;
+
+   if (count < 0) {
+      const char *opt = debug_get_option("PANVK_BC_PREWARM", "true");
+
+      if (opt[0] == '0' || !strcmp(opt, "false"))
+         count = 0;
+      else if (!strcmp(opt, "all"))
+         count = ARRAY_SIZE(panvk_bc_prewarm_formats);
+      else if (opt[0] >= '1' && opt[0] <= '9')
+         count = CLAMP(atoi(opt), 0,
+                       (int)ARRAY_SIZE(panvk_bc_prewarm_formats));
+      else
+         count = PANVK_BC_PREWARM_CORE;
+   }
+
+   return count;
+}
 
 static void
 panvk_bc_prewarm_job(void *job, void *gdata, int thread_index)
 {
    struct panvk_device *dev = job;
 
-   for (unsigned i = 0; i < ARRAY_SIZE(panvk_bc_prewarm_formats); i++) {
+   for (unsigned i = 0; i < panvk_bc_prewarm_count(); i++) {
       const VkFormat format = panvk_bc_prewarm_formats[i];
       VkPipelineLayout layout;
       VkPipeline pipeline;
@@ -789,11 +819,7 @@ panvk_bc_prewarm_job(void *job, void *gdata, int thread_index)
 void
 panvk_per_arch(bc_prewarm)(struct panvk_device *dev)
 {
-   static int enabled = -1;
-
-   if (enabled < 0)
-      enabled = debug_get_bool_option("PANVK_BC_PREWARM", true);
-   if (!enabled)
+   if (panvk_bc_prewarm_count() == 0)
       return;
 
    simple_mtx_lock(&dev->bc_pipeline_mtx);
@@ -1050,6 +1076,7 @@ bc_cache_min_bytes(void)
    return (uint64_t)debug_get_option_bc_cache_min_kb_opt() * 1024u;
 }
 
+
 static uint32_t
 upload_src_hash_layer_count(const struct panvk_image *img)
 {
@@ -1148,6 +1175,7 @@ bc_decode_region(struct panvk_cmd_buffer *cmdbuf, struct panvk_image *img,
    VkCommandBuffer cmd = panvk_cmd_buffer_to_handle(cmdbuf);
    VkPipelineLayout layout;
    VkPipeline pipeline;
+
 
    VkResult result = get_bc_decode_pipeline(
       dev, bc_decode_shader_index(img->vk.format), img->vk.format, &layout,
@@ -1607,7 +1635,8 @@ struct bc_global_hit {
 static bool
 bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
                            struct panvk_image *img,
-                           const VkCopyBufferToImageInfo2 *info)
+                           const VkCopyBufferToImageInfo2 *info,
+                           uint64_t *hashes, uint32_t hash_count)
 {
    if (!debug_get_option_texture_cache_opt() ||
        img->vk.image_type != VK_IMAGE_TYPE_2D || !img->bc_emul ||
@@ -1648,6 +1677,8 @@ bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    uint32_t miss_count = 0, hit_count = 0;
 
+   uint32_t slice_base = 0;
+
    for (uint32_t i = 0; i < info->regionCount; i++) {
       const VkBufferImageCopy2 *r = &info->pRegions[i];
       uint32_t level, first_layer, layer_count;
@@ -1656,6 +1687,10 @@ bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
       if (!upload_region_layout(img, r, &level, &first_layer, &layer_count,
                                 &slice_B))
          continue;
+
+      const uint32_t base = slice_base;
+
+      slice_base += layer_count;
 
       const void *host =
          upload_src_host(src_buffer, r, slice_B * layer_count);
@@ -1668,8 +1703,15 @@ bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
       const VkExtent3D mip = vk_image_mip_level_extent(&img->vk, level);
 
       for (uint32_t l = 0; l < layer_count; l++) {
-         const uint64_t hash =
-            XXH3_64bits((const char *)host + (uint64_t)l * slice_B, slice_B);
+         const uint32_t idx = base + l;
+         uint64_t hash = (hashes && idx < hash_count) ? hashes[idx] : 0;
+
+         if (!hash) {
+            hash = XXH3_64bits((const char *)host + (uint64_t)l * slice_B,
+                               slice_B);
+            if (hashes && idx < hash_count)
+               hashes[idx] = hash;
+         }
          struct panvk_image *src_img = NULL;
          uint32_t src_level = 0, src_layer = 0;
          bool hit = panvk_upload_cache_lookup(dev, hash, img->vk.format,
@@ -1710,6 +1752,7 @@ bc_upload_global_cache_try(VkCommandBuffer commandBuffer,
       STACK_ARRAY_FINISH(hits);
       return false;
    }
+
 
    struct panvk_cmd_meta_compute_save_ctx save = {0};
    bc_decode_begin(cmdbuf, &save);
@@ -1813,10 +1856,45 @@ panvk_per_arch(CmdCopyBufferToImage2)(
       pCopyBufferToImageInfo->regionCount &&
       debug_get_option_upload_cache_opt();
 
+   /* Source-slice hashes computed during this upload.  The per-image
+    * comparison, the BC global cache lookup and the post-copy bookkeeping all
+    * visit the same slices; keeping the values here hashes each slice once
+    * instead of up to three times.  The stack budget covers a texture or a mip
+    * chain; larger uploads recompute, as before. */
+   uint64_t hashes_local[128];
+   uint64_t *hashes = NULL;
+   uint32_t hash_count = 0;
+
+   if (cacheable) {
+      uint32_t total_slices = 0;
+      bool layouts_ok = true;
+
+      for (uint32_t i = 0; i < pCopyBufferToImageInfo->regionCount; i++) {
+         const VkBufferImageCopy2 *r = &pCopyBufferToImageInfo->pRegions[i];
+         uint32_t level, first_layer, layer_count;
+         uint64_t slice_B;
+
+         if (!upload_region_layout(img, r, &level, &first_layer,
+                                   &layer_count, &slice_B)) {
+            layouts_ok = false;
+            break;
+         }
+         total_slices += layer_count;
+      }
+
+      if (layouts_ok && total_slices &&
+          total_slices <= ARRAY_SIZE(hashes_local)) {
+         memset(hashes_local, 0, sizeof(hashes_local));
+         hashes = hashes_local;
+         hash_count = total_slices;
+      }
+   }
+
    if (cacheable) {
       VK_FROM_HANDLE(panvk_buffer, src_buffer,
                      pCopyBufferToImageInfo->srcBuffer);
       bool all_cached = true;
+      uint32_t hash_idx = 0;
 
       for (uint32_t i = 0; i < pCopyBufferToImageInfo->regionCount; i++) {
          const VkBufferImageCopy2 *r = &pCopyBufferToImageInfo->pRegions[i];
@@ -1828,6 +1906,10 @@ panvk_per_arch(CmdCopyBufferToImage2)(
             all_cached = false;
             break;
          }
+
+         const uint32_t base = hash_idx;
+
+         hash_idx += layer_count;
 
          if (slice_B < bc_cache_min_bytes()) {
             all_cached = false;
@@ -1844,10 +1926,22 @@ panvk_per_arch(CmdCopyBufferToImage2)(
          for (uint32_t l = 0; l < layer_count; l++) {
             const uint64_t *slot =
                upload_src_hash_slot(img, level, first_layer + l);
+
+            /* No recorded hash means this is the first upload of the slice:
+             * there is nothing to compare against, and hashing it here would
+             * only be repeated after the copy. */
+            if (!slot || !*slot) {
+               all_cached = false;
+               break;
+            }
+
             const uint64_t hash =
                XXH3_64bits((const char *)host + (uint64_t)l * slice_B, slice_B);
 
-            if (!slot || *slot != hash) {
+            if (hashes && base + l < hash_count)
+               hashes[base + l] = hash;
+
+            if (*slot != hash) {
                all_cached = false;
                break;
             }
@@ -1857,12 +1951,15 @@ panvk_per_arch(CmdCopyBufferToImage2)(
             break;
       }
 
-      if (all_cached)
+      if (all_cached) {
+
          return;
+      }
    }
 
    if (cacheable && bc_upload_global_cache_try(commandBuffer, img,
-                                               pCopyBufferToImageInfo))
+                                               pCopyBufferToImageInfo, hashes,
+                                               hash_count))
       return;
 
    STACK_ARRAY(VkDeviceMemoryImageCopyKHR, regions,
@@ -1872,12 +1969,14 @@ panvk_per_arch(CmdCopyBufferToImage2)(
 
    panvk_per_arch(CmdCopyMemoryToImageKHR)(commandBuffer, &info);
 
+
    STACK_ARRAY_FINISH(regions);
 
    /* The decode invalidated the old hashes; record what it consumed. */
    if (cacheable) {
       VK_FROM_HANDLE(panvk_buffer, src_buffer,
                      pCopyBufferToImageInfo->srcBuffer);
+      uint32_t hash_idx = 0;
 
       for (uint32_t i = 0; i < pCopyBufferToImageInfo->regionCount; i++) {
          const VkBufferImageCopy2 *r = &pCopyBufferToImageInfo->pRegions[i];
@@ -1888,6 +1987,10 @@ panvk_per_arch(CmdCopyBufferToImage2)(
                                       &layer_count, &slice_B))
             continue;
 
+         const uint32_t base = hash_idx;
+
+         hash_idx += layer_count;
+
          const void *host =
             upload_src_host(src_buffer, r, slice_B * layer_count);
          if (!host)
@@ -1896,9 +1999,20 @@ panvk_per_arch(CmdCopyBufferToImage2)(
          for (uint32_t l = 0; l < layer_count; l++) {
             uint64_t *slot = upload_src_hash_slot(img, level, first_layer + l);
 
-            if (slot)
-               *slot = XXH3_64bits((const char *)host + (uint64_t)l * slice_B,
-                             slice_B);
+            if (!slot)
+               continue;
+
+            const uint32_t idx = base + l;
+            const uint64_t hash =
+               (hashes && idx < hash_count && hashes[idx])
+                  ? hashes[idx]
+                  : XXH3_64bits((const char *)host + (uint64_t)l * slice_B,
+                                slice_B);
+
+            if (hashes && idx < hash_count)
+               hashes[idx] = hash;
+
+            *slot = hash;
          }
       }
    }

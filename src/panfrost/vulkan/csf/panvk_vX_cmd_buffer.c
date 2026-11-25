@@ -1407,6 +1407,7 @@ lazy_record(struct panvk_cmd_buffer *cmdbuf, enum panvk_subqueue_id subqueue,
 static void
 emit_barrier_csf(struct panvk_cmd_buffer *cmdbuf, struct panvk_cs_deps deps)
 {
+   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    uint32_t wait_subqueue_mask = 0;
    uint32_t utrace_subqueue_mask = 0;
 
@@ -1486,8 +1487,19 @@ emit_barrier_csf(struct panvk_cmd_buffer *cmdbuf, struct panvk_cs_deps deps)
       struct cs_builder *b = panvk_get_cs_builder(cmdbuf, i);
       struct panvk_cs_state *cs_state = &cmdbuf->state.cs[i];
 
-      if (deps.src[i].wait_sb_mask)
+      if (deps.src[i].wait_sb_mask) {
          cs_wait_slots(b, deps.src[i].wait_sb_mask);
+
+         /* C4 (115): every fragment job issued so far is done, see
+          * struct panvk_frag_written.
+          */
+         if (i == PANVK_SUBQUEUE_FRAGMENT &&
+             (deps.src[i].wait_sb_mask & dev->csf.sb.all_iters_mask) ==
+                dev->csf.sb.all_iters_mask) {
+            cmdbuf->state.gfx.frag_written =
+               (struct panvk_frag_written){.valid = true};
+         }
+      }
 
       struct panvk_cache_flush_info cache_flush = deps.src[i].cache_flush;
       if (!panvk_cache_flush_is_nop(&cache_flush)) {

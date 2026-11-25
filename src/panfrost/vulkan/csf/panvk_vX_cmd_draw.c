@@ -68,6 +68,23 @@ extern unsigned long long panvk_diag_renders;
 #include "vk_render_pass.h"
 #include "poly/geometry.h"
 
+/* Logic ops that ignore the destination pixel.  Forward pixel kill and HSR
+ * culling stay valid for them even when blending would read the tile. */
+static bool
+logicop_reads_dest(VkLogicOp op)
+{
+   switch (op) {
+   case VK_LOGIC_OP_CLEAR:
+   case VK_LOGIC_OP_SET:
+   case VK_LOGIC_OP_COPY:
+   case VK_LOGIC_OP_COPY_INVERTED:
+   case VK_LOGIC_OP_NO_OP:
+      return false;
+   default:
+      return true;
+   }
+}
+
 /* kbase validates the firmware heap statistics on every tiler OOM event and
  * terminates the queue group when frag_end > vt_end ("Invalid Heap
  * statistics provided by firmware"), which surfaces as DEVICE_LOST.  On
@@ -3103,10 +3120,17 @@ build_dcd_flags(struct panvk_cmd_buffer *cmdbuf,
             cmdbuf->vk.dynamic_graphics_state.rasterization_order_access &
             VK_IMAGE_ASPECT_COLOR_BIT;
 
+         const struct vk_dynamic_graphics_state *dyn =
+            &cmdbuf->vk.dynamic_graphics_state;
+         const bool dest_read =
+            (PANVK_PERF(LOGICOP_FPK) && dyn->cb.logic_op_enable) ?
+               logicop_reads_dest(dyn->cb.logic_op) :
+               cmdbuf->state.gfx.cb.info.any_dest_read;
+
          cfg.allow_forward_pixel_to_kill =
             fs->info.fs.can_fpk && !(rt_mask & ~out->rt_written) &&
             !(out->rt_read & out->rt_written) && !alpha_to_coverage &&
-            !cmdbuf->state.gfx.cb.info.any_dest_read && !roa_color;
+            !dest_read && !roa_color;
 
          cfg.allow_forward_pixel_to_be_killed = !fs->info.writes_global;
 
@@ -3212,10 +3236,17 @@ build_dcd_flags(struct panvk_cmd_buffer *cmdbuf,
 #endif
 #if PAN_ARCH >= 13
       if (fs) {
+         const struct vk_dynamic_graphics_state *dyn =
+            &cmdbuf->vk.dynamic_graphics_state;
+         const bool dest_read =
+            (PANVK_PERF(LOGICOP_FPK) && dyn->cb.logic_op_enable) ?
+               logicop_reads_dest(dyn->cb.logic_op) :
+               cmdbuf->state.gfx.cb.info.any_dest_read;
+
          /* HSR can cull */
          cfg.hsr_can_cull = !fs->info.fs.hsr.ld_tile && out->rt_written &&
                               !(out->rt_read & out->rt_written) &&
-                              !cmdbuf->state.gfx.cb.info.any_dest_read;
+                              !dest_read;
 
          /* HSR can_be_culled
             * - FUTURE: We could allow write-only side effects.
@@ -4142,6 +4173,22 @@ launch_indirect_draw(struct panvk_cmd_buffer *cmdbuf,
          }
       }
    }
+
+   /* The loop leaves VERTEX_SRT past the last per-draw resource table and
+    * VERTEX_FAU past the last per-draw push uniform block, and those copies
+    * hold the indirect draws' own firstInstance/firstVertex patches. The
+    * next draw re-emits both registers only when its VS tables or push
+    * uniforms are dirty, which nothing guaranteed: a direct draw with the
+    * same state and zero firstVertex/firstInstance reused them. Make it
+    * rebuild its own (BASE_INSTANCE reaches vs_desc_dirty() through the
+    * per-instance attributes that made the tables repeat).
+    */
+   if (PANVK_PERF(CSF_INDIRECT_REEMIT)) {
+      if (cmdbuf->state.gfx.vs.desc_repeat_count)
+         gfx_state_set_dirty(cmdbuf, BASE_INSTANCE);
+      if (patch_faus)
+         gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
+   }
 }
 
 static void panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf,
@@ -4187,6 +4234,11 @@ gpu_prerast_arena_sync(const struct panvk_device *dev, uint64_t arena)
 {
    const bool tess =
       arena == panvk_priv_mem_dev_addr(dev->gpu_prerast_tess_arena);
+
+   if (panvk_priv_mem_check_alloc(dev->gpu_prerast_tess_arena2) &&
+       arena == panvk_priv_mem_dev_addr(dev->gpu_prerast_tess_arena2))
+      return dev->gpu_prerast_syncs->addr.dev +
+             offsetof(struct panvk_gpu_prerast_syncs, tess_arena2);
 
    assert(tess || arena == panvk_priv_mem_dev_addr(dev->gpu_prerast_arena));
    return dev->gpu_prerast_syncs->addr.dev +
@@ -5472,7 +5524,27 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
       }
    }
 
-   const uint64_t arena = panvk_priv_mem_dev_addr(dev->gpu_prerast_tess_arena);
+   /* csf-v11 tess-arenas: with one arena, the compute pre-pass of a tess
+    * draw cannot start before the vertex/tiler side of the previous one has
+    * drawn and released it, so the two queues take turns and never overlap.
+    * Odd tess draws of a command buffer use a second arena and ready/free
+    * pair: the compute side of draw N+1 then runs while draw N is drawn.
+    * Each pair is still taken and given in recording order on both queues,
+    * as is each arena's ownership sync, so the loops cannot deadlock.
+    * PANVK_TESS_ARENAS=1 keeps the single arena.
+    */
+   bool slot2 = false;
+   if (dev->tess_opt.arenas > 1 && (cmdbuf->state.tess_draws++ & 1)) {
+      slot2 = panvk_priv_mem_check_alloc(
+         panvk_per_arch(device_gpu_prerast_tess_arena2)(dev));
+   }
+   const uint64_t arena =
+      panvk_priv_mem_dev_addr(slot2 ? dev->gpu_prerast_tess_arena2
+                                    : dev->gpu_prerast_tess_arena);
+   const uint32_t ready_sync = slot2 ? PANVK_QUEUE_TESS_READY2_SYNC_OFFSET
+                                     : PANVK_QUEUE_TESS_READY_SYNC_OFFSET;
+   const uint32_t free_sync = slot2 ? PANVK_QUEUE_TESS_FREE2_SYNC_OFFSET
+                                    : PANVK_QUEUE_TESS_FREE_SYNC_OFFSET;
    const uint64_t prerast_arena =
       nested ? panvk_priv_mem_dev_addr(dev->gpu_prerast_arena) : 0;
    struct panvk_gpu_prerast_tess_layout l;
@@ -5607,6 +5679,36 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
    };
    const struct panlib_precomp_grid tess_grid =
       panlib_1d(DIV_ROUND_UP(max_patches, 64));
+   /* csf-v11 tess-fused: one workgroup counts, prefix sums and publishes the
+    * draw of a chunk (PANVK_TESS_FUSE=0 runs the COUNT pass and the serial
+    * panlib_tess_draw() instead). A direct draw the CPU knows to have at
+    * most PANVK_TESS_FUSE_GEN_MAX patches is also tessellated by that
+    * workgroup: the separate WITH_COUNTS pass would be one workgroup too.
+    */
+   const bool fuse = dev->tess_opt.fuse;
+   const uint64_t direct_patches =
+      indirect ? UINT64_MAX
+               : (uint64_t)(draw->vertex.count / ps) * draw->instance.count;
+   bool fuse_gen = fuse && direct_patches <= dev->tess_opt.fuse_gen_max;
+   /* csf-v11 tess-fuse-stack: the fused workgroup's gen variant inlines a
+    * second tessellator, which for quads needs 5.2 KiB of stack (8 KiB per
+    * thread). On G615 that produced broken interior domain points (bc6c).
+    * Quads therefore count and scan in the fused workgroup but tessellate in
+    * panlib_tess_gen(); triangles and isolines stay fused.
+    */
+   if (fuse_gen && domain == 1)
+      fuse_gen = false;
+   /* WP3 (PANVK_TESS_SINGLE_CSG): the free take/give pair of both loops only
+    * orders iteration k against iteration k+1. A direct draw whose patches
+    * fit one iteration has none, so its free sync cell keeps its initial 1
+    * and the ready pair alone publishes the arena; see the two loops below.
+    * Indirect draws and draws the count pass splits over several iterations
+    * keep the ping-pong. A nested draw is excluded too: its per-iteration
+    * index range (range below) can split even a one-chunk tessellation over
+    * several vertex/tiler iterations.
+    */
+   const bool single_csg = dev->tess_opt.single_csg && !indirect && !nested &&
+                           direct_patches <= max_patches;
    const uint64_t prims_generated =
       gs ? 0 : cmdbuf->state.gfx.prims_generated_query.ptr;
    const uint32_t view_count =
@@ -5657,24 +5759,36 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
     cs_store32(b, once_reset, pass_addr, 4);
     cs_flush_stores(b);
 
-   panlib_tess_setup(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu, src,
-                     draw->indirect.count_buffer_dev_addr,
-                     draw->indirect.buffer_dev_addr ? draw->indirect.draw_index : 0);
-   cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+   /* csf-v11 tess-setup-step: the first panlib_tess_setup_step() of the
+    * loop does the setup and the predicate drop below, one dispatch and
+    * three CS load waits fewer per draw. PANVK_TESS_SETUP_STEP=0 keeps the
+    * separate setup dispatch and the CS once-block.
+    */
+   const bool setup_in_step = dev->tess_opt.setup_in_step;
+   const uint64_t count_buf = draw->indirect.count_buffer_dev_addr;
+   const uint32_t draw_index =
+      draw->indirect.buffer_dev_addr ? draw->indirect.draw_index : 0;
+
+   if (!setup_in_step) {
+      panlib_tess_setup(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu, src,
+                        count_buf, draw_index);
+      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+   }
 
    /* No C-level exit from a cs_while body, it would leave the block open.
     * Allocation failures are recorded on the command buffer instead.
     */
    bool ok = true;
    cs_while(b, MALI_CS_CONDITION_ALWAYS, cs_undef()) {
-      gpu_prerast_sync32_take(cmdbuf, PANVK_SUBQUEUE_COMPUTE,
-                              PANVK_QUEUE_TESS_FREE_SYNC_OFFSET);
+      /* single_csg: the vertex side never gives the cell back, see above. */
+      if (!single_csg)
+         gpu_prerast_sync32_take(cmdbuf, PANVK_SUBQUEUE_COMPUTE, free_sync);
 
       /* First iteration only: setup has copied the API draw. Drop it when
        * the predicate says not to render. Later iterations already see
        * total_patches == 0. pass_mem[1] is the once-only flag.
        */
-      {
+      if (!setup_in_step) {
          struct cs_index once = gpu_prerast_load_flag(b, pass_mem.gpu + 4);
          struct cs_index zero = cs_scratch_reg32(b, 2);
          struct cs_index dst = cs_scratch_reg64(b, 4);
@@ -5709,8 +5823,15 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
          }
       }
 
-      panlib_tess_step(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
-                       tcs_stat);
+      /* panlib_* launchers are brace-block macros: no bare if/else. */
+      if (setup_in_step) {
+         panlib_tess_setup_step(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE,
+                                td.gpu, tcs_stat, src, count_buf, draw_index,
+                                pass_mem.gpu);
+      } else {
+         panlib_tess_step(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
+                          tcs_stat);
+      }
       cs_wait_slots(b, dev->csf.sb.all_iters_mask);
 
       ok &= gpu_prerast_vs(cmdbuf, &vs_src, vs, arena,
@@ -5734,15 +5855,27 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
                                  push.gpu, tsd, &tcs_dispatch);
       cs_wait_slots(b, dev->csf.sb.all_iters_mask);
 
-      panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p), domain,
-                        POLY_TESS_MODE_COUNT);
-      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
-      panlib_tess_draw(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
-                       c_invs, c_prims, prims_generated);
-      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
-      panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p), domain,
-                        POLY_TESS_MODE_WITH_COUNTS);
-      cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+      if (fuse) {
+         panlib_tess_count_draw(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE,
+                                td.gpu, TD(p), c_invs, c_prims,
+                                prims_generated, fuse_gen, domain);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         if (!fuse_gen) {
+            panlib_tess_gen(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p),
+                            domain);
+            cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         }
+      } else {
+         panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p),
+                           domain, POLY_TESS_MODE_COUNT);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         panlib_tess_draw(&ctx, panlib_1d(1), PANLIB_BARRIER_NONE, td.gpu,
+                          c_invs, c_prims, prims_generated);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+         panlib_tessellate(&ctx, tess_grid, PANLIB_BARRIER_NONE, TD(p),
+                           domain, POLY_TESS_MODE_WITH_COUNTS);
+         cs_wait_slots(b, dev->csf.sb.all_iters_mask);
+      }
 
       if (nested) {
          /* TES as the gpu_prerast VS over this iteration's index range. */
@@ -5805,7 +5938,7 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
       }
 
       gpu_prerast_sync32_give(cmdbuf, PANVK_SUBQUEUE_COMPUTE,
-                              PANVK_QUEUE_TESS_READY_SYNC_OFFSET);
+                              ready_sync);
       cs_loop_conditional_break(b, __loop, MALI_CS_CONDITION_EQUAL,
                                 gpu_prerast_load_flag(b, TD(more)));
    }
@@ -5820,7 +5953,7 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
    struct panvk_draw_info raster = out;
    cs_while(vt, MALI_CS_CONDITION_ALWAYS, cs_undef()) {
       gpu_prerast_sync32_take(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
-                              PANVK_QUEUE_TESS_READY_SYNC_OFFSET);
+                              ready_sync);
 
       cmdbuf->state.gfx.vs.shader = tes;
       gfx_state_set_dirty(cmdbuf, VS);
@@ -5838,17 +5971,23 @@ gpu_prerast_tess(struct panvk_cmd_buffer *cmdbuf,
       gfx_state_set_dirty(cmdbuf, VS);
       gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
 
-      /* Read "more" before giving the arenas back, the next compute
-       * iteration rewrites it.
-       */
-      cs_wait_slots(vt, dev->csf.sb.all_iters_mask);
-      struct cs_index more = gpu_prerast_load_flag(vt, TD(more));
-      struct cs_index more_keep = cs_scratch_reg32(vt, 4);
-      cs_add_imm32(vt, more_keep, more, 0);
-      gpu_prerast_sync32_give(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
-                              PANVK_QUEUE_TESS_FREE_SYNC_OFFSET);
-      cs_loop_conditional_break(vt, __loop, MALI_CS_CONDITION_EQUAL,
-                                more_keep);
+      if (single_csg) {
+         /* WP3: one compute iteration, and it never took the free cell, so
+          * there is no "more" to read and nothing to give back. */
+         cs_break(vt);
+      } else {
+         /* Read "more" before giving the arenas back, the next compute
+          * iteration rewrites it.
+          */
+         cs_wait_slots(vt, dev->csf.sb.all_iters_mask);
+         struct cs_index more = gpu_prerast_load_flag(vt, TD(more));
+         struct cs_index more_keep = cs_scratch_reg32(vt, 4);
+         cs_add_imm32(vt, more_keep, more, 0);
+         gpu_prerast_sync32_give(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
+                                 free_sync);
+         cs_loop_conditional_break(vt, __loop, MALI_CS_CONDITION_EQUAL,
+                                   more_keep);
+      }
    }
 #undef TD
 
@@ -6560,7 +6699,35 @@ static unsigned long long rc38_draws_skipped;
 static unsigned long long rc38_draws_no_fs;
 
 static void
+panvk_cmd_draw_inner(struct panvk_cmd_buffer *cmdbuf,
+                     struct panvk_draw_info draw);
+
+/* Item 8 (perf plan): an API draw with a pass-through GS (pt_skip) runs the
+ * VS on the hardware without the GS, unless a pipeline statistics query
+ * needs the GS counters. */
+static void
 panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
+{
+   const struct panvk_shader *gs = cmdbuf->state.gfx.gs.shader;
+   const struct panvk_shader *eff = gs;
+
+   if (!draw.gpu_prerast_generated && gs && gs->gpu_prerast.gs.pt_skip &&
+       !cmdbuf->state.gfx.pstats_query.report)
+      eff = NULL;
+   if (eff != cmdbuf->state.gfx.gs_pt_last) {
+      gfx_state_set_dirty(cmdbuf, VS);
+      gfx_state_set_dirty(cmdbuf, VS_PUSH_UNIFORMS);
+      gfx_state_set_dirty(cmdbuf, FS);
+      cmdbuf->state.gfx.gs_pt_last = eff;
+   }
+   cmdbuf->state.gfx.gs.shader = eff;
+   panvk_cmd_draw_inner(cmdbuf, draw);
+   cmdbuf->state.gfx.gs.shader = gs;
+}
+
+static void
+panvk_cmd_draw_inner(struct panvk_cmd_buffer *cmdbuf,
+                     struct panvk_draw_info draw)
 {
    const struct panvk_shader_variant *vs =
       raster_vs_variant(cmdbuf, draw.gpu_prerast_generated);
@@ -6681,7 +6848,18 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
       draw.pstats_counted = true;
    }
 
-   if (gpu_prerast_wanted(cmdbuf, &draw) && gpu_prerast_split(cmdbuf, &draw))
+   /* A5 (115): evaluated once. A draw gpu_prerast does not want (none of
+    * its triggers, see gpu_prerast_needed()) can never be lowered either:
+    * gpu_prerast_can_lower() needs one of the same triggers or
+    * PANVK_DEBUG=gpu_prerast. Such a draw skips gpu_prerast_draw() and the
+    * second gpu_prerast_needed() below. PANVK_PRERAST_FAST_SKIP=0 runs
+    * them, as in 114.
+    */
+   const bool prerast_wanted = gpu_prerast_wanted(cmdbuf, &draw);
+   const bool prerast_skip = PANVK_PERF(PRERAST_FAST_SKIP) &&
+                             !prerast_wanted && !PANVK_DEBUG(GPU_PRERAST);
+
+   if (prerast_wanted && gpu_prerast_split(cmdbuf, &draw))
       return;
 
    /* A split chunk that falls back to IDVS has no instance ID offset: shift
@@ -6703,6 +6881,15 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
     * fs.required being initialized. */
    cmdbuf->state.gfx.fs.required =
       fs_required(&cmdbuf->state.gfx, &cmdbuf->vk.dynamic_graphics_state);
+
+   /* A1: the first draw that runs the FS after draws that did not (see
+    * clear_dirty_after_draw()) emits its state again.
+    */
+   if (cmdbuf->state.gfx.fs.unused && cmdbuf->state.gfx.fs.required) {
+      cmdbuf->state.gfx.fs.unused = false;
+      gfx_state_set_dirty(cmdbuf, FS);
+      gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);
+   }
 
    if (cmdbuf->state.gfx.vi.base_instance != draw.instance.base) {
       cmdbuf->state.gfx.vi.base_instance = draw.instance.base;
@@ -6727,12 +6914,14 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info draw)
       return;
    }
 
-   if (!draw.gpu_prerast_generated && gpu_prerast_draw(cmdbuf, &draw))
-      return;
+   if (!prerast_skip) {
+      if (!draw.gpu_prerast_generated && gpu_prerast_draw(cmdbuf, &draw))
+         return;
 
-   if (gpu_prerast_needed(cmdbuf, &draw)) {
-      gpu_prerast_unhandled("shader variants missing");
-      return;
+      if (gpu_prerast_needed(cmdbuf, &draw)) {
+         gpu_prerast_unhandled("shader variants missing");
+         return;
+      }
    }
 
    /* For indirect draws, we need to patch the descriptors we just emitted */
@@ -8532,6 +8721,14 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
                        cmdbuf->state.gfx.oq_chain_pending;
    cmdbuf->state.gfx.oq_chain_pending = false;
 
+   /* C4 (115): what these jobs write, for the preload barrier of later
+    * passes. A secondary that continues the primary's pass does not know
+    * the attachments.
+    */
+   panvk_per_arch(cmd_track_frag_writes)(cmdbuf);
+   if (inherits_render_ctx(cmdbuf))
+      cmdbuf->state.gfx.frag_written.overflow = true;
+
    /* Now initialize the fragment bits. */
    cs_update_frag_ctx(b) {
 #if PAN_ARCH >= 14
@@ -9423,6 +9620,8 @@ panvk_per_arch(CmdSetDescriptorBufferOffsetsEXT)(
    if (!desc_state)
       return;
 
+   bool changed = false;
+
    for (uint32_t i = 0; i < setCount; i++) {
       uint32_t set_idx = firstSet + i;
       if (set_idx >= MAX_SETS)
@@ -9437,10 +9636,23 @@ panvk_per_arch(CmdSetDescriptorBufferOffsetsEXT)(
          to_panvk_descriptor_set_layout(playout->set_layouts[set_idx]) : NULL;
       uint32_t desc_count = set_layout ? set_layout->desc_count : 0;
 
-      desc_state->sets[set_idx] = NULL;
-      desc_state->desc_buffer_sets[set_idx].dev_addr = base_addr ? (base_addr + offset) : 0;
-      desc_state->desc_buffer_sets[set_idx].size = desc_count * PANVK_DESCRIPTOR_SIZE;
+      uint64_t dev_addr = base_addr ? (base_addr + offset) : 0;
+      uint32_t size = desc_count * PANVK_DESCRIPTOR_SIZE;
+
+      if (desc_state->embedded_layouts[set_idx] != NULL ||
+          desc_state->sets[set_idx] != NULL ||
+          desc_state->desc_buffer_sets[set_idx].dev_addr != dev_addr ||
+          desc_state->desc_buffer_sets[set_idx].size != size) {
+         desc_state->embedded_layouts[set_idx] = NULL;
+         desc_state->sets[set_idx] = NULL;
+         desc_state->desc_buffer_sets[set_idx].dev_addr = dev_addr;
+         desc_state->desc_buffer_sets[set_idx].size = size;
+         changed = true;
+      }
    }
+
+   if (!changed)
+      return;
 
    if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       gfx_state_set_dirty(cmdbuf, DESC_STATE);
@@ -9469,6 +9681,27 @@ panvk_per_arch(CmdBindDescriptorBufferEmbeddedSamplersEXT)(
       to_panvk_descriptor_set_layout(playout->set_layouts[set]);
    if (!set_layout || !set_layout->desc_count)
       return;
+
+   /* Reuse the table built for this layout earlier in the command buffer.
+    * The immutable samplers cannot change, so the contents are identical. */
+   if (desc_state->embedded_layouts[set] == set_layout) {
+      if (desc_state->sets[set] == NULL &&
+          desc_state->desc_buffer_sets[set].dev_addr ==
+             desc_state->embedded_tables[set].dev_addr)
+         return;
+
+      desc_state->sets[set] = NULL;
+      desc_state->desc_buffer_sets[set].dev_addr =
+         desc_state->embedded_tables[set].dev_addr;
+      desc_state->desc_buffer_sets[set].size =
+         desc_state->embedded_tables[set].size;
+
+      if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+         gfx_state_set_dirty(cmdbuf, DESC_STATE);
+      else if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+         compute_state_set_dirty(cmdbuf, DESC_STATE);
+      return;
+   }
 
    /* Embedded immutable samplers have no application descriptor buffer
     * behind them: build the set's descriptor table in command buffer
@@ -9503,6 +9736,10 @@ panvk_per_arch(CmdBindDescriptorBufferEmbeddedSamplersEXT)(
          }
       }
    }
+
+   desc_state->embedded_layouts[set] = set_layout;
+   desc_state->embedded_tables[set].dev_addr = ptr.gpu;
+   desc_state->embedded_tables[set].size = size;
 
    desc_state->sets[set] = NULL;
    desc_state->desc_buffer_sets[set].dev_addr = ptr.gpu;
